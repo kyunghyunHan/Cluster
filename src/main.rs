@@ -18,6 +18,8 @@ enum ComponentKind {
     Diode,
     Led,
     Switch,
+    PushButton,
+    SlideSwitch,
     Ground,
     VSource,
     ISource,
@@ -25,6 +27,14 @@ enum ComponentKind {
     OpAmp,
     Lamp,
     Esp32,
+    Esp32S3,
+    Esp32C3,
+    ArduinoUno,
+    RaspberryPiPico,
+    Breadboard,
+    Relay,
+    DcMotor,
+    Servo,
     Oled,
     Sensor,
 }
@@ -70,9 +80,9 @@ enum Selection {
 }
 
 #[derive(Debug, Clone)]
-struct DragState {
-    id: u64,
-    offset: Vec2,
+enum DragState {
+    Component { id: u64, offset: Vec2 },
+    WirePoint { wire_id: u64, point_index: usize },
 }
 
 #[derive(Default)]
@@ -90,6 +100,12 @@ struct Counters {
     opamp: usize,
     lamp: usize,
     esp32: usize,
+    arduino: usize,
+    pico: usize,
+    breadboard: usize,
+    relay: usize,
+    motor: usize,
+    servo: usize,
     oled: usize,
     sensor: usize,
 }
@@ -159,7 +175,7 @@ impl CircuitApp {
                 self.counters.led += 1;
                 format!("LED{}", self.counters.led)
             }
-            ComponentKind::Switch => {
+            ComponentKind::Switch | ComponentKind::PushButton | ComponentKind::SlideSwitch => {
                 self.counters.switch += 1;
                 format!("SW{}", self.counters.switch)
             }
@@ -191,9 +207,33 @@ impl CircuitApp {
                 self.counters.lamp += 1;
                 format!("LA{}", self.counters.lamp)
             }
-            ComponentKind::Esp32 => {
+            ComponentKind::Esp32 | ComponentKind::Esp32S3 | ComponentKind::Esp32C3 => {
                 self.counters.esp32 += 1;
                 format!("ESP{}", self.counters.esp32)
+            }
+            ComponentKind::ArduinoUno => {
+                self.counters.arduino += 1;
+                format!("ARD{}", self.counters.arduino)
+            }
+            ComponentKind::RaspberryPiPico => {
+                self.counters.pico += 1;
+                format!("PICO{}", self.counters.pico)
+            }
+            ComponentKind::Breadboard => {
+                self.counters.breadboard += 1;
+                format!("BB{}", self.counters.breadboard)
+            }
+            ComponentKind::Relay => {
+                self.counters.relay += 1;
+                format!("K{}", self.counters.relay)
+            }
+            ComponentKind::DcMotor => {
+                self.counters.motor += 1;
+                format!("M{}", self.counters.motor)
+            }
+            ComponentKind::Servo => {
+                self.counters.servo += 1;
+                format!("SV{}", self.counters.servo)
             }
             ComponentKind::Oled => {
                 self.counters.oled += 1;
@@ -214,6 +254,8 @@ impl CircuitApp {
             ComponentKind::Diode => "1N4148".to_string(),
             ComponentKind::Led => "red".to_string(),
             ComponentKind::Switch => "closed".to_string(),
+            ComponentKind::PushButton => "open".to_string(),
+            ComponentKind::SlideSwitch => "closed".to_string(),
             ComponentKind::Ground => "0V".to_string(),
             ComponentKind::VSource => "5V".to_string(),
             ComponentKind::ISource => "10mA".to_string(),
@@ -221,12 +263,25 @@ impl CircuitApp {
             ComponentKind::OpAmp => "LM358".to_string(),
             ComponentKind::Lamp => "12V".to_string(),
             ComponentKind::Esp32 => "ESP32-WROOM".to_string(),
+            ComponentKind::Esp32S3 => "ESP32-S3 DevKit".to_string(),
+            ComponentKind::Esp32C3 => "ESP32-C3 Mini".to_string(),
+            ComponentKind::ArduinoUno => "ATmega328P".to_string(),
+            ComponentKind::RaspberryPiPico => "RP2040".to_string(),
+            ComponentKind::Breadboard => "400 tie".to_string(),
+            ComponentKind::Relay => "5V coil".to_string(),
+            ComponentKind::DcMotor => "6V DC".to_string(),
+            ComponentKind::Servo => "PWM servo".to_string(),
             ComponentKind::Oled => "0.96 I2C".to_string(),
             ComponentKind::Sensor => "I2C sensor".to_string(),
         }
     }
 
     fn add_component(&mut self, kind: ComponentKind, pos: Pos2) {
+        self.place_component(kind, pos);
+        self.status = "Component placed. Drag to reposition, R to rotate.".to_string();
+    }
+
+    fn place_component(&mut self, kind: ComponentKind, pos: Pos2) -> u64 {
         let label = self.next_label(kind);
         let id = self.next_id();
         self.components.push(Component {
@@ -237,7 +292,7 @@ impl CircuitApp {
             label,
             value: Self::default_value(kind),
         });
-        self.status = "Component placed. Drag to reposition, R to rotate.".to_string();
+        id
     }
 
     fn add_wire(&mut self, points: Vec<Pos2>) {
@@ -248,6 +303,90 @@ impl CircuitApp {
         let id = self.next_id();
         self.wires.push(Wire { id, points });
         self.status = "Wire placed.".to_string();
+    }
+
+    fn reset_canvas(&mut self) {
+        self.components.clear();
+        self.wires.clear();
+        self.selected = None;
+        self.drag = None;
+        self.draft_wire.clear();
+        self.counters = Counters::default();
+        self.next_id = 1;
+        self.tool = Tool::Select;
+    }
+
+    fn add_wire_between(&mut self, a_id: u64, a_pin: &str, b_id: u64, b_pin: &str) {
+        let Some(a) = self.pin_pos(a_id, a_pin) else {
+            return;
+        };
+        let Some(b) = self.pin_pos(b_id, b_pin) else {
+            return;
+        };
+        let corner = if (a.x - b.x).abs() >= (a.y - b.y).abs() {
+            Pos2::new(b.x, a.y)
+        } else {
+            Pos2::new(a.x, b.y)
+        };
+        self.add_wire(vec![a, corner, b]);
+    }
+
+    fn pin_pos(&self, component_id: u64, label: &str) -> Option<Pos2> {
+        let component = self
+            .components
+            .iter()
+            .find(|component| component.id == component_id)?;
+        component_pin_defs(component)
+            .into_iter()
+            .find(|pin| pin.label == label || pin.label.contains(label))
+            .map(|pin| pin.pos)
+    }
+
+    fn load_led_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(180.0, 390.0));
+        let resistor = self.place_component(ComponentKind::Resistor, Pos2::new(360.0, 220.0));
+        let led = self.place_component(ComponentKind::Led, Pos2::new(540.0, 220.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(720.0, 400.0));
+
+        self.add_wire_between(battery, "+", resistor, "A");
+        self.add_wire_between(resistor, "B", led, "A");
+        self.add_wire_between(led, "B", ground, "GND");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.status = "Loaded LED current-limiting demo.".to_string();
+    }
+
+    fn load_esp32_oled_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(170.0, 380.0));
+        let esp32 = self.place_component(ComponentKind::Esp32, Pos2::new(430.0, 310.0));
+        let oled = self.place_component(ComponentKind::Oled, Pos2::new(720.0, 300.0));
+
+        self.add_wire_between(battery, "+", esp32, "VIN");
+        self.add_wire_between(battery, "-", esp32, "GND");
+        self.add_wire_between(esp32, "3V3", oled, "VCC");
+        self.add_wire_between(esp32, "GND", oled, "GND");
+        self.add_wire_between(esp32, "GPIO21", oled, "SDA");
+        self.add_wire_between(esp32, "GPIO22", oled, "SCL");
+        self.status = "Loaded ESP32 + OLED I2C demo.".to_string();
+    }
+
+    fn load_motor_relay_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(170.0, 380.0));
+        let button = self.place_component(ComponentKind::PushButton, Pos2::new(360.0, 470.0));
+        let relay = self.place_component(ComponentKind::Relay, Pos2::new(560.0, 360.0));
+        let motor = self.place_component(ComponentKind::DcMotor, Pos2::new(780.0, 280.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(780.0, 500.0));
+
+        self.add_wire_between(battery, "+", relay, "COIL+");
+        self.add_wire_between(relay, "COIL-", button, "A");
+        self.add_wire_between(button, "B", ground, "GND");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.add_wire_between(battery, "+", motor, "+");
+        self.add_wire_between(motor, "-", relay, "COM");
+        self.add_wire_between(relay, "NO", ground, "GND");
+        self.status = "Loaded relay-controlled motor demo.".to_string();
     }
 
     fn push_wire_point(&mut self, pos: Pos2) {
@@ -319,6 +458,8 @@ impl eframe::App for CircuitApp {
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                ui.strong("Cluster");
+                ui.separator();
                 if ui
                     .selectable_label(self.tool == Tool::Select, "Select")
                     .clicked()
@@ -355,112 +496,160 @@ impl eframe::App for CircuitApp {
             });
         });
 
-        egui::SidePanel::left("palette").show(ctx, |ui| {
-            ui.heading("Parts");
-            ui.label("Passives");
-            part_button(ui, self, "Resistor", ComponentKind::Resistor);
-            part_button(ui, self, "Capacitor", ComponentKind::Capacitor);
-            part_button(ui, self, "Inductor", ComponentKind::Inductor);
-            part_button(ui, self, "Lamp", ComponentKind::Lamp);
-            ui.separator();
-            ui.label("Semiconductors");
-            part_button(ui, self, "Diode", ComponentKind::Diode);
-            part_button(ui, self, "LED", ComponentKind::Led);
-            part_button(ui, self, "Op Amp", ComponentKind::OpAmp);
-            ui.separator();
-            ui.label("Sources and IO");
-            part_button(ui, self, "Ground", ComponentKind::Ground);
-            part_button(ui, self, "Voltage Source", ComponentKind::VSource);
-            part_button(ui, self, "Current Source", ComponentKind::ISource);
-            part_button(ui, self, "Battery", ComponentKind::Battery);
-            part_button(ui, self, "Switch", ComponentKind::Switch);
-            ui.separator();
-            ui.label("Modules");
-            part_button(ui, self, "ESP32", ComponentKind::Esp32);
-            part_button(ui, self, "OLED I2C", ComponentKind::Oled);
-            part_button(ui, self, "Sensor", ComponentKind::Sensor);
-            ui.separator();
-            ui.label(format!("{} parts", self.components.len()));
-            ui.label(format!("{} wires", self.wires.len()));
-            if self.simulate {
-                let simulation = analyze_circuit(&self.components, &self.wires);
-                if simulation.shorted {
-                    ui.colored_label(Color32::from_rgb(255, 95, 80), &simulation.summary);
-                } else if simulation.closed {
-                    ui.colored_label(Color32::from_rgb(255, 185, 80), &simulation.summary);
-                } else {
-                    ui.colored_label(Color32::from_rgb(150, 155, 165), &simulation.summary);
+        egui::SidePanel::left("palette")
+            .default_width(172.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.heading("Parts");
+                ui.label("Passives");
+                part_button(ui, self, "Resistor", ComponentKind::Resistor);
+                part_button(ui, self, "Capacitor", ComponentKind::Capacitor);
+                part_button(ui, self, "Inductor", ComponentKind::Inductor);
+                part_button(ui, self, "Lamp", ComponentKind::Lamp);
+                ui.separator();
+                ui.label("Semiconductors");
+                part_button(ui, self, "Diode", ComponentKind::Diode);
+                part_button(ui, self, "LED", ComponentKind::Led);
+                part_button(ui, self, "Op Amp", ComponentKind::OpAmp);
+                ui.separator();
+                ui.label("Sources and IO");
+                part_button(ui, self, "Ground", ComponentKind::Ground);
+                part_button(ui, self, "Voltage Source", ComponentKind::VSource);
+                part_button(ui, self, "Current Source", ComponentKind::ISource);
+                part_button(ui, self, "Battery", ComponentKind::Battery);
+                part_button(ui, self, "Switch", ComponentKind::Switch);
+                part_button(ui, self, "Push Button", ComponentKind::PushButton);
+                part_button(ui, self, "Slide Switch", ComponentKind::SlideSwitch);
+                ui.separator();
+                ui.label("Modules");
+                part_button(ui, self, "ESP32 WROOM", ComponentKind::Esp32);
+                part_button(ui, self, "ESP32-S3", ComponentKind::Esp32S3);
+                part_button(ui, self, "ESP32-C3", ComponentKind::Esp32C3);
+                part_button(ui, self, "Arduino UNO", ComponentKind::ArduinoUno);
+                part_button(ui, self, "Pi Pico", ComponentKind::RaspberryPiPico);
+                part_button(ui, self, "Breadboard", ComponentKind::Breadboard);
+                part_button(ui, self, "OLED I2C", ComponentKind::Oled);
+                part_button(ui, self, "Sensor", ComponentKind::Sensor);
+                ui.separator();
+                ui.label("Actuators");
+                part_button(ui, self, "Relay", ComponentKind::Relay);
+                part_button(ui, self, "DC Motor", ComponentKind::DcMotor);
+                part_button(ui, self, "Servo", ComponentKind::Servo);
+                ui.separator();
+                ui.label("Examples");
+                if ui.button("LED Circuit").clicked() {
+                    self.load_led_demo();
                 }
-                if let Some(voltage) = simulation.voltage {
-                    ui.label(format!("V: {:.2} V", voltage));
+                if ui.button("ESP32 + OLED").clicked() {
+                    self.load_esp32_oled_demo();
                 }
-                if let Some(resistance) = simulation.resistance {
-                    ui.label(format!("R: {}", format_resistance(resistance)));
+                if ui.button("Relay + Motor").clicked() {
+                    self.load_motor_relay_demo();
                 }
-                if let Some(current) = simulation.current {
-                    ui.label(format!("I: {}", format_current(current)));
+                if ui.button("Blank").clicked() {
+                    self.reset_canvas();
+                    self.status = "Blank schematic ready.".to_string();
                 }
-                for detail in simulation.details.iter().take(4) {
-                    ui.label(detail);
+                ui.separator();
+                ui.label(format!("{} parts", self.components.len()));
+                ui.label(format!("{} wires", self.wires.len()));
+                if self.simulate {
+                    let simulation = analyze_circuit(&self.components, &self.wires);
+                    if simulation.shorted {
+                        ui.colored_label(Color32::from_rgb(255, 95, 80), &simulation.summary);
+                    } else if simulation.closed {
+                        ui.colored_label(Color32::from_rgb(255, 185, 80), &simulation.summary);
+                    } else {
+                        ui.colored_label(Color32::from_rgb(150, 155, 165), &simulation.summary);
+                    }
+                    if let Some(voltage) = simulation.voltage {
+                        ui.label(format!("V: {:.2} V", voltage));
+                    }
+                    if let Some(resistance) = simulation.resistance {
+                        ui.label(format!("R: {}", format_resistance(resistance)));
+                    }
+                    if let Some(current) = simulation.current {
+                        ui.label(format!("I: {}", format_current(current)));
+                    }
+                    for detail in simulation.details.iter().take(4) {
+                        ui.label(detail);
+                    }
                 }
-            }
-            ui.separator();
-            ui.label("Shortcuts");
-            ui.label("R rotate");
-            ui.label("Del delete");
-            ui.label("Enter finish wire");
-            ui.label("Esc select");
-        });
+                ui.separator();
+                ui.label("Shortcuts");
+                ui.label("R rotate");
+                ui.label("Del delete");
+                ui.label("Enter finish wire");
+                ui.label("Esc select");
+            });
 
-        egui::SidePanel::right("inspector").show(ctx, |ui| {
-            ui.heading("Inspector");
-            match self.selected {
-                Some(Selection::Component(id)) => {
-                    if let Some(component) = self.components.iter_mut().find(|c| c.id == id) {
-                        ui.label(format!("Kind: {:?}", component.kind));
-                        ui.horizontal(|ui| {
-                            ui.label("Label");
-                            ui.text_edit_singleline(&mut component.label);
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Value");
-                            ui.text_edit_singleline(&mut component.value);
-                        });
-                        if component.kind == ComponentKind::Switch {
-                            let mut closed = component_conductance(component) != Conductance::Open;
-                            if ui.checkbox(&mut closed, "Closed").changed() {
-                                component.value = if closed {
-                                    "closed".to_string()
-                                } else {
-                                    "open".to_string()
-                                };
+        egui::SidePanel::right("inspector")
+            .default_width(220.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.heading("Inspector");
+                match self.selected {
+                    Some(Selection::Component(id)) => {
+                        if let Some(component) = self.components.iter_mut().find(|c| c.id == id) {
+                            ui.label(format!("Kind: {:?}", component.kind));
+                            ui.horizontal(|ui| {
+                                ui.label("Label");
+                                ui.text_edit_singleline(&mut component.label);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Value");
+                                ui.text_edit_singleline(&mut component.value);
+                            });
+                            if component_is_switch(component.kind) {
+                                let mut closed =
+                                    component_conductance(component) != Conductance::Open;
+                                if ui.checkbox(&mut closed, "Closed").changed() {
+                                    component.value = if closed {
+                                        "closed".to_string()
+                                    } else {
+                                        "open".to_string()
+                                    };
+                                }
                             }
-                        }
-                        ui.label(format!("Rotation: {}°", component.rotation));
-                        ui.label(format!(
-                            "Position: {:.0}, {:.0}",
-                            component.pos.x, component.pos.y
-                        ));
-                        if component_is_module(component) {
-                            ui.separator();
-                            ui.label("Pins");
-                            for pin in component_pin_defs(component) {
-                                ui.label(format!("{}  {:?}", pin.label, pin.role));
+                            ui.label(format!("Rotation: {}°", component.rotation));
+                            ui.label(format!(
+                                "Position: {:.0}, {:.0}",
+                                component.pos.x, component.pos.y
+                            ));
+                            if component_is_module(component) {
+                                ui.separator();
+                                ui.label("Pins");
+                                for pin in component_pin_defs(component) {
+                                    ui.label(format!("{}  {:?}", pin.label, pin.role));
+                                }
                             }
                         }
                     }
-                }
-                Some(Selection::Wire(id)) => {
-                    if let Some(wire) = self.wires.iter().find(|w| w.id == id) {
-                        ui.label("Kind: Wire");
-                        ui.label(format!("Points: {}", wire.points.len()));
-                        ui.label(format!("Length: {:.0}px", wire_length(wire)));
+                    Some(Selection::Wire(id)) => {
+                        if let Some(wire) = self.wires.iter().find(|w| w.id == id) {
+                            ui.label("Kind: Wire");
+                            ui.label(format!("Points: {}", wire.points.len()));
+                            ui.label(format!("Length: {:.0}px", wire_length(wire)));
+                        }
+                    }
+                    None => {
+                        ui.label("Nothing selected");
                     }
                 }
-                None => {
-                    ui.label("Nothing selected");
-                }
-            }
+            });
+
+        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("Tool: {:?}", self.tool));
+                ui.separator();
+                ui.label(format!("Grid: {:.0}px", self.grid));
+                ui.separator();
+                ui.label(selection_summary(
+                    self.selected,
+                    &self.components,
+                    &self.wires,
+                ));
+            });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -503,6 +692,7 @@ impl eframe::App for CircuitApp {
             }
 
             draw_junctions(&painter, &self.wires);
+            draw_title_block(&painter, rect, &self.components, &self.wires, &simulation);
 
             let hover_pos = ui.input(|i| i.pointer.hover_pos());
             let pointer_in_rect = hover_pos.filter(|pos| rect.contains(*pos));
@@ -561,11 +751,27 @@ impl eframe::App for CircuitApp {
             if response.drag_started() {
                 if self.tool == Tool::Select {
                     if let Some(pos) = pointer_in_rect {
-                        if let Some(Selection::Component(id)) =
+                        if let Some((wire_id, point_index)) =
+                            hit_test_wire_control_point(pos, &self.wires)
+                        {
+                            self.drag = Some(DragState::WirePoint {
+                                wire_id,
+                                point_index,
+                            });
+                            self.selected = Some(Selection::Wire(wire_id));
+                        } else if let Some((wire_id, point_index)) =
+                            insert_wire_control_point(pos, &mut self.wires)
+                        {
+                            self.drag = Some(DragState::WirePoint {
+                                wire_id,
+                                point_index,
+                            });
+                            self.selected = Some(Selection::Wire(wire_id));
+                        } else if let Some(Selection::Component(id)) =
                             hit_test_component(pos, &self.components)
                         {
                             if let Some(component) = self.components.iter().find(|c| c.id == id) {
-                                self.drag = Some(DragState {
+                                self.drag = Some(DragState::Component {
                                     id,
                                     offset: pos - component.pos,
                                 });
@@ -578,12 +784,23 @@ impl eframe::App for CircuitApp {
 
             if response.dragged() {
                 if let (Some(drag), Some(pos)) = (self.drag.clone(), pointer_in_rect) {
-                    if let Some(index) = self.components.iter().position(|c| c.id == drag.id) {
-                        let old_pins = component_pins(&self.components[index]);
-                        let pos = snap_pos(pos, rect, self.grid, self.snap);
-                        self.components[index].pos = pos - drag.offset;
-                        let new_pins = component_pins(&self.components[index]);
-                        move_attached_wire_endpoints(&mut self.wires, &old_pins, &new_pins);
+                    match drag {
+                        DragState::Component { id, offset } => {
+                            if let Some(index) = self.components.iter().position(|c| c.id == id) {
+                                let old_pins = component_pins(&self.components[index]);
+                                let pos = snap_pos(pos, rect, self.grid, self.snap);
+                                self.components[index].pos = pos - offset;
+                                let new_pins = component_pins(&self.components[index]);
+                                move_attached_wire_endpoints(&mut self.wires, &old_pins, &new_pins);
+                            }
+                        }
+                        DragState::WirePoint {
+                            wire_id,
+                            point_index,
+                        } => {
+                            let pos = snap_pos(pos, rect, self.grid, self.snap);
+                            move_wire_control_point(&mut self.wires, wire_id, point_index, pos);
+                        }
                     }
                 }
             }
@@ -638,6 +855,26 @@ fn hit_test(pos: Pos2, components: &[Component], wires: &[Wire]) -> Option<Selec
     None
 }
 
+fn selection_summary(
+    selected: Option<Selection>,
+    components: &[Component],
+    wires: &[Wire],
+) -> String {
+    match selected {
+        Some(Selection::Component(id)) => components
+            .iter()
+            .find(|component| component.id == id)
+            .map(|component| format!("Selected: {}", component.label))
+            .unwrap_or_else(|| "Selected: missing component".to_string()),
+        Some(Selection::Wire(id)) => wires
+            .iter()
+            .find(|wire| wire.id == id)
+            .map(|wire| format!("Selected: wire {:.0}px", wire_length(wire)))
+            .unwrap_or_else(|| "Selected: missing wire".to_string()),
+        None => "Selected: none".to_string(),
+    }
+}
+
 fn hit_test_component(pos: Pos2, components: &[Component]) -> Option<Selection> {
     for component in components.iter().rev() {
         if component_bounds(component).contains(pos) {
@@ -659,6 +896,77 @@ fn hit_test_wire(pos: Pos2, wires: &[Wire]) -> Option<Selection> {
         }
     }
     None
+}
+
+fn hit_test_wire_control_point(pos: Pos2, wires: &[Wire]) -> Option<(u64, usize)> {
+    let threshold = 9.0;
+    for wire in wires.iter().rev() {
+        for (index, point) in wire.points.iter().enumerate() {
+            if pos.distance(*point) <= threshold {
+                return Some((wire.id, index));
+            }
+        }
+    }
+    None
+}
+
+fn insert_wire_control_point(pos: Pos2, wires: &mut [Wire]) -> Option<(u64, usize)> {
+    let threshold = 10.0;
+    for wire in wires.iter_mut().rev() {
+        for index in 0..wire.points.len().saturating_sub(1) {
+            let a = wire.points[index];
+            let b = wire.points[index + 1];
+            if distance_to_segment(pos, a, b) <= threshold {
+                let horizontal = (a.y - b.y).abs() <= 0.5;
+                let vertical = (a.x - b.x).abs() <= 0.5;
+                let inserted = if horizontal {
+                    Pos2::new(pos.x.clamp(a.x.min(b.x), a.x.max(b.x)), a.y)
+                } else if vertical {
+                    Pos2::new(a.x, pos.y.clamp(a.y.min(b.y), a.y.max(b.y)))
+                } else {
+                    closest_point_on_segment(pos, a, b)
+                };
+                wire.points.insert(index + 1, inserted);
+                return Some((wire.id, index + 1));
+            }
+        }
+    }
+    None
+}
+
+fn move_wire_control_point(wires: &mut [Wire], wire_id: u64, point_index: usize, pos: Pos2) {
+    let Some(wire) = wires.iter_mut().find(|wire| wire.id == wire_id) else {
+        return;
+    };
+    if point_index >= wire.points.len() {
+        return;
+    }
+    wire.points[point_index] = pos;
+    straighten_neighbor_segments(wire, point_index);
+}
+
+fn straighten_neighbor_segments(wire: &mut Wire, point_index: usize) {
+    let point = wire.points[point_index];
+    if point_index > 0 {
+        let prev = wire.points[point_index - 1];
+        let dx = (point.x - prev.x).abs();
+        let dy = (point.y - prev.y).abs();
+        if dx <= dy {
+            wire.points[point_index - 1].x = point.x;
+        } else {
+            wire.points[point_index - 1].y = point.y;
+        }
+    }
+    if point_index + 1 < wire.points.len() {
+        let next = wire.points[point_index + 1];
+        let dx = (point.x - next.x).abs();
+        let dy = (point.y - next.y).abs();
+        if dx <= dy {
+            wire.points[point_index + 1].x = point.x;
+        } else {
+            wire.points[point_index + 1].y = point.y;
+        }
+    }
 }
 
 fn snap_to_nearest_pin(pos: Pos2, components: &[Component]) -> Option<Pos2> {
@@ -687,6 +995,17 @@ fn distance_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     let t = t.clamp(0.0, 1.0);
     let closest = a + ab * t;
     (p - closest).length()
+}
+
+fn closest_point_on_segment(p: Pos2, a: Pos2, b: Pos2) -> Pos2 {
+    let ab = b - a;
+    let ap = p - a;
+    let ab_len_sq = ab.x * ab.x + ab.y * ab.y;
+    if ab_len_sq == 0.0 {
+        return a;
+    }
+    let t = ((ap.x * ab.x) + (ap.y * ab.y)) / ab_len_sq;
+    a + ab * t.clamp(0.0, 1.0)
 }
 
 fn part_button(ui: &mut egui::Ui, app: &mut CircuitApp, label: &str, kind: ComponentKind) {
@@ -1072,7 +1391,7 @@ fn validate_i2c_links(
     let mut esp_sda = Vec::new();
     let mut esp_scl = Vec::new();
     for component in components {
-        if component.kind != ComponentKind::Esp32 {
+        if !component_is_esp32(component.kind) {
             continue;
         }
         for pin in component_pin_defs(component) {
@@ -1222,7 +1541,7 @@ fn component_conductance(component: &Component) -> Conductance {
         | ComponentKind::Led
         | ComponentKind::Lamp => Conductance::Load,
         ComponentKind::Inductor => Conductance::Conductor,
-        ComponentKind::Switch => {
+        ComponentKind::Switch | ComponentKind::PushButton | ComponentKind::SlideSwitch => {
             let value = component.value.to_lowercase();
             if value.contains("open") || value.contains("off") {
                 Conductance::Open
@@ -1230,8 +1549,19 @@ fn component_conductance(component: &Component) -> Conductance {
                 Conductance::Conductor
             }
         }
-        ComponentKind::Capacitor | ComponentKind::OpAmp => Conductance::Open,
-        ComponentKind::Esp32 | ComponentKind::Oled | ComponentKind::Sensor => Conductance::Open,
+        ComponentKind::DcMotor => Conductance::Load,
+        ComponentKind::Relay => Conductance::Conductor,
+        ComponentKind::Capacitor | ComponentKind::OpAmp | ComponentKind::Breadboard => {
+            Conductance::Open
+        }
+        ComponentKind::Esp32
+        | ComponentKind::Esp32S3
+        | ComponentKind::Esp32C3
+        | ComponentKind::ArduinoUno
+        | ComponentKind::RaspberryPiPico
+        | ComponentKind::Servo
+        | ComponentKind::Oled
+        | ComponentKind::Sensor => Conductance::Open,
         ComponentKind::Ground
         | ComponentKind::VSource
         | ComponentKind::ISource
@@ -1242,7 +1572,28 @@ fn component_conductance(component: &Component) -> Conductance {
 fn component_is_powered_module(component: &Component) -> bool {
     matches!(
         component.kind,
-        ComponentKind::Esp32 | ComponentKind::Oled | ComponentKind::Sensor
+        ComponentKind::Esp32
+            | ComponentKind::Esp32S3
+            | ComponentKind::Esp32C3
+            | ComponentKind::ArduinoUno
+            | ComponentKind::RaspberryPiPico
+            | ComponentKind::Servo
+            | ComponentKind::Oled
+            | ComponentKind::Sensor
+    )
+}
+
+fn component_is_esp32(kind: ComponentKind) -> bool {
+    matches!(
+        kind,
+        ComponentKind::Esp32 | ComponentKind::Esp32S3 | ComponentKind::Esp32C3
+    )
+}
+
+fn component_is_switch(kind: ComponentKind) -> bool {
+    matches!(
+        kind,
+        ComponentKind::Switch | ComponentKind::PushButton | ComponentKind::SlideSwitch
     )
 }
 
@@ -1254,14 +1605,25 @@ fn component_bounds(component: &Component) -> Rect {
 fn component_size(component: &Component) -> Vec2 {
     let (w, h) = match component.kind {
         ComponentKind::Resistor | ComponentKind::Inductor | ComponentKind::Diode => (72.0, 28.0),
-        ComponentKind::Capacitor | ComponentKind::Switch | ComponentKind::Battery => (64.0, 32.0),
+        ComponentKind::Capacitor
+        | ComponentKind::Switch
+        | ComponentKind::PushButton
+        | ComponentKind::SlideSwitch
+        | ComponentKind::Battery => (64.0, 32.0),
         ComponentKind::Ground => (40.0, 40.0),
         ComponentKind::VSource
         | ComponentKind::ISource
         | ComponentKind::Lamp
         | ComponentKind::Led => (56.0, 56.0),
         ComponentKind::OpAmp => (82.0, 68.0),
-        ComponentKind::Esp32 => (140.0, 160.0),
+        ComponentKind::Esp32 | ComponentKind::Esp32S3 => (140.0, 160.0),
+        ComponentKind::Esp32C3 => (118.0, 138.0),
+        ComponentKind::ArduinoUno => (150.0, 190.0),
+        ComponentKind::RaspberryPiPico => (110.0, 180.0),
+        ComponentKind::Breadboard => (280.0, 160.0),
+        ComponentKind::Relay => (92.0, 70.0),
+        ComponentKind::DcMotor => (80.0, 64.0),
+        ComponentKind::Servo => (96.0, 72.0),
         ComponentKind::Oled => (100.0, 120.0),
         ComponentKind::Sensor => (96.0, 100.0),
     };
@@ -1312,6 +1674,72 @@ fn draw_grid(painter: &egui::Painter, rect: Rect, grid: f32) {
     }
 }
 
+fn draw_title_block(
+    painter: &egui::Painter,
+    canvas: Rect,
+    components: &[Component],
+    wires: &[Wire],
+    simulation: &Simulation,
+) {
+    let size = Vec2::new(250.0, 108.0);
+    let rect = Rect::from_min_size(canvas.right_bottom() - size - Vec2::new(18.0, 18.0), size);
+    painter.rect_filled(rect, 3.0, Color32::from_rgba_unmultiplied(18, 21, 25, 232));
+    painter.rect_stroke(
+        rect,
+        3.0,
+        Stroke::new(1.0, Color32::from_rgb(72, 80, 88)),
+        StrokeKind::Outside,
+    );
+    let status_color = if simulation.shorted {
+        Color32::from_rgb(255, 95, 80)
+    } else if simulation.closed {
+        Color32::from_rgb(255, 185, 80)
+    } else {
+        Color32::from_rgb(150, 155, 165)
+    };
+    painter.text(
+        rect.left_top() + Vec2::new(12.0, 10.0),
+        Align2::LEFT_TOP,
+        "CLUSTER SCHEMATIC",
+        egui::FontId::proportional(13.0),
+        Color32::from_rgb(230, 234, 238),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(rect.left() + 10.0, rect.top() + 32.0),
+            Pos2::new(rect.right() - 10.0, rect.top() + 32.0),
+        ],
+        Stroke::new(1.0, Color32::from_rgb(64, 70, 78)),
+    );
+    painter.text(
+        rect.left_top() + Vec2::new(12.0, 42.0),
+        Align2::LEFT_TOP,
+        format!(
+            "Parts  {:>2}    Wires  {:>2}",
+            components.len(),
+            wires.len()
+        ),
+        egui::FontId::monospace(11.0),
+        Color32::from_rgb(185, 195, 205),
+    );
+    painter.text(
+        rect.left_top() + Vec2::new(12.0, 62.0),
+        Align2::LEFT_TOP,
+        format!("Status {}", simulation.summary),
+        egui::FontId::monospace(11.0),
+        status_color,
+    );
+    if let Some(current) = simulation.current {
+        painter.text(
+            rect.left_top() + Vec2::new(12.0, 82.0),
+            Align2::LEFT_TOP,
+            format!("Loop   {}", format_current(current)),
+            egui::FontId::monospace(11.0),
+            Color32::from_rgb(185, 195, 205),
+        );
+    }
+}
+
 fn draw_component(
     painter: &egui::Painter,
     component: &Component,
@@ -1344,7 +1772,10 @@ fn draw_component(
         ComponentKind::Inductor => draw_inductor(painter, rect, component.rotation, stroke),
         ComponentKind::Diode => draw_diode(painter, rect, component.rotation, stroke, false),
         ComponentKind::Led => draw_led(painter, rect, component.rotation, stroke),
-        ComponentKind::Switch => draw_switch(painter, rect, component.rotation, stroke),
+        ComponentKind::Switch | ComponentKind::SlideSwitch => {
+            draw_switch(painter, rect, component.rotation, stroke)
+        }
+        ComponentKind::PushButton => draw_push_button(painter, rect, component.rotation, stroke),
         ComponentKind::Ground => draw_ground(painter, rect, component.rotation, stroke),
         ComponentKind::VSource => draw_vsource(painter, rect, component.rotation, stroke),
         ComponentKind::ISource => draw_isource(painter, rect, component.rotation, stroke),
@@ -1369,6 +1800,65 @@ fn draw_component(
             ],
             &["VIN", "GND", "GPIO18", "GPIO19", "GPIO5", "EN", "RST"],
         ),
+        ComponentKind::Esp32S3 => draw_module(
+            painter,
+            component,
+            rect,
+            stroke,
+            energized,
+            "ESP32-S3",
+            &[
+                "3V3",
+                "GND",
+                "GPIO1",
+                "GPIO2 SDA",
+                "GPIO3 SCL",
+                "GPIO4",
+                "TX0",
+                "RX0",
+            ],
+            &[
+                "VIN", "GND", "GPIO8", "GPIO9", "GPIO10", "GPIO11", "EN", "RST",
+            ],
+        ),
+        ComponentKind::Esp32C3 => draw_module(
+            painter,
+            component,
+            rect,
+            stroke,
+            energized,
+            "ESP32-C3",
+            &["3V3", "GND", "GPIO0", "GPIO1 SDA", "GPIO2 SCL", "TX", "RX"],
+            &["5V", "GND", "GPIO3", "GPIO4", "GPIO5", "EN", "BOOT"],
+        ),
+        ComponentKind::ArduinoUno => draw_module(
+            painter,
+            component,
+            rect,
+            stroke,
+            energized,
+            "ARDUINO UNO",
+            &["VIN", "5V", "3V3", "GND", "GND", "A4 SDA", "A5 SCL"],
+            &[
+                "D2", "D3 PWM", "D5 PWM", "D6 PWM", "D9 PWM", "D10", "D11", "D13",
+            ],
+        ),
+        ComponentKind::RaspberryPiPico => draw_module(
+            painter,
+            component,
+            rect,
+            stroke,
+            energized,
+            "PI PICO",
+            &[
+                "VSYS", "3V3", "GND", "GP0 TX", "GP1 RX", "GP4 SDA", "GP5 SCL",
+            ],
+            &["VBUS", "GND", "GP14", "GP15", "GP16", "GP17", "RUN"],
+        ),
+        ComponentKind::Breadboard => draw_breadboard(painter, rect, stroke),
+        ComponentKind::Relay => draw_relay(painter, rect, component.rotation, stroke),
+        ComponentKind::DcMotor => draw_dc_motor(painter, rect, component.rotation, stroke),
+        ComponentKind::Servo => draw_servo(painter, rect, stroke, energized),
         ComponentKind::Oled => draw_module(
             painter,
             component,
@@ -1624,6 +2114,150 @@ fn component_pin_defs(component: &Component) -> Vec<CircuitPin> {
                 ("RST", PinRole::Control),
             ],
         ),
+        ComponentKind::Esp32S3 => module_pin_defs(
+            rect,
+            &[
+                ("3V3", PinRole::Positive),
+                ("GND", PinRole::Ground),
+                ("GPIO1", PinRole::Digital),
+                ("GPIO2 SDA", PinRole::I2c),
+                ("GPIO3 SCL", PinRole::I2c),
+                ("GPIO4", PinRole::Digital),
+                ("TX0", PinRole::Digital),
+                ("RX0", PinRole::Digital),
+            ],
+            &[
+                ("VIN", PinRole::Positive),
+                ("GND", PinRole::Ground),
+                ("GPIO8", PinRole::Digital),
+                ("GPIO9", PinRole::Digital),
+                ("GPIO10", PinRole::Digital),
+                ("GPIO11", PinRole::Digital),
+                ("EN", PinRole::Control),
+                ("RST", PinRole::Control),
+            ],
+        ),
+        ComponentKind::Esp32C3 => module_pin_defs(
+            rect,
+            &[
+                ("3V3", PinRole::Positive),
+                ("GND", PinRole::Ground),
+                ("GPIO0", PinRole::Digital),
+                ("GPIO1 SDA", PinRole::I2c),
+                ("GPIO2 SCL", PinRole::I2c),
+                ("TX", PinRole::Digital),
+                ("RX", PinRole::Digital),
+            ],
+            &[
+                ("5V", PinRole::Positive),
+                ("GND", PinRole::Ground),
+                ("GPIO3", PinRole::Digital),
+                ("GPIO4", PinRole::Digital),
+                ("GPIO5", PinRole::Digital),
+                ("EN", PinRole::Control),
+                ("BOOT", PinRole::Control),
+            ],
+        ),
+        ComponentKind::ArduinoUno => module_pin_defs(
+            rect,
+            &[
+                ("VIN", PinRole::Positive),
+                ("5V", PinRole::Positive),
+                ("3V3", PinRole::Positive),
+                ("GND", PinRole::Ground),
+                ("GND", PinRole::Ground),
+                ("A4 SDA", PinRole::I2c),
+                ("A5 SCL", PinRole::I2c),
+            ],
+            &[
+                ("D2", PinRole::Digital),
+                ("D3 PWM", PinRole::Digital),
+                ("D5 PWM", PinRole::Digital),
+                ("D6 PWM", PinRole::Digital),
+                ("D9 PWM", PinRole::Digital),
+                ("D10", PinRole::Digital),
+                ("D11", PinRole::Digital),
+                ("D13", PinRole::Digital),
+            ],
+        ),
+        ComponentKind::RaspberryPiPico => module_pin_defs(
+            rect,
+            &[
+                ("VSYS", PinRole::Positive),
+                ("3V3", PinRole::Positive),
+                ("GND", PinRole::Ground),
+                ("GP0 TX", PinRole::Digital),
+                ("GP1 RX", PinRole::Digital),
+                ("GP4 SDA", PinRole::I2c),
+                ("GP5 SCL", PinRole::I2c),
+            ],
+            &[
+                ("VBUS", PinRole::Positive),
+                ("GND", PinRole::Ground),
+                ("GP14", PinRole::Digital),
+                ("GP15", PinRole::Digital),
+                ("GP16", PinRole::Digital),
+                ("GP17", PinRole::Digital),
+                ("RUN", PinRole::Control),
+            ],
+        ),
+        ComponentKind::Breadboard => breadboard_pin_defs(rect),
+        ComponentKind::Relay => vec![
+            CircuitPin {
+                label: "COIL+",
+                role: PinRole::Positive,
+                pos: Pos2::new(rect.left(), center.y - rect.height() * 0.25),
+            },
+            CircuitPin {
+                label: "COIL-",
+                role: PinRole::Ground,
+                pos: Pos2::new(rect.left(), center.y + rect.height() * 0.25),
+            },
+            CircuitPin {
+                label: "COM",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.right(), center.y - rect.height() * 0.28),
+            },
+            CircuitPin {
+                label: "NO",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.right(), center.y),
+            },
+            CircuitPin {
+                label: "NC",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.right(), center.y + rect.height() * 0.28),
+            },
+        ],
+        ComponentKind::DcMotor => vec![
+            CircuitPin {
+                label: "-",
+                role: PinRole::Ground,
+                pos: Pos2::new(rect.left(), center.y),
+            },
+            CircuitPin {
+                label: "+",
+                role: PinRole::Positive,
+                pos: Pos2::new(rect.right(), center.y),
+            },
+        ],
+        ComponentKind::Servo => vec![
+            CircuitPin {
+                label: "GND",
+                role: PinRole::Ground,
+                pos: Pos2::new(rect.left(), center.y - rect.height() * 0.24),
+            },
+            CircuitPin {
+                label: "VCC",
+                role: PinRole::Positive,
+                pos: Pos2::new(rect.left(), center.y),
+            },
+            CircuitPin {
+                label: "SIG",
+                role: PinRole::Digital,
+                pos: Pos2::new(rect.left(), center.y + rect.height() * 0.24),
+            },
+        ],
         ComponentKind::Oled => vec![
             module_pin(rect, "GND", PinRole::Ground, false, 4, 0),
             module_pin(rect, "VCC", PinRole::Positive, false, 4, 1),
@@ -1692,6 +2326,41 @@ fn module_pin(
             module_pin_y(rect, count, index),
         ),
     }
+}
+
+fn breadboard_pin_defs(rect: Rect) -> Vec<CircuitPin> {
+    vec![
+        CircuitPin {
+            label: "+",
+            role: PinRole::Positive,
+            pos: Pos2::new(rect.left(), rect.top() + 24.0),
+        },
+        CircuitPin {
+            label: "-",
+            role: PinRole::Ground,
+            pos: Pos2::new(rect.left(), rect.top() + 44.0),
+        },
+        CircuitPin {
+            label: "+",
+            role: PinRole::Positive,
+            pos: Pos2::new(rect.right(), rect.top() + 24.0),
+        },
+        CircuitPin {
+            label: "-",
+            role: PinRole::Ground,
+            pos: Pos2::new(rect.right(), rect.top() + 44.0),
+        },
+        CircuitPin {
+            label: "A",
+            role: PinRole::Passive,
+            pos: Pos2::new(rect.center().x - 50.0, rect.center().y),
+        },
+        CircuitPin {
+            label: "B",
+            role: PinRole::Passive,
+            pos: Pos2::new(rect.center().x + 50.0, rect.center().y),
+        },
+    ]
 }
 
 fn draw_junctions(painter: &egui::Painter, wires: &[Wire]) {
@@ -1910,6 +2579,177 @@ fn draw_switch(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Strok
     painter.circle_filled(rotated[2], 3.2, stroke.color);
     painter.circle_filled(rotated[3], 3.2, stroke.color);
     painter.line_segment([rotated[2], rotated[4]], stroke);
+}
+
+fn draw_push_button(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
+    let center = rect.center();
+    let left = Pos2::new(rect.left(), center.y);
+    let right = Pos2::new(rect.right(), center.y);
+    let left_contact = Pos2::new(center.x - rect.width() * 0.24, center.y);
+    let right_contact = Pos2::new(center.x + rect.width() * 0.24, center.y);
+    let bar_left = Pos2::new(
+        center.x - rect.width() * 0.18,
+        center.y - rect.height() * 0.18,
+    );
+    let bar_right = Pos2::new(
+        center.x + rect.width() * 0.18,
+        center.y - rect.height() * 0.18,
+    );
+    let stem_top = Pos2::new(center.x, rect.top() + rect.height() * 0.08);
+    let stem_bottom = Pos2::new(center.x, center.y - rect.height() * 0.18);
+    let points = [
+        left,
+        right,
+        left_contact,
+        right_contact,
+        bar_left,
+        bar_right,
+        stem_top,
+        stem_bottom,
+    ];
+    let rotated: Vec<Pos2> = points
+        .iter()
+        .copied()
+        .map(|p| rotate_point(p, center, rotation))
+        .collect();
+
+    painter.line_segment([rotated[0], rotated[2]], stroke);
+    painter.line_segment([rotated[3], rotated[1]], stroke);
+    painter.circle_filled(rotated[2], 3.2, stroke.color);
+    painter.circle_filled(rotated[3], 3.2, stroke.color);
+    painter.line_segment([rotated[4], rotated[5]], stroke);
+    painter.line_segment([rotated[6], rotated[7]], stroke);
+}
+
+fn draw_breadboard(painter: &egui::Painter, rect: Rect, stroke: Stroke) {
+    painter.rect_filled(rect, 4.0, Color32::from_rgb(28, 31, 35));
+    painter.rect_stroke(rect, 4.0, stroke, StrokeKind::Outside);
+    let plus_y = rect.top() + 24.0;
+    let minus_y = rect.top() + 44.0;
+    painter.line_segment(
+        [
+            Pos2::new(rect.left() + 14.0, plus_y),
+            Pos2::new(rect.right() - 14.0, plus_y),
+        ],
+        Stroke::new(2.0, Color32::from_rgb(255, 185, 80)),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(rect.left() + 14.0, minus_y),
+            Pos2::new(rect.right() - 14.0, minus_y),
+        ],
+        Stroke::new(2.0, Color32::from_rgb(120, 190, 255)),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(rect.center().x, rect.top() + 66.0),
+            Pos2::new(rect.center().x, rect.bottom() - 14.0),
+        ],
+        Stroke::new(1.4, Color32::from_rgb(80, 85, 92)),
+    );
+
+    let hole = Color32::from_rgb(70, 76, 84);
+    let mut x = rect.left() + 28.0;
+    while x <= rect.right() - 28.0 {
+        for row in 0..5 {
+            let y = rect.top() + 78.0 + row as f32 * 14.0;
+            painter.circle_filled(Pos2::new(x, y), 2.2, hole);
+            painter.circle_filled(Pos2::new(x, y + 82.0), 2.2, hole);
+        }
+        x += 18.0;
+    }
+    painter.text(
+        rect.left_top() + Vec2::new(12.0, 8.0),
+        Align2::LEFT_TOP,
+        "+  -",
+        egui::FontId::proportional(12.0),
+        Color32::from_rgb(220, 225, 230),
+    );
+}
+
+fn draw_relay(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
+    let center = rect.center();
+    let box_rect =
+        Rect::from_center_size(center, Vec2::new(rect.width() * 0.72, rect.height() * 0.72));
+    painter.rect_stroke(box_rect, 4.0, stroke, StrokeKind::Outside);
+    painter.text(
+        center,
+        Align2::CENTER_CENTER,
+        "RELAY",
+        egui::FontId::proportional(12.0),
+        stroke.color,
+    );
+    let pins = [
+        Pos2::new(rect.left(), center.y - rect.height() * 0.25),
+        Pos2::new(box_rect.left(), center.y - rect.height() * 0.25),
+        Pos2::new(rect.left(), center.y + rect.height() * 0.25),
+        Pos2::new(box_rect.left(), center.y + rect.height() * 0.25),
+        Pos2::new(box_rect.right(), center.y - rect.height() * 0.28),
+        Pos2::new(rect.right(), center.y - rect.height() * 0.28),
+        Pos2::new(box_rect.right(), center.y),
+        Pos2::new(rect.right(), center.y),
+        Pos2::new(box_rect.right(), center.y + rect.height() * 0.28),
+        Pos2::new(rect.right(), center.y + rect.height() * 0.28),
+    ];
+    let rotated: Vec<Pos2> = pins
+        .iter()
+        .copied()
+        .map(|p| rotate_point(p, center, rotation))
+        .collect();
+    for segment in rotated.chunks(2) {
+        painter.line_segment([segment[0], segment[1]], stroke);
+    }
+}
+
+fn draw_dc_motor(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
+    let center = rect.center();
+    let left = Pos2::new(rect.left(), center.y);
+    let right = Pos2::new(rect.right(), center.y);
+    let radius = rect.height() * 0.34;
+    let rotated_left = rotate_point(left, center, rotation);
+    let rotated_right = rotate_point(right, center, rotation);
+    painter.line_segment(
+        [
+            rotated_left,
+            rotate_point(Pos2::new(center.x - radius, center.y), center, rotation),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            rotate_point(Pos2::new(center.x + radius, center.y), center, rotation),
+            rotated_right,
+        ],
+        stroke,
+    );
+    painter.circle_stroke(center, radius, stroke);
+    painter.text(
+        center,
+        Align2::CENTER_CENTER,
+        "M",
+        egui::FontId::proportional(18.0),
+        stroke.color,
+    );
+}
+
+fn draw_servo(painter: &egui::Painter, rect: Rect, stroke: Stroke, energized: bool) {
+    let fill = if energized {
+        Color32::from_rgb(48, 38, 20)
+    } else {
+        Color32::from_rgb(26, 31, 36)
+    };
+    painter.rect_filled(rect.shrink(8.0), 4.0, fill);
+    painter.rect_stroke(rect.shrink(8.0), 4.0, stroke, StrokeKind::Outside);
+    let horn_center = Pos2::new(rect.right() - 24.0, rect.center().y);
+    painter.circle_stroke(horn_center, 10.0, stroke);
+    painter.line_segment([horn_center, horn_center + Vec2::new(24.0, -12.0)], stroke);
+    painter.text(
+        rect.center() - Vec2::new(12.0, 0.0),
+        Align2::CENTER_CENTER,
+        "SERVO",
+        egui::FontId::proportional(11.0),
+        stroke.color,
+    );
 }
 
 fn draw_ground(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
@@ -2365,13 +3205,23 @@ fn component_kind_label(kind: ComponentKind) -> &'static str {
         ComponentKind::Diode => "Diode",
         ComponentKind::Led => "LED",
         ComponentKind::Switch => "Switch",
+        ComponentKind::PushButton => "Push Button",
+        ComponentKind::SlideSwitch => "Slide Switch",
         ComponentKind::Ground => "Ground",
         ComponentKind::VSource => "V Source",
         ComponentKind::ISource => "I Source",
         ComponentKind::Battery => "Battery",
         ComponentKind::OpAmp => "Op Amp",
         ComponentKind::Lamp => "Lamp",
-        ComponentKind::Esp32 => "ESP32",
+        ComponentKind::Esp32 => "ESP32 WROOM",
+        ComponentKind::Esp32S3 => "ESP32-S3",
+        ComponentKind::Esp32C3 => "ESP32-C3",
+        ComponentKind::ArduinoUno => "Arduino UNO",
+        ComponentKind::RaspberryPiPico => "Pi Pico",
+        ComponentKind::Breadboard => "Breadboard",
+        ComponentKind::Relay => "Relay",
+        ComponentKind::DcMotor => "DC Motor",
+        ComponentKind::Servo => "Servo",
         ComponentKind::Oled => "OLED I2C",
         ComponentKind::Sensor => "Sensor",
     }
@@ -2380,7 +3230,13 @@ fn component_kind_label(kind: ComponentKind) -> &'static str {
 fn component_is_module(component: &Component) -> bool {
     matches!(
         component.kind,
-        ComponentKind::Esp32 | ComponentKind::Oled | ComponentKind::Sensor
+        ComponentKind::Esp32
+            | ComponentKind::Esp32S3
+            | ComponentKind::Esp32C3
+            | ComponentKind::ArduinoUno
+            | ComponentKind::RaspberryPiPico
+            | ComponentKind::Oled
+            | ComponentKind::Sensor
     )
 }
 
@@ -2393,7 +3249,14 @@ fn escape_xml(value: &str) -> String {
 }
 
 fn main() -> eframe::Result<()> {
-    let options = eframe::NativeOptions::default();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Cluster Circuits")
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([1180.0, 760.0]),
+        run_and_return: false,
+        ..Default::default()
+    };
     eframe::run_native(
         "Cluster Circuits",
         options,
