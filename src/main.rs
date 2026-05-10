@@ -3263,3 +3263,21 @@ fn main() -> eframe::Result<()> {
         Box::new(|_cc| Ok(Box::new(CircuitApp::new()))),
     )
 }
+
+
+/*
+This is an egui/eframe Rust circuit editor.
+Refactor it toward a professional SPICE frontend.
+
+Do not rewrite the whole app.
+First add:
+1. SPICE netlist export
+2. net naming from connected wire/pin graph
+3. Export .cir button
+4. Keep existing analyze_circuit() as quick live check
+5. Support Resistor, Capacitor, Inductor, Battery/VSource, ISource, Diode, LED, Ground
+
+Use serde only if needed.
+Keep the UI working.
+Explain changes after patch.
+*/
