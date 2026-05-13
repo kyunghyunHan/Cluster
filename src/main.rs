@@ -1,6 +1,7 @@
 use eframe::egui;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
-use std::collections::{HashSet, VecDeque};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,7 +11,7 @@ enum Tool {
     Wire,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 enum ComponentKind {
     Resistor,
     Capacitor,
@@ -85,7 +86,7 @@ enum DragState {
     WirePoint { wire_id: u64, point_index: usize },
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Counters {
     resistor: usize,
     capacitor: usize,
@@ -125,6 +126,49 @@ struct CircuitApp {
     status: String,
     next_id: u64,
     counters: Counters,
+    history: Vec<CircuitSnapshot>,
+    redo_history: Vec<CircuitSnapshot>,
+    dirty: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CircuitSnapshot {
+    components: Vec<Component>,
+    wires: Vec<Wire>,
+    next_id: u64,
+    counters: Counters,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SavedCircuit {
+    schema_version: u32,
+    next_id: u64,
+    counters: Counters,
+    components: Vec<SavedComponent>,
+    wires: Vec<SavedWire>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SavedComponent {
+    id: u64,
+    kind: ComponentKind,
+    x: f32,
+    y: f32,
+    rotation: i32,
+    label: String,
+    value: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SavedWire {
+    id: u64,
+    points: Vec<SavedPoint>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SavedPoint {
+    x: f32,
+    y: f32,
 }
 
 impl CircuitApp {
@@ -144,7 +188,60 @@ impl CircuitApp {
             status: String::new(),
             next_id: 1,
             counters: Counters::default(),
+            history: Vec::new(),
+            redo_history: Vec::new(),
+            dirty: false,
         }
+    }
+
+    fn snapshot(&self) -> CircuitSnapshot {
+        CircuitSnapshot {
+            components: self.components.clone(),
+            wires: self.wires.clone(),
+            next_id: self.next_id,
+            counters: self.counters.clone(),
+        }
+    }
+
+    fn restore_snapshot(&mut self, snapshot: CircuitSnapshot) {
+        self.components = snapshot.components;
+        self.wires = snapshot.wires;
+        self.next_id = snapshot.next_id;
+        self.counters = snapshot.counters;
+        self.selected = None;
+        self.drag = None;
+        self.draft_wire.clear();
+    }
+
+    fn record_history(&mut self) {
+        self.history.push(self.snapshot());
+        if self.history.len() > 80 {
+            self.history.remove(0);
+        }
+        self.redo_history.clear();
+        self.dirty = true;
+    }
+
+    fn undo(&mut self) {
+        let Some(snapshot) = self.history.pop() else {
+            self.status = "Nothing to undo.".to_string();
+            return;
+        };
+        self.redo_history.push(self.snapshot());
+        self.restore_snapshot(snapshot);
+        self.dirty = true;
+        self.status = "Undo.".to_string();
+    }
+
+    fn redo(&mut self) {
+        let Some(snapshot) = self.redo_history.pop() else {
+            self.status = "Nothing to redo.".to_string();
+            return;
+        };
+        self.history.push(self.snapshot());
+        self.restore_snapshot(snapshot);
+        self.dirty = true;
+        self.status = "Redo.".to_string();
     }
 
     fn next_id(&mut self) -> u64 {
@@ -277,6 +374,7 @@ impl CircuitApp {
     }
 
     fn add_component(&mut self, kind: ComponentKind, pos: Pos2) {
+        self.record_history();
         self.place_component(kind, pos);
         self.status = "Component placed. Drag to reposition, R to rotate.".to_string();
     }
@@ -300,12 +398,14 @@ impl CircuitApp {
         if points.len() < 2 {
             return;
         }
+        self.record_history();
         let id = self.next_id();
         self.wires.push(Wire { id, points });
         self.status = "Wire placed.".to_string();
     }
 
     fn reset_canvas(&mut self) {
+        self.record_history();
         self.components.clear();
         self.wires.clear();
         self.selected = None;
@@ -314,6 +414,7 @@ impl CircuitApp {
         self.counters = Counters::default();
         self.next_id = 1;
         self.tool = Tool::Select;
+        self.dirty = true;
     }
 
     fn add_wire_between(&mut self, a_id: u64, a_pin: &str, b_id: u64, b_pin: &str) {
@@ -410,10 +511,12 @@ impl CircuitApp {
     fn delete_selected(&mut self) {
         match self.selected.take() {
             Some(Selection::Component(id)) => {
+                self.record_history();
                 self.components.retain(|c| c.id != id);
                 self.status = "Component deleted.".to_string();
             }
             Some(Selection::Wire(id)) => {
+                self.record_history();
                 self.wires.retain(|w| w.id != id);
                 self.status = "Wire deleted.".to_string();
             }
@@ -427,14 +530,43 @@ impl CircuitApp {
         let Some(Selection::Component(id)) = self.selected else {
             return;
         };
-        if let Some(component) = self.components.iter_mut().find(|c| c.id == id) {
-            if component_is_module(component) {
-                self.status = "Modules stay upright so pin labels remain readable.".to_string();
-                return;
-            }
+        let Some(index) = self.components.iter().position(|c| c.id == id) else {
+            return;
+        };
+        if component_is_module(&self.components[index]) {
+            self.status = "Modules stay upright so pin labels remain readable.".to_string();
+            return;
+        }
+        self.record_history();
+        if let Some(component) = self.components.get_mut(index) {
             component.rotation = (component.rotation + 90) % 360;
             self.status = "Rotated.".to_string();
         }
+    }
+
+    fn duplicate_selected(&mut self) {
+        let Some(Selection::Component(id)) = self.selected else {
+            self.status = "Select a component to duplicate.".to_string();
+            return;
+        };
+        let Some(source) = self
+            .components
+            .iter()
+            .find(|component| component.id == id)
+            .cloned()
+        else {
+            self.status = "Selected component is missing.".to_string();
+            return;
+        };
+        self.record_history();
+        let mut duplicate = source;
+        duplicate.id = self.next_id();
+        duplicate.pos += Vec2::new(40.0, 40.0);
+        duplicate.label = self.next_label(duplicate.kind);
+        let duplicate_id = duplicate.id;
+        self.components.push(duplicate);
+        self.selected = Some(Selection::Component(duplicate_id));
+        self.status = "Component duplicated.".to_string();
     }
 
     fn export_svg(&mut self) {
@@ -450,156 +582,383 @@ impl CircuitApp {
             }
         }
     }
+
+    fn export_spice_netlist(&mut self) {
+        match fs::write(
+            "cluster_circuit.cir",
+            circuit_to_spice_netlist(&self.components, &self.wires),
+        ) {
+            Ok(()) => {
+                self.status = "Saved cluster_circuit.cir.".to_string();
+            }
+            Err(err) => {
+                self.status = format!("SPICE export failed: {err}");
+            }
+        }
+    }
+
+    fn save_circuit_json(&mut self) {
+        let saved = SavedCircuit::from_app(self);
+        match serde_json::to_string_pretty(&saved)
+            .map_err(|err| err.to_string())
+            .and_then(|json| fs::write("cluster_circuit.json", json).map_err(|err| err.to_string()))
+        {
+            Ok(()) => {
+                self.dirty = false;
+                self.status = "Saved cluster_circuit.json.".to_string();
+            }
+            Err(err) => {
+                self.status = format!("Save failed: {err}");
+            }
+        }
+    }
+
+    fn load_circuit_json(&mut self) {
+        match fs::read_to_string("cluster_circuit.json")
+            .map_err(|err| err.to_string())
+            .and_then(|json| {
+                serde_json::from_str::<SavedCircuit>(&json).map_err(|err| err.to_string())
+            })
+            .and_then(SavedCircuit::into_snapshot)
+        {
+            Ok(snapshot) => {
+                self.record_history();
+                self.restore_snapshot(snapshot);
+                self.dirty = false;
+                self.status = "Loaded cluster_circuit.json.".to_string();
+            }
+            Err(err) => {
+                self.status = format!("Load failed: {err}");
+            }
+        }
+    }
+}
+
+impl SavedCircuit {
+    fn from_app(app: &CircuitApp) -> Self {
+        Self {
+            schema_version: 1,
+            next_id: app.next_id,
+            counters: app.counters.clone(),
+            components: app
+                .components
+                .iter()
+                .map(|component| SavedComponent {
+                    id: component.id,
+                    kind: component.kind,
+                    x: component.pos.x,
+                    y: component.pos.y,
+                    rotation: component.rotation,
+                    label: component.label.clone(),
+                    value: component.value.clone(),
+                })
+                .collect(),
+            wires: app
+                .wires
+                .iter()
+                .map(|wire| SavedWire {
+                    id: wire.id,
+                    points: wire
+                        .points
+                        .iter()
+                        .map(|point| SavedPoint {
+                            x: point.x,
+                            y: point.y,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    fn into_snapshot(self) -> Result<CircuitSnapshot, String> {
+        if self.schema_version > 1 {
+            return Err(format!(
+                "Unsupported schema version {}.",
+                self.schema_version
+            ));
+        }
+        let components = self
+            .components
+            .into_iter()
+            .map(|component| Component {
+                id: component.id,
+                kind: component.kind,
+                pos: Pos2::new(component.x, component.y),
+                rotation: component.rotation.rem_euclid(360),
+                label: component.label,
+                value: component.value,
+            })
+            .collect::<Vec<_>>();
+        let wires = self
+            .wires
+            .into_iter()
+            .map(|wire| Wire {
+                id: wire.id,
+                points: wire
+                    .points
+                    .into_iter()
+                    .map(|point| Pos2::new(point.x, point.y))
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        let max_id = components
+            .iter()
+            .map(|component| component.id)
+            .chain(wires.iter().map(|wire| wire.id))
+            .max()
+            .unwrap_or(0);
+        Ok(CircuitSnapshot {
+            components,
+            wires,
+            next_id: self.next_id.max(max_id + 1),
+            counters: self.counters,
+        })
+    }
 }
 
 impl eframe::App for CircuitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.set_visuals(egui::Visuals::dark());
+        apply_app_style(ctx);
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.strong("Cluster");
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new("Cluster")
+                        .size(18.0)
+                        .strong()
+                        .color(Color32::from_rgb(245, 248, 252)),
+                );
+                ui.label(
+                    egui::RichText::new("workbench")
+                        .size(12.0)
+                        .color(Color32::from_rgb(160, 170, 180)),
+                );
                 ui.separator();
-                if ui
-                    .selectable_label(self.tool == Tool::Select, "Select")
-                    .clicked()
-                {
+                if tool_button(ui, self.tool == Tool::Select, "Select").clicked() {
                     self.tool = Tool::Select;
                     self.draft_wire.clear();
                 }
-                if ui
-                    .selectable_label(self.tool == Tool::Wire, "Wire")
-                    .clicked()
-                {
+                if tool_button(ui, self.tool == Tool::Wire, "Wire").clicked() {
                     self.tool = Tool::Wire;
                     self.draft_wire.clear();
                 }
                 ui.separator();
-                ui.checkbox(&mut self.snap, "Snap");
-                ui.checkbox(&mut self.orthogonal_wires, "90° wires");
-                ui.checkbox(&mut self.show_pins, "Pins");
-                ui.checkbox(&mut self.simulate, "Live");
-                ui.add(egui::Slider::new(&mut self.grid, 10.0..=40.0).text("Grid"));
-                if ui.button("Rotate").clicked() {
+                if compact_button(ui, "Undo").clicked() {
+                    self.undo();
+                }
+                if compact_button(ui, "Redo").clicked() {
+                    self.redo();
+                }
+                if compact_button(ui, "Rotate").clicked() {
                     self.rotate_selected();
                 }
-                if ui.button("Delete").clicked() {
+                if compact_button(ui, "Duplicate").clicked() {
+                    self.duplicate_selected();
+                }
+                if compact_button(ui, "Delete").clicked() {
                     self.delete_selected();
                 }
-                if ui.button("Export SVG").clicked() {
-                    self.export_svg();
-                }
-                if !self.status.is_empty() {
+                ui.separator();
+                toolbar_menu(ui, "View", |ui| {
+                    ui.checkbox(&mut self.snap, "Snap to grid");
+                    ui.checkbox(&mut self.orthogonal_wires, "90 degree wires");
+                    ui.checkbox(&mut self.show_pins, "Show pins");
+                    ui.checkbox(&mut self.simulate, "Live check");
+                    ui.add_sized(
+                        Vec2::new(180.0, 18.0),
+                        egui::Slider::new(&mut self.grid, 10.0..=40.0).text("Grid"),
+                    );
+                });
+                toolbar_menu(ui, "Actions", |ui| {
+                    if menu_action(ui, "Save JSON").clicked() {
+                        self.save_circuit_json();
+                        ui.close();
+                    }
+                    if menu_action(ui, "Load JSON").clicked() {
+                        self.load_circuit_json();
+                        ui.close();
+                    }
                     ui.separator();
-                    ui.label(&self.status);
-                }
+                    if menu_action(ui, "Export SVG").clicked() {
+                        self.export_svg();
+                        ui.close();
+                    }
+                    if menu_action(ui, "Export CIR").clicked() {
+                        self.export_spice_netlist();
+                        ui.close();
+                    }
+                    ui.separator();
+                    if menu_action(ui, "Blank schematic").clicked() {
+                        self.reset_canvas();
+                        self.status = "Blank schematic ready.".to_string();
+                        ui.close();
+                    }
+                });
             });
+            if !self.status.is_empty() {
+                ui.label(
+                    egui::RichText::new(&self.status)
+                        .size(12.0)
+                        .color(Color32::from_rgb(210, 218, 226)),
+                );
+            }
+            ui.add_space(4.0);
         });
 
         egui::SidePanel::left("palette")
-            .default_width(172.0)
-            .resizable(true)
-            .show(ctx, |ui| {
-                ui.heading("Parts");
-                ui.label("Passives");
-                part_button(ui, self, "Resistor", ComponentKind::Resistor);
-                part_button(ui, self, "Capacitor", ComponentKind::Capacitor);
-                part_button(ui, self, "Inductor", ComponentKind::Inductor);
-                part_button(ui, self, "Lamp", ComponentKind::Lamp);
-                ui.separator();
-                ui.label("Semiconductors");
-                part_button(ui, self, "Diode", ComponentKind::Diode);
-                part_button(ui, self, "LED", ComponentKind::Led);
-                part_button(ui, self, "Op Amp", ComponentKind::OpAmp);
-                ui.separator();
-                ui.label("Sources and IO");
-                part_button(ui, self, "Ground", ComponentKind::Ground);
-                part_button(ui, self, "Voltage Source", ComponentKind::VSource);
-                part_button(ui, self, "Current Source", ComponentKind::ISource);
-                part_button(ui, self, "Battery", ComponentKind::Battery);
-                part_button(ui, self, "Switch", ComponentKind::Switch);
-                part_button(ui, self, "Push Button", ComponentKind::PushButton);
-                part_button(ui, self, "Slide Switch", ComponentKind::SlideSwitch);
-                ui.separator();
-                ui.label("Modules");
-                part_button(ui, self, "ESP32 WROOM", ComponentKind::Esp32);
-                part_button(ui, self, "ESP32-S3", ComponentKind::Esp32S3);
-                part_button(ui, self, "ESP32-C3", ComponentKind::Esp32C3);
-                part_button(ui, self, "Arduino UNO", ComponentKind::ArduinoUno);
-                part_button(ui, self, "Pi Pico", ComponentKind::RaspberryPiPico);
-                part_button(ui, self, "Breadboard", ComponentKind::Breadboard);
-                part_button(ui, self, "OLED I2C", ComponentKind::Oled);
-                part_button(ui, self, "Sensor", ComponentKind::Sensor);
-                ui.separator();
-                ui.label("Actuators");
-                part_button(ui, self, "Relay", ComponentKind::Relay);
-                part_button(ui, self, "DC Motor", ComponentKind::DcMotor);
-                part_button(ui, self, "Servo", ComponentKind::Servo);
-                ui.separator();
-                ui.label("Examples");
-                if ui.button("LED Circuit").clicked() {
-                    self.load_led_demo();
-                }
-                if ui.button("ESP32 + OLED").clicked() {
-                    self.load_esp32_oled_demo();
-                }
-                if ui.button("Relay + Motor").clicked() {
-                    self.load_motor_relay_demo();
-                }
-                if ui.button("Blank").clicked() {
-                    self.reset_canvas();
-                    self.status = "Blank schematic ready.".to_string();
-                }
-                ui.separator();
-                ui.label(format!("{} parts", self.components.len()));
-                ui.label(format!("{} wires", self.wires.len()));
-                if self.simulate {
-                    let simulation = analyze_circuit(&self.components, &self.wires);
-                    if simulation.shorted {
-                        ui.colored_label(Color32::from_rgb(255, 95, 80), &simulation.summary);
-                    } else if simulation.closed {
-                        ui.colored_label(Color32::from_rgb(255, 185, 80), &simulation.summary);
-                    } else {
-                        ui.colored_label(Color32::from_rgb(150, 155, 165), &simulation.summary);
-                    }
-                    if let Some(voltage) = simulation.voltage {
-                        ui.label(format!("V: {:.2} V", voltage));
-                    }
-                    if let Some(resistance) = simulation.resistance {
-                        ui.label(format!("R: {}", format_resistance(resistance)));
-                    }
-                    if let Some(current) = simulation.current {
-                        ui.label(format!("I: {}", format_current(current)));
-                    }
-                    for detail in simulation.details.iter().take(4) {
-                        ui.label(detail);
-                    }
-                }
-                ui.separator();
-                ui.label("Shortcuts");
-                ui.label("R rotate");
-                ui.label("Del delete");
-                ui.label("Enter finish wire");
-                ui.label("Esc select");
-            });
-
-        egui::SidePanel::right("inspector")
             .default_width(220.0)
             .resizable(true)
             .show(ctx, |ui| {
+                ui.heading("Parts");
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        part_section(
+                            ui,
+                            self,
+                            "Passives",
+                            SectionMode::Open,
+                            &[
+                                ("Resistor", ComponentKind::Resistor),
+                                ("Capacitor", ComponentKind::Capacitor),
+                                ("Inductor", ComponentKind::Inductor),
+                                ("Lamp", ComponentKind::Lamp),
+                            ],
+                        );
+                        part_section(
+                            ui,
+                            self,
+                            "Semiconductors",
+                            SectionMode::Open,
+                            &[
+                                ("Diode", ComponentKind::Diode),
+                                ("LED", ComponentKind::Led),
+                                ("Op Amp", ComponentKind::OpAmp),
+                            ],
+                        );
+                        part_section(
+                            ui,
+                            self,
+                            "Sources and IO",
+                            SectionMode::Open,
+                            &[
+                                ("Ground", ComponentKind::Ground),
+                                ("Voltage Source", ComponentKind::VSource),
+                                ("Current Source", ComponentKind::ISource),
+                                ("Battery", ComponentKind::Battery),
+                                ("Switch", ComponentKind::Switch),
+                                ("Push Button", ComponentKind::PushButton),
+                                ("Slide Switch", ComponentKind::SlideSwitch),
+                            ],
+                        );
+                        part_section(
+                            ui,
+                            self,
+                            "Modules",
+                            SectionMode::Collapsed,
+                            &[
+                                ("ESP32 WROOM", ComponentKind::Esp32),
+                                ("ESP32-S3", ComponentKind::Esp32S3),
+                                ("ESP32-C3", ComponentKind::Esp32C3),
+                                ("Arduino UNO", ComponentKind::ArduinoUno),
+                                ("Pi Pico", ComponentKind::RaspberryPiPico),
+                                ("Breadboard", ComponentKind::Breadboard),
+                                ("OLED I2C", ComponentKind::Oled),
+                                ("Sensor", ComponentKind::Sensor),
+                            ],
+                        );
+                        part_section(
+                            ui,
+                            self,
+                            "Actuators",
+                            SectionMode::Collapsed,
+                            &[
+                                ("Relay", ComponentKind::Relay),
+                                ("DC Motor", ComponentKind::DcMotor),
+                                ("Servo", ComponentKind::Servo),
+                            ],
+                        );
+
+                        palette_section(ui, "Examples", SectionMode::Open, |ui| {
+                            if palette_action(ui, "LED Circuit").clicked() {
+                                self.load_led_demo();
+                            }
+                            if palette_action(ui, "ESP32 + OLED").clicked() {
+                                self.load_esp32_oled_demo();
+                            }
+                            if palette_action(ui, "Relay + Motor").clicked() {
+                                self.load_motor_relay_demo();
+                            }
+                            if palette_action(ui, "Blank").clicked() {
+                                self.reset_canvas();
+                                self.status = "Blank schematic ready.".to_string();
+                            }
+                        });
+
+                        palette_section(ui, "Circuit", SectionMode::Open, |ui| {
+                            metric_row(ui, "Parts", self.components.len().to_string());
+                            metric_row(ui, "Wires", self.wires.len().to_string());
+                            if self.simulate {
+                                let simulation = analyze_circuit(&self.components, &self.wires);
+                                let tone = if simulation.shorted {
+                                    StatusTone::Error
+                                } else if simulation.closed {
+                                    StatusTone::Live
+                                } else {
+                                    StatusTone::Muted
+                                };
+                                status_pill(ui, &simulation.summary, tone);
+                                if let Some(voltage) = simulation.voltage {
+                                    metric_row(ui, "Voltage", format!("{:.2} V", voltage));
+                                }
+                                if let Some(resistance) = simulation.resistance {
+                                    metric_row(ui, "Resistance", format_resistance(resistance));
+                                }
+                                if let Some(current) = simulation.current {
+                                    metric_row(ui, "Current", format_current(current));
+                                }
+                                for detail in simulation.details.iter().take(4) {
+                                    ui.label(
+                                        egui::RichText::new(detail)
+                                            .size(11.0)
+                                            .color(Color32::from_rgb(150, 160, 170)),
+                                    );
+                                }
+                            }
+                        });
+
+                        palette_section(ui, "Shortcuts", SectionMode::Collapsed, |ui| {
+                            metric_row(ui, "R", "rotate");
+                            metric_row(ui, "Del", "delete");
+                            metric_row(ui, "Enter", "finish wire");
+                            metric_row(ui, "Esc", "select");
+                        });
+                    });
+            });
+
+        egui::SidePanel::right("inspector")
+            .default_width(248.0)
+            .resizable(true)
+            .show(ctx, |ui| {
                 ui.heading("Inspector");
+                ui.separator();
                 match self.selected {
                     Some(Selection::Component(id)) => {
                         if let Some(component) = self.components.iter_mut().find(|c| c.id == id) {
-                            ui.label(format!("Kind: {:?}", component.kind));
-                            ui.horizontal(|ui| {
-                                ui.label("Label");
-                                ui.text_edit_singleline(&mut component.label);
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Value");
-                                ui.text_edit_singleline(&mut component.value);
-                            });
+                            status_pill(
+                                ui,
+                                component_kind_label(component.kind),
+                                StatusTone::Neutral,
+                            );
+                            ui.add_space(8.0);
+                            if edit_row(ui, "Label", &mut component.label)
+                                || edit_row(ui, "Value", &mut component.value)
+                            {
+                                self.dirty = true;
+                            }
                             if component_is_switch(component.kind) {
                                 let mut closed =
                                     component_conductance(component) != Conductance::Open;
@@ -611,44 +970,58 @@ impl eframe::App for CircuitApp {
                                     };
                                 }
                             }
-                            ui.label(format!("Rotation: {}°", component.rotation));
-                            ui.label(format!(
-                                "Position: {:.0}, {:.0}",
-                                component.pos.x, component.pos.y
-                            ));
+                            metric_row(ui, "Rotation", format!("{}°", component.rotation));
+                            metric_row(
+                                ui,
+                                "Position",
+                                format!("{:.0}, {:.0}", component.pos.x, component.pos.y),
+                            );
                             if component_is_module(component) {
-                                ui.separator();
-                                ui.label("Pins");
+                                ui.add_space(8.0);
+                                section_title(ui, "Pins");
                                 for pin in component_pin_defs(component) {
-                                    ui.label(format!("{}  {:?}", pin.label, pin.role));
+                                    metric_row(ui, pin.label, format!("{:?}", pin.role));
                                 }
                             }
                         }
                     }
                     Some(Selection::Wire(id)) => {
                         if let Some(wire) = self.wires.iter().find(|w| w.id == id) {
-                            ui.label("Kind: Wire");
-                            ui.label(format!("Points: {}", wire.points.len()));
-                            ui.label(format!("Length: {:.0}px", wire_length(wire)));
+                            status_pill(ui, "Wire", StatusTone::Neutral);
+                            ui.add_space(8.0);
+                            metric_row(ui, "Points", wire.points.len().to_string());
+                            metric_row(ui, "Length", format!("{:.0}px", wire_length(wire)));
                         }
                     }
                     None => {
-                        ui.label("Nothing selected");
+                        ui.label(
+                            egui::RichText::new("Nothing selected")
+                                .color(Color32::from_rgb(145, 154, 164)),
+                        );
                     }
                 }
             });
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(format!("Tool: {:?}", self.tool));
+            ui.horizontal_wrapped(|ui| {
+                ui.monospace(format!("Tool: {:?}", self.tool));
                 ui.separator();
-                ui.label(format!("Grid: {:.0}px", self.grid));
+                ui.monospace(format!("Grid: {:.0}px", self.grid));
                 ui.separator();
                 ui.label(selection_summary(
                     self.selected,
                     &self.components,
                     &self.wires,
                 ));
+                ui.separator();
+                ui.colored_label(
+                    if self.dirty {
+                        Color32::from_rgb(255, 198, 92)
+                    } else {
+                        Color32::from_rgb(138, 190, 145)
+                    },
+                    if self.dirty { "Unsaved" } else { "Saved" },
+                );
             });
         });
 
@@ -668,6 +1041,9 @@ impl eframe::App for CircuitApp {
             }
 
             draw_grid(&painter, rect, self.grid);
+            if self.components.is_empty() && self.wires.is_empty() {
+                draw_empty_canvas_hint(&painter, rect);
+            }
 
             for wire in &self.wires {
                 let energized = simulation.energized_wires.contains(&wire.id);
@@ -754,28 +1130,35 @@ impl eframe::App for CircuitApp {
                         if let Some((wire_id, point_index)) =
                             hit_test_wire_control_point(pos, &self.wires)
                         {
+                            self.record_history();
                             self.drag = Some(DragState::WirePoint {
                                 wire_id,
                                 point_index,
                             });
                             self.selected = Some(Selection::Wire(wire_id));
-                        } else if let Some((wire_id, point_index)) =
-                            insert_wire_control_point(pos, &mut self.wires)
-                        {
-                            self.drag = Some(DragState::WirePoint {
-                                wire_id,
-                                point_index,
-                            });
-                            self.selected = Some(Selection::Wire(wire_id));
-                        } else if let Some(Selection::Component(id)) =
-                            hit_test_component(pos, &self.components)
-                        {
-                            if let Some(component) = self.components.iter().find(|c| c.id == id) {
-                                self.drag = Some(DragState::Component {
-                                    id,
-                                    offset: pos - component.pos,
+                        } else {
+                            self.record_history();
+                            if let Some((wire_id, point_index)) =
+                                insert_wire_control_point(pos, &mut self.wires)
+                            {
+                                self.drag = Some(DragState::WirePoint {
+                                    wire_id,
+                                    point_index,
                                 });
-                                self.selected = Some(Selection::Component(id));
+                                self.selected = Some(Selection::Wire(wire_id));
+                            } else if let Some(Selection::Component(id)) =
+                                hit_test_component(pos, &self.components)
+                            {
+                                if let Some(component) = self.components.iter().find(|c| c.id == id)
+                                {
+                                    self.drag = Some(DragState::Component {
+                                        id,
+                                        offset: pos - component.pos,
+                                    });
+                                    self.selected = Some(Selection::Component(id));
+                                }
+                            } else {
+                                let _ = self.history.pop();
                             }
                         }
                     }
@@ -824,6 +1207,26 @@ impl eframe::App for CircuitApp {
 
         if ctx.input(|i| i.key_pressed(egui::Key::R)) {
             self.rotate_selected();
+        }
+
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
+            self.undo();
+        }
+
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y)) {
+            self.redo();
+        }
+
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D)) {
+            self.duplicate_selected();
+        }
+
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+            self.save_circuit_json();
+        }
+
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
+            self.load_circuit_json();
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -1008,11 +1411,242 @@ fn closest_point_on_segment(p: Pos2, a: Pos2, b: Pos2) -> Pos2 {
     a + ab * t.clamp(0.0, 1.0)
 }
 
+#[derive(Debug, Clone, Copy)]
+enum StatusTone {
+    Neutral,
+    Muted,
+    Live,
+    Error,
+}
+
+fn apply_app_style(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.window_fill = Color32::from_rgb(18, 21, 26);
+    visuals.panel_fill = Color32::from_rgb(18, 21, 26);
+    visuals.extreme_bg_color = Color32::from_rgb(12, 14, 18);
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(31, 36, 43);
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(43, 50, 59);
+    visuals.widgets.active.bg_fill = Color32::from_rgb(46, 58, 68);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(52, 58, 66));
+    ctx.set_visuals(visuals);
+
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = Vec2::new(8.0, 6.0);
+    style.spacing.button_padding = Vec2::new(10.0, 5.0);
+    style.visuals = ctx.style().visuals.clone();
+    ctx.set_style(style);
+}
+
+fn section_title(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text.to_uppercase())
+            .size(11.0)
+            .strong()
+            .color(Color32::from_rgb(138, 149, 160)),
+    );
+}
+
+fn toolbar_menu(ui: &mut egui::Ui, label: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    ui.menu_button(
+        egui::RichText::new(format!("{label} v"))
+            .strong()
+            .color(Color32::from_rgb(230, 236, 242)),
+        add_contents,
+    );
+}
+
+fn tool_button(ui: &mut egui::Ui, active: bool, label: &str) -> egui::Response {
+    let (fill, stroke, text) = if active {
+        (
+            Color32::from_rgb(38, 70, 82),
+            Stroke::new(1.0, Color32::from_rgb(105, 178, 255)),
+            Color32::from_rgb(235, 246, 255),
+        )
+    } else {
+        (
+            Color32::from_rgb(30, 34, 40),
+            Stroke::new(1.0, Color32::from_rgb(52, 60, 68)),
+            Color32::from_rgb(190, 198, 206),
+        )
+    };
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).color(text))
+            .fill(fill)
+            .stroke(stroke)
+            .min_size(Vec2::new(72.0, 28.0)),
+    )
+}
+
+fn compact_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).color(Color32::from_rgb(215, 222, 230)))
+            .fill(Color32::from_rgb(31, 36, 43))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(56, 64, 74)))
+            .min_size(Vec2::new(74.0, 26.0)),
+    )
+}
+
+fn palette_action(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add_sized(
+        Vec2::new(ui.available_width(), 27.0),
+        egui::Button::new(egui::RichText::new(label).color(Color32::from_rgb(216, 224, 232)))
+            .fill(Color32::from_rgb(28, 33, 39))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(48, 56, 64))),
+    )
+}
+
+fn menu_action(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add_sized(
+        Vec2::new(180.0, 27.0),
+        egui::Button::new(egui::RichText::new(label).color(Color32::from_rgb(216, 224, 232)))
+            .fill(Color32::from_rgb(28, 33, 39))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(48, 56, 64))),
+    )
+}
+
+fn status_pill(ui: &mut egui::Ui, text: &str, tone: StatusTone) {
+    let (fill, stroke, color) = match tone {
+        StatusTone::Neutral => (
+            Color32::from_rgb(30, 36, 43),
+            Color32::from_rgb(58, 68, 78),
+            Color32::from_rgb(210, 218, 226),
+        ),
+        StatusTone::Muted => (
+            Color32::from_rgb(28, 31, 36),
+            Color32::from_rgb(62, 68, 76),
+            Color32::from_rgb(152, 162, 172),
+        ),
+        StatusTone::Live => (
+            Color32::from_rgb(54, 42, 22),
+            Color32::from_rgb(132, 92, 34),
+            Color32::from_rgb(255, 198, 92),
+        ),
+        StatusTone::Error => (
+            Color32::from_rgb(58, 30, 30),
+            Color32::from_rgb(142, 64, 58),
+            Color32::from_rgb(255, 128, 112),
+        ),
+    };
+    egui::Frame::NONE
+        .fill(fill)
+        .stroke(Stroke::new(1.0, stroke))
+        .corner_radius(egui::CornerRadius::same(5))
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(text).size(11.0).strong().color(color));
+        });
+}
+
+fn metric_row(ui: &mut egui::Ui, label: impl Into<String>, value: impl Into<String>) {
+    ui.horizontal(|ui| {
+        ui.set_width(ui.available_width());
+        ui.label(
+            egui::RichText::new(label.into())
+                .size(11.0)
+                .color(Color32::from_rgb(135, 146, 156)),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(value.into())
+                    .size(11.0)
+                    .color(Color32::from_rgb(210, 218, 226)),
+            );
+        });
+    });
+}
+
+fn edit_row(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
+    ui.label(
+        egui::RichText::new(label)
+            .size(11.0)
+            .color(Color32::from_rgb(135, 146, 156)),
+    );
+    ui.add_sized(
+        Vec2::new(ui.available_width(), 25.0),
+        egui::TextEdit::singleline(value)
+            .text_color(Color32::from_rgb(230, 235, 240))
+            .background_color(Color32::from_rgb(12, 15, 19)),
+    )
+    .changed()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SectionMode {
+    Open,
+    Collapsed,
+}
+
+fn part_section(
+    ui: &mut egui::Ui,
+    app: &mut CircuitApp,
+    title: &str,
+    mode: SectionMode,
+    parts: &[(&str, ComponentKind)],
+) {
+    palette_section(ui, title, mode, |ui| {
+        for (label, kind) in parts {
+            part_button(ui, app, label, *kind);
+        }
+    });
+}
+
+fn palette_section(
+    ui: &mut egui::Ui,
+    title: &str,
+    mode: SectionMode,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    ui.add_space(5.0);
+    egui::Frame::NONE
+        .fill(Color32::from_rgb(23, 28, 35))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(58, 68, 80)))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(7, 5))
+        .show(ui, |ui| {
+            let title = egui::RichText::new(title.to_uppercase())
+                .size(11.0)
+                .strong()
+                .color(Color32::from_rgb(190, 204, 218));
+            match mode {
+                SectionMode::Open => {
+                    ui.label(title);
+                    ui.add_space(5.0);
+                    add_contents(ui);
+                }
+                SectionMode::Collapsed => {
+                    egui::CollapsingHeader::new(title)
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.add_space(4.0);
+                            add_contents(ui);
+                        });
+                }
+            }
+        });
+}
+
 fn part_button(ui: &mut egui::Ui, app: &mut CircuitApp, label: &str, kind: ComponentKind) {
-    if ui
-        .selectable_label(app.tool == Tool::Place(kind), label)
-        .clicked()
-    {
+    let selected = app.tool == Tool::Place(kind);
+    let (fill, stroke, color) = if selected {
+        (
+            Color32::from_rgb(38, 70, 82),
+            Stroke::new(1.0, Color32::from_rgb(105, 178, 255)),
+            Color32::from_rgb(235, 246, 255),
+        )
+    } else {
+        (
+            Color32::from_rgb(25, 29, 35),
+            Stroke::new(1.0, Color32::from_rgb(43, 50, 58)),
+            Color32::from_rgb(198, 207, 216),
+        )
+    };
+    let response = ui.add_sized(
+        Vec2::new(ui.available_width(), 27.0),
+        egui::Button::new(egui::RichText::new(label).color(color))
+            .fill(fill)
+            .stroke(stroke),
+    );
+    if response.clicked() {
         app.tool = Tool::Place(kind);
         app.draft_wire.clear();
         app.status = format!("Placing {label}. Click the canvas.");
@@ -1635,8 +2269,8 @@ fn component_size(component: &Component) -> Vec2 {
 }
 
 fn draw_grid(painter: &egui::Painter, rect: Rect, grid: f32) {
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(16, 18, 22));
-    let line_color = Color32::from_gray(38);
+    painter.rect_filled(rect, 0.0, Color32::from_rgb(18, 22, 28));
+    let line_color = Color32::from_rgb(44, 52, 62);
     let stroke = Stroke::new(1.0, line_color);
     let mut x = rect.left();
     while x <= rect.right() {
@@ -1654,7 +2288,7 @@ fn draw_grid(painter: &egui::Painter, rect: Rect, grid: f32) {
         );
         y += grid;
     }
-    let major_stroke = Stroke::new(1.0, Color32::from_gray(55));
+    let major_stroke = Stroke::new(1.0, Color32::from_rgb(67, 78, 92));
     let major = grid * 5.0;
     let mut x = rect.left();
     while x <= rect.right() {
@@ -1738,6 +2372,38 @@ fn draw_title_block(
             Color32::from_rgb(185, 195, 205),
         );
     }
+}
+
+fn draw_empty_canvas_hint(painter: &egui::Painter, canvas: Rect) {
+    let rect = Rect::from_center_size(canvas.center(), Vec2::new(360.0, 120.0));
+    painter.rect_filled(rect, 6.0, Color32::from_rgba_unmultiplied(20, 24, 30, 225));
+    painter.rect_stroke(
+        rect,
+        6.0,
+        Stroke::new(1.0, Color32::from_rgb(58, 66, 76)),
+        StrokeKind::Outside,
+    );
+    painter.text(
+        rect.center_top() + Vec2::new(0.0, 24.0),
+        Align2::CENTER_TOP,
+        "Start a schematic",
+        egui::FontId::proportional(18.0),
+        Color32::from_rgb(228, 234, 240),
+    );
+    painter.text(
+        rect.center() + Vec2::new(0.0, 6.0),
+        Align2::CENTER_CENTER,
+        "Pick a part on the left, then click the grid.",
+        egui::FontId::proportional(12.0),
+        Color32::from_rgb(156, 166, 176),
+    );
+    painter.text(
+        rect.center_bottom() - Vec2::new(0.0, 22.0),
+        Align2::CENTER_BOTTOM,
+        "Use Wire to connect pins. Enter finishes a wire.",
+        egui::FontId::proportional(12.0),
+        Color32::from_rgb(156, 166, 176),
+    );
 }
 
 fn draw_component(
@@ -3073,6 +3739,283 @@ fn midpoint(a: Pos2, b: Pos2) -> Pos2 {
     Pos2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5)
 }
 
+#[derive(Default)]
+struct UnionFind {
+    parent: Vec<usize>,
+}
+
+impl UnionFind {
+    fn ensure(&mut self, index: usize) {
+        while self.parent.len() <= index {
+            self.parent.push(self.parent.len());
+        }
+    }
+
+    fn find(&mut self, index: usize) -> usize {
+        self.ensure(index);
+        if self.parent[index] != index {
+            self.parent[index] = self.find(self.parent[index]);
+        }
+        self.parent[index]
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let a = self.find(a);
+        let b = self.find(b);
+        if a != b {
+            self.parent[b] = a;
+        }
+    }
+}
+
+fn circuit_to_spice_netlist(components: &[Component], wires: &[Wire]) -> String {
+    let mut nodes = CircuitNodes::default();
+    let mut nets = UnionFind::default();
+
+    for wire in wires {
+        for point in &wire.points {
+            let node = nodes.node_for(*point);
+            nets.ensure(node);
+        }
+        for segment in wire.points.windows(2) {
+            let a = nodes.node_for(segment[0]);
+            let b = nodes.node_for(segment[1]);
+            nets.union(a, b);
+        }
+    }
+
+    for component in components {
+        for pin in component_pin_defs(component) {
+            let node = nodes.node_for(pin.pos);
+            nets.ensure(node);
+        }
+    }
+
+    let mut ground_roots = HashSet::new();
+    for component in components {
+        if component.kind != ComponentKind::Ground {
+            continue;
+        }
+        for pin in component_pin_defs(component) {
+            let node = nodes.node_for(pin.pos);
+            ground_roots.insert(nets.find(node));
+        }
+    }
+
+    let mut named_roots = HashMap::new();
+    for index in 0..nodes.positions.len() {
+        let root = nets.find(index);
+        if ground_roots.contains(&root) {
+            named_roots.insert(root, "0".to_string());
+        }
+    }
+
+    let mut roots = (0..nodes.positions.len())
+        .map(|index| nets.find(index))
+        .collect::<Vec<_>>();
+    roots.sort_unstable();
+    roots.dedup();
+
+    let mut next_net = 1;
+    for root in roots {
+        named_roots.entry(root).or_insert_with(|| {
+            let name = format!("N{next_net:03}");
+            next_net += 1;
+            name
+        });
+    }
+
+    let mut net_name = |pos: Pos2| {
+        let node = nodes.node_for(pos);
+        let root = nets.find(node);
+        named_roots
+            .entry(root)
+            .or_insert_with(|| {
+                let name = format!("N{next_net:03}");
+                next_net += 1;
+                name
+            })
+            .clone()
+    };
+
+    let mut used_names = HashSet::new();
+    let mut lines = Vec::new();
+    let mut skipped = Vec::new();
+    let mut uses_diode_model = false;
+    let mut uses_led_model = false;
+
+    for component in components {
+        let pins = component_pin_defs(component);
+        let line = match component.kind {
+            ComponentKind::Resistor
+            | ComponentKind::Capacitor
+            | ComponentKind::Inductor
+            | ComponentKind::Diode
+            | ComponentKind::Led
+            | ComponentKind::VSource
+            | ComponentKind::ISource
+            | ComponentKind::Battery => {
+                let Some((a, b)) = spice_two_pin_nets(component, &pins, &mut net_name) else {
+                    skipped.push(format!("* skipped {}: missing pins", component.label));
+                    continue;
+                };
+                match component.kind {
+                    ComponentKind::Resistor => Some(format!(
+                        "{} {a} {b} {}",
+                        unique_spice_name("R", &component.label, component.id, &mut used_names),
+                        spice_value(component, "1k")
+                    )),
+                    ComponentKind::Capacitor => Some(format!(
+                        "{} {a} {b} {}",
+                        unique_spice_name("C", &component.label, component.id, &mut used_names),
+                        spice_value(component, "100n")
+                    )),
+                    ComponentKind::Inductor => Some(format!(
+                        "{} {a} {b} {}",
+                        unique_spice_name("L", &component.label, component.id, &mut used_names),
+                        spice_value(component, "10u")
+                    )),
+                    ComponentKind::VSource | ComponentKind::Battery => Some(format!(
+                        "{} {a} {b} DC {}",
+                        unique_spice_name("V", &component.label, component.id, &mut used_names),
+                        spice_value(component, "5")
+                    )),
+                    ComponentKind::ISource => Some(format!(
+                        "{} {a} {b} DC {}",
+                        unique_spice_name("I", &component.label, component.id, &mut used_names),
+                        spice_value(component, "1m")
+                    )),
+                    ComponentKind::Diode => {
+                        uses_diode_model = true;
+                        Some(format!(
+                            "{} {a} {b} DGEN",
+                            unique_spice_name("D", &component.label, component.id, &mut used_names)
+                        ))
+                    }
+                    ComponentKind::Led => {
+                        uses_led_model = true;
+                        Some(format!(
+                            "{} {a} {b} LEDGEN",
+                            unique_spice_name("D", &component.label, component.id, &mut used_names)
+                        ))
+                    }
+                    _ => None,
+                }
+            }
+            ComponentKind::Ground => None,
+            _ => {
+                skipped.push(format!(
+                    "* skipped {}: {} has no SPICE primitive yet",
+                    component.label,
+                    component_kind_label(component.kind)
+                ));
+                None
+            }
+        };
+        if let Some(line) = line {
+            lines.push(line);
+        }
+    }
+
+    let mut output = String::new();
+    output.push_str("* Cluster SPICE netlist\n");
+    output.push_str("* Generated from the schematic connectivity graph.\n");
+    if lines.is_empty() {
+        output.push_str("* No supported SPICE primitives in this schematic.\n");
+    } else {
+        for line in lines {
+            output.push_str(&line);
+            output.push('\n');
+        }
+    }
+    if uses_diode_model {
+        output.push_str(".model DGEN D(Is=2n Rs=0.6 N=1.8)\n");
+    }
+    if uses_led_model {
+        output.push_str(".model LEDGEN D(Is=10n Rs=4 N=2.0 Eg=2.0)\n");
+    }
+    for line in skipped {
+        output.push_str(&line);
+        output.push('\n');
+    }
+    output.push_str(".op\n.end\n");
+    output
+}
+
+fn spice_two_pin_nets(
+    component: &Component,
+    pins: &[CircuitPin],
+    net_name: &mut impl FnMut(Pos2) -> String,
+) -> Option<(String, String)> {
+    match component.kind {
+        ComponentKind::VSource
+        | ComponentKind::Battery
+        | ComponentKind::ISource
+        | ComponentKind::DcMotor => {
+            let positive = pins.iter().find(|pin| pin.role == PinRole::Positive)?;
+            let negative = pins.iter().find(|pin| pin.role == PinRole::Ground)?;
+            Some((net_name(positive.pos), net_name(negative.pos)))
+        }
+        _ => {
+            let a = pins.first()?;
+            let b = pins.get(1)?;
+            Some((net_name(a.pos), net_name(b.pos)))
+        }
+    }
+}
+
+fn unique_spice_name(prefix: &str, label: &str, id: u64, used: &mut HashSet<String>) -> String {
+    let mut name = label
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect::<String>();
+    if name.is_empty() {
+        name = format!("{prefix}{id}");
+    }
+    if !name
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.eq_ignore_ascii_case(&prefix.chars().next().unwrap_or('X')))
+    {
+        name = format!("{prefix}{name}");
+    }
+    if used.insert(name.clone()) {
+        return name;
+    }
+    let with_id = format!("{name}_{id}");
+    used.insert(with_id.clone());
+    with_id
+}
+
+fn spice_value(component: &Component, fallback: &str) -> String {
+    let normalized = component.value.trim().replace(' ', "");
+    if normalized.is_empty() {
+        return fallback.to_string();
+    }
+    let lower = normalized.to_lowercase();
+    let stripped = match component.kind {
+        ComponentKind::Resistor => lower.strip_suffix("ohm").unwrap_or(&normalized),
+        ComponentKind::Capacitor => lower.strip_suffix('f').unwrap_or(&normalized),
+        ComponentKind::Inductor => lower.strip_suffix('h').unwrap_or(&normalized),
+        ComponentKind::VSource | ComponentKind::Battery => lower
+            .strip_suffix("volts")
+            .or_else(|| lower.strip_suffix("volt"))
+            .or_else(|| lower.strip_suffix('v'))
+            .unwrap_or(&normalized),
+        ComponentKind::ISource => lower
+            .strip_suffix("amps")
+            .or_else(|| lower.strip_suffix("amp"))
+            .or_else(|| lower.strip_suffix('a'))
+            .unwrap_or(&normalized),
+        _ => &normalized,
+    };
+    if stripped.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
 fn circuit_to_svg(components: &[Component], wires: &[Wire]) -> String {
     let bounds = circuit_bounds(components, wires)
         .unwrap_or_else(|| Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(960.0, 640.0)));
@@ -3248,6 +4191,48 @@ fn escape_xml(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spice_export_names_connected_nets_and_ground() {
+        let mut app = CircuitApp::new();
+        app.load_led_demo();
+
+        let netlist = circuit_to_spice_netlist(&app.components, &app.wires);
+
+        assert!(netlist.contains("VBAT1"));
+        assert!(netlist.contains("R1"));
+        assert!(netlist.contains("DLED1"));
+        assert!(netlist.contains(" 0 "));
+        assert!(netlist.contains(".model LEDGEN"));
+        assert!(netlist.ends_with(".op\n.end\n"));
+    }
+
+    #[test]
+    fn spice_export_reports_empty_schematic_without_panicking() {
+        let netlist = circuit_to_spice_netlist(&[], &[]);
+
+        assert!(netlist.contains("No supported SPICE primitives"));
+        assert!(netlist.contains(".end"));
+    }
+
+    #[test]
+    fn saved_circuit_round_trips_components_and_wires() {
+        let mut app = CircuitApp::new();
+        app.load_led_demo();
+
+        let json = serde_json::to_string(&SavedCircuit::from_app(&app)).unwrap();
+        let saved = serde_json::from_str::<SavedCircuit>(&json).unwrap();
+        let snapshot = saved.into_snapshot().unwrap();
+
+        assert_eq!(snapshot.components.len(), app.components.len());
+        assert_eq!(snapshot.wires.len(), app.wires.len());
+        assert!(snapshot.next_id > app.components.len() as u64);
+    }
+}
+
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -3263,7 +4248,6 @@ fn main() -> eframe::Result<()> {
         Box::new(|_cc| Ok(Box::new(CircuitApp::new()))),
     )
 }
-
 
 /*
 This is an egui/eframe Rust circuit editor.
