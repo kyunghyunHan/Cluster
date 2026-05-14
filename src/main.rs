@@ -720,6 +720,11 @@ impl SavedCircuit {
 impl eframe::App for CircuitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_app_style(ctx);
+        let simulation = if self.simulate {
+            analyze_circuit(&self.components, &self.wires)
+        } else {
+            Simulation::default()
+        };
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(4.0);
@@ -902,7 +907,6 @@ impl eframe::App for CircuitApp {
                             metric_row(ui, "Parts", self.components.len().to_string());
                             metric_row(ui, "Wires", self.wires.len().to_string());
                             if self.simulate {
-                                let simulation = analyze_circuit(&self.components, &self.wires);
                                 let tone = if simulation.shorted {
                                     StatusTone::Error
                                 } else if simulation.closed {
@@ -920,7 +924,7 @@ impl eframe::App for CircuitApp {
                                 if let Some(current) = simulation.current {
                                     metric_row(ui, "Current", format_current(current));
                                 }
-                                for detail in simulation.details.iter().take(4) {
+                                for detail in simulation.details.iter().take(6) {
                                     ui.label(
                                         egui::RichText::new(detail)
                                             .size(11.0)
@@ -983,6 +987,21 @@ impl eframe::App for CircuitApp {
                                     metric_row(ui, pin.label, format!("{:?}", pin.role));
                                 }
                             }
+                            if let Some(warning) = simulation.component_warnings.get(&component.id) {
+                                ui.add_space(6.0);
+                                egui::Frame::NONE
+                                    .fill(Color32::from_rgb(58, 28, 24))
+                                    .stroke(Stroke::new(1.0, Color32::from_rgb(160, 64, 54)))
+                                    .corner_radius(egui::CornerRadius::same(5))
+                                    .inner_margin(egui::Margin::symmetric(8, 5))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(warning)
+                                                .size(11.0)
+                                                .color(Color32::from_rgb(255, 120, 100)),
+                                        );
+                                    });
+                            }
                         }
                     }
                     Some(Selection::Wire(id)) => {
@@ -1004,7 +1023,11 @@ impl eframe::App for CircuitApp {
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.monospace(format!("Tool: {:?}", self.tool));
+                ui.monospace(format!("Tool: {}", match self.tool {
+                    Tool::Select => "Select".to_string(),
+                    Tool::Wire => "Wire".to_string(),
+                    Tool::Place(kind) => format!("Place {}", component_kind_label(kind)),
+                }));
                 ui.separator();
                 ui.monospace(format!("Grid: {:.0}px", self.grid));
                 ui.separator();
@@ -1029,11 +1052,6 @@ impl eframe::App for CircuitApp {
             let available = ui.available_size();
             let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
             let rect = response.rect;
-            let simulation = if self.simulate {
-                analyze_circuit(&self.components, &self.wires)
-            } else {
-                Simulation::default()
-            };
             let flow_phase = ctx.input(|i| i.time) as f32 * 90.0;
             let show_flow = self.simulate && simulation.closed && !simulation.shorted;
             if show_flow {
@@ -1076,7 +1094,7 @@ impl eframe::App for CircuitApp {
             if let Some(pos) = pointer_in_rect {
                 let mut pos = snap_pos(pos, rect, self.grid, self.snap);
                 if self.tool == Tool::Wire {
-                    pos = snap_to_nearest_pin(pos, &self.components).unwrap_or(pos);
+                    pos = snap_to_nearest_connection(pos, &self.components, &self.wires).unwrap_or(pos);
                 }
                 if self.tool == Tool::Wire && !self.draft_wire.is_empty() {
                     let preview = preview_wire_points(&self.draft_wire, pos, self.orthogonal_wires);
@@ -1101,7 +1119,7 @@ impl eframe::App for CircuitApp {
                             self.add_component(kind, pos);
                         }
                         Tool::Wire => {
-                            let pos = snap_to_nearest_pin(pos, &self.components).unwrap_or(pos);
+                            let pos = snap_to_nearest_connection(pos, &self.components, &self.wires).unwrap_or(pos);
                             self.push_wire_point(pos);
                         }
                     }
@@ -1214,6 +1232,10 @@ impl eframe::App for CircuitApp {
         }
 
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y)) {
+            self.redo();
+        }
+
+        if ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z)) {
             self.redo();
         }
 
@@ -1372,18 +1394,36 @@ fn straighten_neighbor_segments(wire: &mut Wire, point_index: usize) {
     }
 }
 
-fn snap_to_nearest_pin(pos: Pos2, components: &[Component]) -> Option<Pos2> {
-    let mut best = None;
-    let mut best_distance = 14.0;
+fn snap_to_nearest_connection(
+    pos: Pos2,
+    components: &[Component],
+    wires: &[Wire],
+) -> Option<Pos2> {
+    let mut best: Option<Pos2> = None;
+    let mut best_distance = 16.0_f32;
+
+    // Component pins
     for component in components {
         for pin in component_pin_defs(component) {
-            let distance = pin.pos.distance(pos);
-            if distance <= best_distance {
-                best_distance = distance;
+            let d = pin.pos.distance(pos);
+            if d < best_distance {
+                best_distance = d;
                 best = Some(pin.pos);
             }
         }
     }
+
+    // Wire endpoints (first and last point of each wire)
+    for wire in wires {
+        for &ep in wire.points.first().iter().chain(wire.points.last().iter()) {
+            let d = ep.distance(pos);
+            if d < best_distance {
+                best_distance = d;
+                best = Some(*ep);
+            }
+        }
+    }
+
     best
 }
 
@@ -1771,6 +1811,7 @@ struct Simulation {
     voltage: Option<f32>,
     resistance: Option<f32>,
     current: Option<f32>,
+    component_warnings: HashMap<u64, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1789,6 +1830,7 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
     let mut component_edges = Vec::new();
     let mut powered_module_edges = Vec::new();
     let mut wire_edges = Vec::new();
+    let mut component_warnings: HashMap<u64, String> = HashMap::new();
 
     for wire in wires {
         for segment in wire.points.windows(2) {
@@ -1800,6 +1842,7 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         }
     }
 
+    // Pass 1: sources/returns + non-module conductor edges
     for component in components {
         let pins = component_pin_defs(component);
         let pin_nodes: Vec<usize> = pins.iter().map(|pin| nodes.node_for(pin.pos)).collect();
@@ -1829,26 +1872,59 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
                     let b = pin_nodes[1];
                     connect(&mut graph, a, b);
                     component_edges.push((component.id, a, b, conductance == Conductance::Load));
-                } else if component_is_powered_module(component) {
-                    let positives: Vec<usize> = pins
-                        .iter()
-                        .zip(&pin_nodes)
-                        .filter(|(pin, _)| pin.role == PinRole::Positive)
-                        .map(|(_, &node)| node)
-                        .collect();
-                    let grounds: Vec<usize> = pins
-                        .iter()
-                        .zip(&pin_nodes)
-                        .filter(|(pin, _)| pin.role == PinRole::Ground)
-                        .map(|(_, &node)| node)
-                        .collect();
-                    for &positive in &positives {
-                        for &ground in &grounds {
-                            connect(&mut graph, positive, ground);
-                            powered_module_edges.push((component.id, positive, ground));
-                        }
-                    }
                 }
+                // Powered modules handled in pass 2 after polarity check
+            }
+        }
+    }
+
+    // Wire-only reachability — used for polarity checking and short detection
+    let wire_from_positive = reachable_nodes(&wire_graph, &positive_nodes);
+    let wire_from_return = reachable_nodes(&wire_graph, &return_nodes);
+
+    // Pass 2: powered modules — only connect if polarity is correct
+    for component in components {
+        if !component_is_powered_module(component) {
+            continue;
+        }
+        let pins = component_pin_defs(component);
+        let pin_nodes: Vec<usize> = pins.iter().map(|pin| nodes.node_for(pin.pos)).collect();
+
+        let positives: Vec<usize> = pins
+            .iter()
+            .zip(&pin_nodes)
+            .filter(|(pin, _)| pin.role == PinRole::Positive)
+            .map(|(_, &node)| node)
+            .collect();
+        let grounds: Vec<usize> = pins
+            .iter()
+            .zip(&pin_nodes)
+            .filter(|(pin, _)| pin.role == PinRole::Ground)
+            .map(|(_, &node)| node)
+            .collect();
+
+        if positives.is_empty() || grounds.is_empty() {
+            continue;
+        }
+
+        let vcc_on_positive = positives.iter().any(|&n| wire_from_positive.contains(&n));
+        let gnd_on_return = grounds.iter().any(|&n| wire_from_return.contains(&n));
+
+        if vcc_on_positive && gnd_on_return {
+            for &pos in &positives {
+                for &gnd in &grounds {
+                    connect(&mut graph, pos, gnd);
+                    powered_module_edges.push((component.id, pos, gnd));
+                }
+            }
+        } else if !wire_from_positive.is_empty() && !wire_from_return.is_empty() {
+            let vcc_on_return = positives.iter().any(|&n| wire_from_return.contains(&n));
+            let gnd_on_positive = grounds.iter().any(|&n| wire_from_positive.contains(&n));
+            if vcc_on_return || gnd_on_positive {
+                component_warnings.insert(
+                    component.id,
+                    "Polarity reversed: swap VCC and GND connections.".to_string(),
+                );
             }
         }
     }
@@ -1860,6 +1936,7 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         return Simulation {
             summary: "No source or return".to_string(),
             details,
+            component_warnings,
             ..Simulation::default()
         };
     }
@@ -1872,6 +1949,7 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         return Simulation {
             summary: "Open circuit".to_string(),
             details,
+            component_warnings,
             ..Simulation::default()
         };
     }
@@ -1893,7 +1971,7 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         )
         .collect();
 
-    let energized_components = energized_component_edges
+    let mut energized_components: HashSet<u64> = energized_component_edges
         .into_iter()
         .map(|(id, _)| id)
         .chain(
@@ -1918,19 +1996,68 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         )
         .collect();
 
-    let energized_wires = wire_edges
+    let energized_wires: HashSet<u64> = wire_edges
         .into_iter()
         .filter(|(_, a, b)| loop_nodes.contains(a) && loop_nodes.contains(b))
         .map(|(id, _, _)| id)
         .collect();
 
-    let wire_only_from_positive = reachable_nodes(&wire_graph, &positive_nodes);
-    let wire_only_from_return = reachable_nodes(&wire_graph, &return_nodes);
-    let direct_wire_short = wire_only_from_positive
-        .intersection(&wire_only_from_return)
+    // Wire-only short detection reuses wire_from_positive/return already computed
+    let direct_wire_short = wire_from_positive
+        .intersection(&wire_from_return)
         .next()
         .is_some();
     let shorted = energized_loads.is_empty() || (direct_wire_short && energized_loads.is_empty());
+
+    // OLED / Sensor: only mark as energized if I2C (SDA+SCL) is also connected
+    let (ctrl_sda, ctrl_scl) = collect_controller_i2c_nodes(components, &nodes);
+    if !ctrl_sda.is_empty() || !ctrl_scl.is_empty() {
+        for component in components {
+            if !matches!(component.kind, ComponentKind::Oled | ComponentKind::Sensor) {
+                continue;
+            }
+            if !energized_components.contains(&component.id) {
+                continue;
+            }
+            let mut sda_ok = false;
+            let mut scl_ok = false;
+            for pin in component_pin_defs(component) {
+                let Some(node) = nodes.find_existing(pin.pos) else {
+                    continue;
+                };
+                let label = pin.label.to_lowercase();
+                if label.contains("sda") {
+                    sda_ok = ctrl_sda
+                        .iter()
+                        .any(|&s| nodes_connected(&wire_graph, node, s));
+                }
+                if label.contains("scl") {
+                    scl_ok = ctrl_scl
+                        .iter()
+                        .any(|&s| nodes_connected(&wire_graph, node, s));
+                }
+            }
+            if !sda_ok || !scl_ok {
+                energized_components.remove(&component.id);
+                if !component_warnings.contains_key(&component.id) {
+                    let msg = match (sda_ok, scl_ok) {
+                        (false, false) => "SDA and SCL not connected — wire to an I2C controller.",
+                        (false, true) => "SDA not connected — wire to controller SDA pin.",
+                        (true, false) => "SCL not connected — wire to controller SCL pin.",
+                        _ => unreachable!(),
+                    };
+                    component_warnings.insert(component.id, msg.to_string());
+                }
+            }
+        }
+    }
+
+    // Append per-component warnings to details
+    for component in components {
+        if let Some(warning) = component_warnings.get(&component.id) {
+            details.push(format!("{}: {}", component.label, warning));
+        }
+    }
 
     let voltage = estimate_loop_voltage(components, &nodes, &loop_nodes);
     let resistance = estimate_loop_resistance(components, &energized_loads);
@@ -1959,6 +2086,7 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         voltage,
         resistance,
         current,
+        component_warnings,
     }
 }
 
@@ -2017,29 +2145,49 @@ fn nodes_connected(graph: &[HashSet<usize>], a: usize, b: usize) -> bool {
     reachable_nodes(graph, &[a]).contains(&b)
 }
 
+fn collect_controller_i2c_nodes(
+    components: &[Component],
+    nodes: &CircuitNodes,
+) -> (Vec<usize>, Vec<usize>) {
+    let mut sda = Vec::new();
+    let mut scl = Vec::new();
+    for component in components {
+        if !matches!(
+            component.kind,
+            ComponentKind::Esp32
+                | ComponentKind::Esp32S3
+                | ComponentKind::Esp32C3
+                | ComponentKind::ArduinoUno
+                | ComponentKind::RaspberryPiPico
+        ) {
+            continue;
+        }
+        for pin in component_pin_defs(component) {
+            if pin.role != PinRole::I2c {
+                continue;
+            }
+            let Some(node) = nodes.find_existing(pin.pos) else {
+                continue;
+            };
+            let label = pin.label.to_lowercase();
+            if label.contains("sda") {
+                sda.push(node);
+            } else if label.contains("scl") {
+                scl.push(node);
+            }
+        }
+    }
+    (sda, scl)
+}
+
 fn validate_i2c_links(
     components: &[Component],
     nodes: &CircuitNodes,
     wire_graph: &[HashSet<usize>],
 ) -> Vec<String> {
-    let mut esp_sda = Vec::new();
-    let mut esp_scl = Vec::new();
-    for component in components {
-        if !component_is_esp32(component.kind) {
-            continue;
-        }
-        for pin in component_pin_defs(component) {
-            if pin.label.contains("GPIO21") || pin.label.contains("SDA") {
-                if let Some(node) = nodes.find_existing(pin.pos) {
-                    esp_sda.push(node);
-                }
-            }
-            if pin.label.contains("GPIO22") || pin.label.contains("SCL") {
-                if let Some(node) = nodes.find_existing(pin.pos) {
-                    esp_scl.push(node);
-                }
-            }
-        }
+    let (ctrl_sda, ctrl_scl) = collect_controller_i2c_nodes(components, nodes);
+    if ctrl_sda.is_empty() && ctrl_scl.is_empty() {
+        return Vec::new();
     }
 
     let mut details = Vec::new();
@@ -2053,23 +2201,21 @@ fn validate_i2c_links(
             let Some(node) = nodes.find_existing(pin.pos) else {
                 continue;
             };
-            if pin.label.contains("SDA") {
-                sda_ok = esp_sda
+            let label = pin.label.to_lowercase();
+            if label.contains("sda") {
+                sda_ok = ctrl_sda
                     .iter()
-                    .any(|&esp_node| nodes_connected(wire_graph, node, esp_node));
+                    .any(|&ctrl| nodes_connected(wire_graph, node, ctrl));
             }
-            if pin.label.contains("SCL") {
-                scl_ok = esp_scl
+            if label.contains("scl") {
+                scl_ok = ctrl_scl
                     .iter()
-                    .any(|&esp_node| nodes_connected(wire_graph, node, esp_node));
+                    .any(|&ctrl| nodes_connected(wire_graph, node, ctrl));
             }
         }
         if sda_ok && scl_ok {
-            details.push(format!(
-                "{} I2C linked to ESP32 GPIO21/22.",
-                component.label
-            ));
-        } else if !esp_sda.is_empty() || !esp_scl.is_empty() {
+            details.push(format!("{} I2C OK.", component.label));
+        } else {
             details.push(format!(
                 "{} I2C incomplete: SDA {}, SCL {}.",
                 component.label,
@@ -2214,13 +2360,6 @@ fn component_is_powered_module(component: &Component) -> bool {
             | ComponentKind::Servo
             | ComponentKind::Oled
             | ComponentKind::Sensor
-    )
-}
-
-fn component_is_esp32(kind: ComponentKind) -> bool {
-    matches!(
-        kind,
-        ComponentKind::Esp32 | ComponentKind::Esp32S3 | ComponentKind::Esp32C3
     )
 }
 
@@ -2525,16 +2664,7 @@ fn draw_component(
         ComponentKind::Relay => draw_relay(painter, rect, component.rotation, stroke),
         ComponentKind::DcMotor => draw_dc_motor(painter, rect, component.rotation, stroke),
         ComponentKind::Servo => draw_servo(painter, rect, stroke, energized),
-        ComponentKind::Oled => draw_module(
-            painter,
-            component,
-            rect,
-            stroke,
-            energized,
-            "OLED",
-            &["GND", "VCC", "SCL", "SDA"],
-            &[],
-        ),
+        ComponentKind::Oled => draw_oled(painter, component, rect, stroke, energized),
         ComponentKind::Sensor => draw_module(
             painter,
             component,
@@ -2924,12 +3054,16 @@ fn component_pin_defs(component: &Component) -> Vec<CircuitPin> {
                 pos: Pos2::new(rect.left(), center.y + rect.height() * 0.24),
             },
         ],
-        ComponentKind::Oled => vec![
-            module_pin(rect, "GND", PinRole::Ground, false, 4, 0),
-            module_pin(rect, "VCC", PinRole::Positive, false, 4, 1),
-            module_pin(rect, "SCL", PinRole::I2c, false, 4, 2),
-            module_pin(rect, "SDA", PinRole::I2c, false, 4, 3),
-        ],
+        ComponentKind::Oled => {
+            // Pins along the top header row, matching draw_oled layout
+            let step = (rect.width() - 16.0) / 3.0;
+            vec![
+                CircuitPin { label: "GND", role: PinRole::Ground,   pos: Pos2::new(rect.left() + 8.0,               rect.top()) },
+                CircuitPin { label: "VCC", role: PinRole::Positive,  pos: Pos2::new(rect.left() + 8.0 + step,        rect.top()) },
+                CircuitPin { label: "SCL", role: PinRole::I2c,       pos: Pos2::new(rect.left() + 8.0 + step * 2.0,  rect.top()) },
+                CircuitPin { label: "SDA", role: PinRole::I2c,       pos: Pos2::new(rect.left() + 8.0 + step * 3.0,  rect.top()) },
+            ]
+        },
         ComponentKind::Sensor => vec![
             module_pin(rect, "GND", PinRole::Ground, false, 4, 0),
             module_pin(rect, "VCC", PinRole::Positive, false, 4, 1),
@@ -3030,20 +3164,63 @@ fn breadboard_pin_defs(rect: Rect) -> Vec<CircuitPin> {
 }
 
 fn draw_junctions(painter: &egui::Painter, wires: &[Wire]) {
-    let mut points = Vec::new();
+    let mut junction_keys: HashSet<(i32, i32)> = HashSet::new();
+    let mut junctions: Vec<Pos2> = Vec::new();
+
+    let add_junction = |key: (i32, i32), pos: Pos2, set: &mut HashSet<(i32, i32)>, out: &mut Vec<Pos2>| {
+        if set.insert(key) {
+            out.push(pos);
+        }
+    };
+
+    // Pass 1: shared vertices (two or more wires share the same point)
+    let mut counts: HashMap<(i32, i32), (Pos2, usize)> = HashMap::new();
     for wire in wires {
-        points.extend(wire.points.iter().copied());
+        for &point in &wire.points {
+            let key = (point.x.round() as i32, point.y.round() as i32);
+            let entry = counts.entry(key).or_insert((point, 0));
+            entry.1 += 1;
+        }
+    }
+    for (key, (pos, count)) in &counts {
+        if *count > 1 {
+            add_junction(*key, *pos, &mut junction_keys, &mut junctions);
+        }
     }
 
-    for i in 0..points.len() {
-        let connected = points
-            .iter()
-            .enumerate()
-            .filter(|(idx, point)| *idx != i && point.distance(points[i]) < 1.0)
-            .count();
-        if connected > 0 {
-            painter.circle_filled(points[i], 4.2, Color32::from_rgb(105, 178, 255));
+    // Pass 2: T-intersections — wire endpoint lies on another wire's segment
+    let endpoints: Vec<Pos2> = wires
+        .iter()
+        .flat_map(|w| {
+            let mut pts = Vec::new();
+            if let Some(&p) = w.points.first() { pts.push(p); }
+            if w.points.len() > 1 {
+                if let Some(&p) = w.points.last() { pts.push(p); }
+            }
+            pts
+        })
+        .collect();
+
+    for ep in &endpoints {
+        let key = (ep.x.round() as i32, ep.y.round() as i32);
+        if junction_keys.contains(&key) {
+            continue; // already marked
         }
+        for wire in wires {
+            for seg in wire.points.windows(2) {
+                let d = distance_to_segment(*ep, seg[0], seg[1]);
+                // endpoint sits on segment but is not that segment's own endpoint
+                let not_vertex = ep.distance(seg[0]) > 1.5 && ep.distance(seg[1]) > 1.5;
+                if d < 1.5 && not_vertex {
+                    add_junction(key, *ep, &mut junction_keys, &mut junctions);
+                    break;
+                }
+            }
+        }
+    }
+
+    for pos in junctions {
+        painter.circle_filled(pos, 4.2, Color32::from_rgb(105, 178, 255));
     }
 }
 
@@ -3141,7 +3318,7 @@ fn draw_diode(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke
     let center = rect.center();
     let left = Pos2::new(rect.left(), center.y);
     let right = Pos2::new(rect.right(), center.y);
-    let anode = Pos2::new(center.x - rect.width() * 0.2, center.y);
+    let anode = Pos2::new(center.x - rect.width() * 0.18, center.y);
     let cathode = Pos2::new(center.x + rect.width() * 0.2, center.y);
     let tri_top = Pos2::new(
         center.x - rect.width() * 0.18,
@@ -3285,6 +3462,110 @@ fn draw_push_button(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: 
     painter.circle_filled(rotated[3], 3.2, stroke.color);
     painter.line_segment([rotated[4], rotated[5]], stroke);
     painter.line_segment([rotated[6], rotated[7]], stroke);
+}
+
+fn draw_oled(
+    painter: &egui::Painter,
+    _component: &Component,
+    rect: Rect,
+    stroke: Stroke,
+    energized: bool,
+) {
+
+    // PCB body
+    let body_fill = Color32::from_rgb(20, 26, 34);
+    painter.rect_filled(rect, 5.0, body_fill);
+    painter.rect_stroke(rect, 5.0, stroke, StrokeKind::Outside);
+
+    // Display panel inset
+    let screen_margin = 10.0;
+    let pin_row_height = 20.0;
+    let screen_rect = Rect::from_min_max(
+        rect.min + Vec2::new(screen_margin, pin_row_height),
+        rect.max - Vec2::new(screen_margin, screen_margin),
+    );
+
+    if energized {
+        // Screen ON: deep blue background with scan lines and text
+        painter.rect_filled(screen_rect, 3.0, Color32::from_rgb(8, 14, 48));
+        painter.rect_stroke(
+            screen_rect,
+            3.0,
+            Stroke::new(1.0, Color32::from_rgb(60, 120, 200)),
+            StrokeKind::Outside,
+        );
+        // Scan lines
+        let line_color = Color32::from_rgba_unmultiplied(100, 160, 255, 28);
+        let mut y = screen_rect.top() + 5.0;
+        while y < screen_rect.bottom() - 2.0 {
+            painter.line_segment(
+                [
+                    Pos2::new(screen_rect.left() + 3.0, y),
+                    Pos2::new(screen_rect.right() - 3.0, y),
+                ],
+                Stroke::new(1.0, line_color),
+            );
+            y += 4.0;
+        }
+        // Simulated text lines
+        let text_color = Color32::from_rgb(180, 220, 255);
+        let text_lines = ["Hello World", "Cluster v0.2"];
+        for (i, line) in text_lines.iter().enumerate() {
+            let y_off = screen_rect.top() + 10.0 + i as f32 * 16.0;
+            if y_off + 10.0 < screen_rect.bottom() {
+                painter.text(
+                    Pos2::new(screen_rect.center().x, y_off),
+                    Align2::CENTER_TOP,
+                    *line,
+                    egui::FontId::monospace(8.0),
+                    text_color,
+                );
+            }
+        }
+        // Status glow on border
+        painter.rect_stroke(
+            screen_rect.expand(1.5),
+            4.0,
+            Stroke::new(1.5, Color32::from_rgba_unmultiplied(80, 160, 255, 80)),
+            StrokeKind::Outside,
+        );
+    } else {
+        // Screen OFF: dark glass look
+        painter.rect_filled(screen_rect, 3.0, Color32::from_rgb(14, 16, 20));
+        painter.rect_stroke(
+            screen_rect,
+            3.0,
+            Stroke::new(1.0, Color32::from_rgb(38, 44, 52)),
+            StrokeKind::Outside,
+        );
+        painter.text(
+            screen_rect.center(),
+            Align2::CENTER_CENTER,
+            "OFF",
+            egui::FontId::proportional(9.0),
+            Color32::from_rgb(52, 58, 66),
+        );
+    }
+
+    // Pin header row at top
+    let header_y = rect.top() + pin_row_height * 0.5;
+    let pin_labels = ["GND", "VCC", "SCL", "SDA"];
+    let total_w = rect.width() - 16.0;
+    let step = total_w / (pin_labels.len() as f32 - 1.0).max(1.0);
+    for (i, label) in pin_labels.iter().enumerate() {
+        let x = rect.left() + 8.0 + i as f32 * step;
+        let pin_pos = Pos2::new(x, rect.top());
+        painter.line_segment([pin_pos, Pos2::new(x, header_y)], stroke);
+        painter.circle_filled(pin_pos, 2.5, stroke.color);
+        painter.text(
+            Pos2::new(x, header_y + 2.0),
+            Align2::CENTER_TOP,
+            *label,
+            egui::FontId::proportional(7.5),
+            Color32::from_rgb(160, 170, 180),
+        );
+    }
+
 }
 
 fn draw_breadboard(painter: &egui::Painter, rect: Rect, stroke: Stroke) {
@@ -3469,16 +3750,21 @@ fn draw_vsource(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stro
     let radius = rect.width().min(rect.height()) * 0.4;
     let left = Pos2::new(rect.left(), rect.center().y);
     let right = Pos2::new(rect.right(), rect.center().y);
-    let plus_top = Pos2::new(center.x, center.y - radius * 0.4);
-    let plus_bottom = Pos2::new(center.x, center.y + radius * 0.4);
-    let plus_left = Pos2::new(center.x - radius * 0.2, center.y);
-    let plus_right = Pos2::new(center.x + radius * 0.2, center.y);
-    let minus_left = Pos2::new(center.x - radius * 0.2, center.y + radius * 0.45);
-    let minus_right = Pos2::new(center.x + radius * 0.2, center.y + radius * 0.45);
+    let circle_left = Pos2::new(center.x - radius, center.y);
+    let circle_right = Pos2::new(center.x + radius, center.y);
+    // + symbol near positive (right) side, - near negative (left) side
+    let plus_top = Pos2::new(center.x + radius * 0.28, center.y - radius * 0.32);
+    let plus_bottom = Pos2::new(center.x + radius * 0.28, center.y + radius * 0.32);
+    let plus_left = Pos2::new(center.x + radius * 0.06, center.y);
+    let plus_right = Pos2::new(center.x + radius * 0.5, center.y);
+    let minus_left = Pos2::new(center.x - radius * 0.5, center.y);
+    let minus_right = Pos2::new(center.x - radius * 0.06, center.y);
 
     let points = [
         left,
         right,
+        circle_left,
+        circle_right,
         plus_top,
         plus_bottom,
         plus_left,
@@ -3493,21 +3779,12 @@ fn draw_vsource(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stro
         .map(|p| rotate_point(p, center, rotation))
         .collect();
 
-    let left = rotated[0];
-    let right = rotated[1];
-    let plus_top = rotated[2];
-    let plus_bottom = rotated[3];
-    let plus_left = rotated[4];
-    let plus_right = rotated[5];
-    let minus_left = rotated[6];
-    let minus_right = rotated[7];
-
-    painter.line_segment([left, center], stroke);
-    painter.line_segment([center, right], stroke);
+    painter.line_segment([rotated[0], rotated[2]], stroke);
+    painter.line_segment([rotated[3], rotated[1]], stroke);
     painter.circle_stroke(center, radius, stroke);
-    painter.line_segment([plus_top, plus_bottom], stroke);
-    painter.line_segment([plus_left, plus_right], stroke);
-    painter.line_segment([minus_left, minus_right], stroke);
+    painter.line_segment([rotated[4], rotated[5]], stroke);
+    painter.line_segment([rotated[6], rotated[7]], stroke);
+    painter.line_segment([rotated[8], rotated[9]], stroke);
 }
 
 fn draw_isource(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
@@ -3515,23 +3792,25 @@ fn draw_isource(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stro
     let radius = rect.width().min(rect.height()) * 0.4;
     let left = Pos2::new(rect.left(), center.y);
     let right = Pos2::new(rect.right(), center.y);
+    let circle_left = Pos2::new(center.x - radius, center.y);
+    let circle_right = Pos2::new(center.x + radius, center.y);
     let arrow_start = Pos2::new(center.x - radius * 0.35, center.y);
     let arrow_end = Pos2::new(center.x + radius * 0.35, center.y);
     let head_a = Pos2::new(center.x + radius * 0.1, center.y - radius * 0.22);
     let head_b = Pos2::new(center.x + radius * 0.1, center.y + radius * 0.22);
-    let points = [left, right, arrow_start, arrow_end, head_a, head_b];
+    let points = [left, right, circle_left, circle_right, arrow_start, arrow_end, head_a, head_b];
     let rotated: Vec<Pos2> = points
         .iter()
         .copied()
         .map(|p| rotate_point(p, center, rotation))
         .collect();
 
-    painter.line_segment([rotated[0], center], stroke);
-    painter.line_segment([center, rotated[1]], stroke);
+    painter.line_segment([rotated[0], rotated[2]], stroke);
+    painter.line_segment([rotated[3], rotated[1]], stroke);
     painter.circle_stroke(center, radius, stroke);
-    painter.line_segment([rotated[2], rotated[3]], stroke);
-    painter.line_segment([rotated[3], rotated[4]], stroke);
-    painter.line_segment([rotated[3], rotated[5]], stroke);
+    painter.line_segment([rotated[4], rotated[5]], stroke);
+    painter.line_segment([rotated[5], rotated[6]], stroke);
+    painter.line_segment([rotated[5], rotated[7]], stroke);
 }
 
 fn draw_battery(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
@@ -3731,8 +4010,8 @@ fn module_pin_y(rect: Rect, count: usize, index: usize) -> f32 {
     if count <= 1 {
         return rect.center().y;
     }
-    let middle = count / 2;
-    rect.center().y + (index as f32 - middle as f32) * 20.0
+    let middle = (count as f32 - 1.0) / 2.0;
+    rect.center().y + (index as f32 - middle) * 20.0
 }
 
 fn midpoint(a: Pos2, b: Pos2) -> Pos2 {
