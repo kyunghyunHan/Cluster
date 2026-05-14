@@ -118,6 +118,7 @@ struct CircuitApp {
     selected: Option<Selection>,
     drag: Option<DragState>,
     draft_wire: Vec<Pos2>,
+    wire_from_select: bool,
     grid: f32,
     snap: bool,
     orthogonal_wires: bool,
@@ -180,6 +181,7 @@ impl CircuitApp {
             selected: None,
             drag: None,
             draft_wire: Vec::new(),
+            wire_from_select: false,
             grid: 20.0,
             snap: true,
             orthogonal_wires: true,
@@ -533,10 +535,6 @@ impl CircuitApp {
         let Some(index) = self.components.iter().position(|c| c.id == id) else {
             return;
         };
-        if component_is_module(&self.components[index]) {
-            self.status = "Modules stay upright so pin labels remain readable.".to_string();
-            return;
-        }
         self.record_history();
         if let Some(component) = self.components.get_mut(index) {
             component.rotation = (component.rotation + 90) % 360;
@@ -783,6 +781,16 @@ impl eframe::App for CircuitApp {
                     }
                     if menu_action(ui, "Load JSON").clicked() {
                         self.load_circuit_json();
+                        ui.close();
+                    }
+                    ui.separator();
+                    if menu_action(ui, "Tidy all wires  Ctrl+T").clicked() {
+                        self.record_history();
+                        let count = self.wires.len();
+                        for wire in &mut self.wires {
+                            tidy_wire_points(wire);
+                        }
+                        self.status = format!("Tidied {} wire(s).", count);
                         ui.close();
                     }
                     ui.separator();
@@ -1091,12 +1099,26 @@ impl eframe::App for CircuitApp {
             let hover_pos = ui.input(|i| i.pointer.hover_pos());
             let pointer_in_rect = hover_pos.filter(|pos| rect.contains(*pos));
 
-            if let Some(pos) = pointer_in_rect {
-                let mut pos = snap_pos(pos, rect, self.grid, self.snap);
-                if self.tool == Tool::Wire {
-                    pos = snap_to_nearest_connection(pos, &self.components, &self.wires).unwrap_or(pos);
+            if let Some(raw_hover) = pointer_in_rect {
+                let mut pos = snap_pos(raw_hover, rect, self.grid, self.snap);
+                let in_wire_mode = self.tool == Tool::Wire;
+                let in_select_mode = self.tool == Tool::Select;
+                if in_wire_mode || in_select_mode {
+                    let snapped = snap_to_nearest_connection(pos, &self.components, &self.wires);
+                    if let Some(p) = snapped {
+                        pos = p;
+                    }
+                    // Highlight snap target in both modes
+                    if is_connection_point(pos, &self.components, &self.wires) {
+                        painter.circle_stroke(
+                            pos,
+                            7.0,
+                            Stroke::new(1.5, Color32::from_rgb(120, 230, 160)),
+                        );
+                        painter.circle_filled(pos, 3.0, Color32::from_rgb(120, 230, 160));
+                    }
                 }
-                if self.tool == Tool::Wire && !self.draft_wire.is_empty() {
+                if in_wire_mode && !self.draft_wire.is_empty() {
                     let preview = preview_wire_points(&self.draft_wire, pos, self.orthogonal_wires);
                     draw_wire_preview(&painter, &preview);
                 }
@@ -1107,7 +1129,14 @@ impl eframe::App for CircuitApp {
                     let pos = snap_pos(raw_pos, rect, self.grid, self.snap);
                     match self.tool {
                         Tool::Select => {
-                            if let Some(selection) =
+                            let snapped = snap_to_nearest_connection(pos, &self.components, &self.wires);
+                            if let Some(pin_pos) = snapped {
+                                // Clicking a pin/endpoint in Select mode starts a wire
+                                self.tool = Tool::Wire;
+                                self.wire_from_select = true;
+                                self.draft_wire.clear();
+                                self.push_wire_point(pin_pos);
+                            } else if let Some(selection) =
                                 hit_test(raw_pos, &self.components, &self.wires)
                             {
                                 self.selected = Some(selection);
@@ -1120,7 +1149,18 @@ impl eframe::App for CircuitApp {
                         }
                         Tool::Wire => {
                             let pos = snap_to_nearest_connection(pos, &self.components, &self.wires).unwrap_or(pos);
+                            let already_started = !self.draft_wire.is_empty();
+                            let landed_on_target = is_connection_point(pos, &self.components, &self.wires);
                             self.push_wire_point(pos);
+                            // Auto-finish when clicking a pin/endpoint after wire has started
+                            if already_started && landed_on_target && self.draft_wire.len() >= 2 {
+                                let points = std::mem::take(&mut self.draft_wire);
+                                self.add_wire(points);
+                                if self.wire_from_select {
+                                    self.tool = Tool::Select;
+                                    self.wire_from_select = false;
+                                }
+                            }
                         }
                     }
                 }
@@ -1132,6 +1172,10 @@ impl eframe::App for CircuitApp {
                         let points = std::mem::take(&mut self.draft_wire);
                         self.add_wire(points);
                     }
+                    if self.wire_from_select {
+                        self.tool = Tool::Select;
+                        self.wire_from_select = false;
+                    }
                 }
             }
 
@@ -1139,6 +1183,10 @@ impl eframe::App for CircuitApp {
                 if self.tool == Tool::Wire && self.draft_wire.len() >= 2 {
                     let points = std::mem::take(&mut self.draft_wire);
                     self.add_wire(points);
+                    if self.wire_from_select {
+                        self.tool = Tool::Select;
+                        self.wire_from_select = false;
+                    }
                 }
             }
 
@@ -1221,6 +1269,7 @@ impl eframe::App for CircuitApp {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.tool = Tool::Select;
             self.draft_wire.clear();
+            self.wire_from_select = false;
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::R)) {
@@ -1255,6 +1304,25 @@ impl eframe::App for CircuitApp {
             if self.tool == Tool::Wire && self.draft_wire.len() >= 2 {
                 let points = std::mem::take(&mut self.draft_wire);
                 self.add_wire(points);
+            }
+        }
+
+        // T — tidy selected wire; Ctrl+T — tidy all wires
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::T)) {
+            self.record_history();
+            for wire in &mut self.wires {
+                tidy_wire_points(wire);
+            }
+            self.status = format!("Tidied {} wire(s).", self.wires.len());
+        } else if ctx.input(|i| i.key_pressed(egui::Key::T)) {
+            if let Some(Selection::Wire(id)) = self.selected {
+                if self.wires.iter().any(|w| w.id == id) {
+                    self.record_history();
+                    if let Some(wire) = self.wires.iter_mut().find(|w| w.id == id) {
+                        tidy_wire_points(wire);
+                    }
+                    self.status = "Wire straightened.".to_string();
+                }
             }
         }
     }
@@ -1392,6 +1460,24 @@ fn straighten_neighbor_segments(wire: &mut Wire, point_index: usize) {
             wire.points[point_index + 1].y = point.y;
         }
     }
+}
+
+fn is_connection_point(pos: Pos2, components: &[Component], wires: &[Wire]) -> bool {
+    for component in components {
+        for pin in component_pin_defs(component) {
+            if pin.pos.distance(pos) < 2.0 {
+                return true;
+            }
+        }
+    }
+    for wire in wires {
+        for &ep in wire.points.first().iter().chain(wire.points.last().iter()) {
+            if ep.distance(pos) < 2.0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn snap_to_nearest_connection(
@@ -1791,6 +1877,30 @@ fn preview_wire_points(points: &[Pos2], cursor: Pos2, orthogonal: bool) -> Vec<P
     }
     push_unique_point(&mut preview, cursor);
     preview
+}
+
+/// Replaces intermediate points with a minimal 1-bend orthogonal route.
+fn tidy_wire_points(wire: &mut Wire) {
+    if wire.points.len() < 2 {
+        return;
+    }
+    let start = wire.points[0];
+    let end = *wire.points.last().unwrap();
+    let dx = (end.x - start.x).abs();
+    let dy = (end.y - start.y).abs();
+    let new_points = if dx < 0.5 || dy < 0.5 {
+        // Already axis-aligned — straight line
+        vec![start, end]
+    } else {
+        // One L-bend: pick whichever option has the shorter total length
+        let corner_h = Pos2::new(end.x, start.y); // horizontal-first
+        let corner_v = Pos2::new(start.x, end.y); // vertical-first
+        let len_h = start.distance(corner_h) + corner_h.distance(end);
+        let len_v = start.distance(corner_v) + corner_v.distance(end);
+        let corner = if len_h <= len_v { corner_h } else { corner_v };
+        vec![start, corner, end]
+    };
+    wire.points = simplify_wire(new_points);
 }
 
 fn wire_length(wire: &Wire) -> f32 {
@@ -2372,7 +2482,13 @@ fn component_is_switch(kind: ComponentKind) -> bool {
 
 fn component_bounds(component: &Component) -> Rect {
     let size = component_size(component);
-    Rect::from_center_size(component.pos, size)
+    let rot = ((component.rotation % 360) + 360) % 360;
+    let eff = if rot == 90 || rot == 270 {
+        Vec2::new(size.y, size.x)
+    } else {
+        size
+    };
+    Rect::from_center_size(component.pos, eff)
 }
 
 fn component_size(component: &Component) -> Vec2 {
@@ -2561,10 +2677,11 @@ fn draw_component(
     };
     let size = component_size(component);
     let rect = Rect::from_center_size(component.pos, size);
+    let bounds = component_bounds(component); // effective (swapped for 90/270)
 
     if selected {
         painter.rect_stroke(
-            rect.expand(8.0),
+            bounds.expand(8.0),
             4.0,
             Stroke::new(1.0, Color32::from_rgb(70, 140, 125)),
             StrokeKind::Outside,
@@ -2588,89 +2705,42 @@ fn draw_component(
         ComponentKind::OpAmp => draw_opamp(painter, rect, component.rotation, stroke),
         ComponentKind::Lamp => draw_lamp(painter, rect, component.rotation, stroke),
         ComponentKind::Esp32 => draw_module(
-            painter,
-            component,
-            rect,
-            stroke,
-            energized,
+            painter, component, rect, stroke, energized, component.rotation,
             "ESP32",
-            &[
-                "3V3",
-                "GND",
-                "GPIO23",
-                "GPIO22 SCL",
-                "GPIO21 SDA",
-                "TX0",
-                "RX0",
-            ],
+            &["3V3", "GND", "GPIO23", "GPIO22 SCL", "GPIO21 SDA", "TX0", "RX0"],
             &["VIN", "GND", "GPIO18", "GPIO19", "GPIO5", "EN", "RST"],
         ),
         ComponentKind::Esp32S3 => draw_module(
-            painter,
-            component,
-            rect,
-            stroke,
-            energized,
+            painter, component, rect, stroke, energized, component.rotation,
             "ESP32-S3",
-            &[
-                "3V3",
-                "GND",
-                "GPIO1",
-                "GPIO2 SDA",
-                "GPIO3 SCL",
-                "GPIO4",
-                "TX0",
-                "RX0",
-            ],
-            &[
-                "VIN", "GND", "GPIO8", "GPIO9", "GPIO10", "GPIO11", "EN", "RST",
-            ],
+            &["3V3", "GND", "GPIO1", "GPIO2 SDA", "GPIO3 SCL", "GPIO4", "TX0", "RX0"],
+            &["VIN", "GND", "GPIO8", "GPIO9", "GPIO10", "GPIO11", "EN", "RST"],
         ),
         ComponentKind::Esp32C3 => draw_module(
-            painter,
-            component,
-            rect,
-            stroke,
-            energized,
+            painter, component, rect, stroke, energized, component.rotation,
             "ESP32-C3",
             &["3V3", "GND", "GPIO0", "GPIO1 SDA", "GPIO2 SCL", "TX", "RX"],
             &["5V", "GND", "GPIO3", "GPIO4", "GPIO5", "EN", "BOOT"],
         ),
         ComponentKind::ArduinoUno => draw_module(
-            painter,
-            component,
-            rect,
-            stroke,
-            energized,
+            painter, component, rect, stroke, energized, component.rotation,
             "ARDUINO UNO",
             &["VIN", "5V", "3V3", "GND", "GND", "A4 SDA", "A5 SCL"],
-            &[
-                "D2", "D3 PWM", "D5 PWM", "D6 PWM", "D9 PWM", "D10", "D11", "D13",
-            ],
+            &["D2", "D3 PWM", "D5 PWM", "D6 PWM", "D9 PWM", "D10", "D11", "D13"],
         ),
         ComponentKind::RaspberryPiPico => draw_module(
-            painter,
-            component,
-            rect,
-            stroke,
-            energized,
+            painter, component, rect, stroke, energized, component.rotation,
             "PI PICO",
-            &[
-                "VSYS", "3V3", "GND", "GP0 TX", "GP1 RX", "GP4 SDA", "GP5 SCL",
-            ],
+            &["VSYS", "3V3", "GND", "GP0 TX", "GP1 RX", "GP4 SDA", "GP5 SCL"],
             &["VBUS", "GND", "GP14", "GP15", "GP16", "GP17", "RUN"],
         ),
         ComponentKind::Breadboard => draw_breadboard(painter, rect, stroke),
         ComponentKind::Relay => draw_relay(painter, rect, component.rotation, stroke),
         ComponentKind::DcMotor => draw_dc_motor(painter, rect, component.rotation, stroke),
         ComponentKind::Servo => draw_servo(painter, rect, stroke, energized),
-        ComponentKind::Oled => draw_oled(painter, component, rect, stroke, energized),
+        ComponentKind::Oled => draw_oled(painter, component, rect, stroke, energized, component.rotation),
         ComponentKind::Sensor => draw_module(
-            painter,
-            component,
-            rect,
-            stroke,
-            energized,
+            painter, component, rect, stroke, energized, component.rotation,
             "SENSOR",
             &["GND", "VCC", "SCL"],
             &["SDA"],
@@ -2692,7 +2762,7 @@ fn draw_component(
     }
 
     painter.text(
-        rect.center_bottom() + Vec2::new(0.0, 6.0),
+        bounds.center_bottom() + Vec2::new(0.0, 6.0),
         Align2::CENTER_TOP,
         &component.label,
         egui::FontId::proportional(12.0),
@@ -2704,7 +2774,7 @@ fn draw_component(
     );
     if !component.value.trim().is_empty() {
         painter.text(
-            rect.center_top() - Vec2::new(0.0, 6.0),
+            bounds.center_top() - Vec2::new(0.0, 6.0),
             Align2::CENTER_BOTTOM,
             &component.value,
             egui::FontId::proportional(11.0),
@@ -3470,102 +3540,92 @@ fn draw_oled(
     rect: Rect,
     stroke: Stroke,
     energized: bool,
+    rotation: i32,
 ) {
+    let rot = ((rotation % 360) + 360) % 360;
+    let center = rect.center();
 
-    // PCB body
+    // PCB body: swap dims for 90/270
+    let body_rect = if rot == 90 || rot == 270 {
+        Rect::from_center_size(center, Vec2::new(rect.height(), rect.width()))
+    } else {
+        rect
+    };
     let body_fill = Color32::from_rgb(20, 26, 34);
-    painter.rect_filled(rect, 5.0, body_fill);
-    painter.rect_stroke(rect, 5.0, stroke, StrokeKind::Outside);
+    painter.rect_filled(body_rect, 5.0, body_fill);
+    painter.rect_stroke(body_rect, 5.0, stroke, StrokeKind::Outside);
 
-    // Display panel inset
-    let screen_margin = 10.0;
-    let pin_row_height = 20.0;
-    let screen_rect = Rect::from_min_max(
-        rect.min + Vec2::new(screen_margin, pin_row_height),
-        rect.max - Vec2::new(screen_margin, screen_margin),
+    // Screen rect computed in natural space, then rotated to axis-aligned rect
+    let nat_screen = Rect::from_min_max(
+        rect.min + Vec2::new(10.0, 20.0),
+        rect.max - Vec2::new(10.0, 10.0),
     );
+    let sc_corners = [
+        nat_screen.left_top(),
+        nat_screen.right_top(),
+        nat_screen.right_bottom(),
+        nat_screen.left_bottom(),
+    ]
+    .map(|p| rotate_point(p, center, rotation));
+    let screen_rect = Rect::from_points(&sc_corners);
 
     if energized {
-        // Screen ON: deep blue background with scan lines and text
         painter.rect_filled(screen_rect, 3.0, Color32::from_rgb(8, 14, 48));
         painter.rect_stroke(
-            screen_rect,
-            3.0,
+            screen_rect, 3.0,
             Stroke::new(1.0, Color32::from_rgb(60, 120, 200)),
             StrokeKind::Outside,
         );
-        // Scan lines
         let line_color = Color32::from_rgba_unmultiplied(100, 160, 255, 28);
         let mut y = screen_rect.top() + 5.0;
         while y < screen_rect.bottom() - 2.0 {
             painter.line_segment(
-                [
-                    Pos2::new(screen_rect.left() + 3.0, y),
-                    Pos2::new(screen_rect.right() - 3.0, y),
-                ],
+                [Pos2::new(screen_rect.left() + 3.0, y), Pos2::new(screen_rect.right() - 3.0, y)],
                 Stroke::new(1.0, line_color),
             );
             y += 4.0;
         }
-        // Simulated text lines
         let text_color = Color32::from_rgb(180, 220, 255);
-        let text_lines = ["Hello World", "Cluster v0.2"];
-        for (i, line) in text_lines.iter().enumerate() {
+        for (i, line) in ["Hello World", "Cluster v0.2"].iter().enumerate() {
             let y_off = screen_rect.top() + 10.0 + i as f32 * 16.0;
             if y_off + 10.0 < screen_rect.bottom() {
                 painter.text(
                     Pos2::new(screen_rect.center().x, y_off),
-                    Align2::CENTER_TOP,
-                    *line,
-                    egui::FontId::monospace(8.0),
-                    text_color,
+                    Align2::CENTER_TOP, *line,
+                    egui::FontId::monospace(8.0), text_color,
                 );
             }
         }
-        // Status glow on border
         painter.rect_stroke(
-            screen_rect.expand(1.5),
-            4.0,
+            screen_rect.expand(1.5), 4.0,
             Stroke::new(1.5, Color32::from_rgba_unmultiplied(80, 160, 255, 80)),
             StrokeKind::Outside,
         );
     } else {
-        // Screen OFF: dark glass look
         painter.rect_filled(screen_rect, 3.0, Color32::from_rgb(14, 16, 20));
         painter.rect_stroke(
-            screen_rect,
-            3.0,
+            screen_rect, 3.0,
             Stroke::new(1.0, Color32::from_rgb(38, 44, 52)),
             StrokeKind::Outside,
         );
-        painter.text(
-            screen_rect.center(),
-            Align2::CENTER_CENTER,
-            "OFF",
-            egui::FontId::proportional(9.0),
-            Color32::from_rgb(52, 58, 66),
-        );
+        painter.text(screen_rect.center(), Align2::CENTER_CENTER, "OFF",
+            egui::FontId::proportional(9.0), Color32::from_rgb(52, 58, 66));
     }
 
-    // Pin header row at top
-    let header_y = rect.top() + pin_row_height * 0.5;
-    let pin_labels = ["GND", "VCC", "SCL", "SDA"];
-    let total_w = rect.width() - 16.0;
-    let step = total_w / (pin_labels.len() as f32 - 1.0).max(1.0);
-    for (i, label) in pin_labels.iter().enumerate() {
-        let x = rect.left() + 8.0 + i as f32 * step;
-        let pin_pos = Pos2::new(x, rect.top());
-        painter.line_segment([pin_pos, Pos2::new(x, header_y)], stroke);
-        painter.circle_filled(pin_pos, 2.5, stroke.color);
-        painter.text(
-            Pos2::new(x, header_y + 2.0),
-            Align2::CENTER_TOP,
-            *label,
-            egui::FontId::proportional(7.5),
-            Color32::from_rgb(160, 170, 180),
-        );
+    // Pin header: natural positions at top edge, then rotated
+    let step = (rect.width() - 16.0) / 3.0;
+    for (i, label) in ["GND", "VCC", "SCL", "SDA"].iter().enumerate() {
+        let nat_pin   = Pos2::new(rect.left() + 8.0 + i as f32 * step, rect.top());
+        let nat_stub  = Pos2::new(nat_pin.x, rect.top() + 6.0);
+        let nat_label = Pos2::new(nat_pin.x, rect.top() + 11.0);
+        let pin_r   = rotate_point(nat_pin,   center, rotation);
+        let stub_r  = rotate_point(nat_stub,  center, rotation);
+        let label_r = rotate_point(nat_label, center, rotation);
+        painter.line_segment([pin_r, stub_r], stroke);
+        painter.circle_filled(pin_r, 2.5, stroke.color);
+        painter.text(label_r, Align2::CENTER_CENTER, *label,
+            egui::FontId::proportional(7.5), Color32::from_rgb(160, 170, 180));
     }
-
 }
 
 fn draw_breadboard(painter: &egui::Painter, rect: Rect, stroke: Stroke) {
@@ -3950,59 +4010,55 @@ fn draw_module(
     rect: Rect,
     stroke: Stroke,
     energized: bool,
+    rotation: i32,
     title: &str,
     left_labels: &[&str],
     right_labels: &[&str],
 ) {
     let center = rect.center();
-    let body_fill = if energized {
-        Color32::from_rgb(62, 46, 22)
+    let rot = ((rotation % 360) + 360) % 360;
+
+    // Body: swap dims for 90/270
+    let body_rect = if rot == 90 || rot == 270 {
+        Rect::from_center_size(center, Vec2::new(rect.height(), rect.width()))
     } else {
-        Color32::from_rgb(24, 30, 38)
+        rect
     };
-    let outline = Stroke::new(stroke.width, stroke.color);
-    painter.rect_filled(rect, 4.0, body_fill);
-    painter.rect_stroke(rect, 4.0, outline, StrokeKind::Outside);
+    let body_fill = if energized { Color32::from_rgb(62, 46, 22) } else { Color32::from_rgb(24, 30, 38) };
+    painter.rect_filled(body_rect, 4.0, body_fill);
+    painter.rect_stroke(body_rect, 4.0, Stroke::new(stroke.width, stroke.color), StrokeKind::Outside);
 
-    painter.text(
-        center + Vec2::new(0.0, -7.0),
-        Align2::CENTER_CENTER,
-        title,
-        egui::FontId::proportional(14.0),
-        stroke.color,
-    );
-    painter.text(
-        center + Vec2::new(0.0, 10.0),
-        Align2::CENTER_CENTER,
-        &component.value,
-        egui::FontId::proportional(10.0),
-        Color32::from_rgb(150, 160, 170),
-    );
+    painter.text(center + Vec2::new(0.0, -7.0), Align2::CENTER_CENTER, title,
+        egui::FontId::proportional(14.0), stroke.color);
+    painter.text(center + Vec2::new(0.0, 10.0), Align2::CENTER_CENTER, &component.value,
+        egui::FontId::proportional(10.0), Color32::from_rgb(150, 160, 170));
 
+    // Left pins: natural position on left edge, then rotated
     for (i, label) in left_labels.iter().enumerate() {
         let y = module_pin_y(rect, left_labels.len(), i);
-        let pin = Pos2::new(rect.left(), y);
-        painter.line_segment([pin, pin + Vec2::new(10.0, 0.0)], stroke);
-        painter.text(
-            pin + Vec2::new(13.0, 0.0),
-            Align2::LEFT_CENTER,
-            *label,
-            egui::FontId::proportional(9.0),
-            Color32::from_rgb(185, 195, 205),
-        );
+        let nat_pin   = Pos2::new(rect.left(), y);
+        let nat_stub  = nat_pin + Vec2::new(10.0, 0.0);
+        let nat_label = nat_pin + Vec2::new(13.0, 0.0);
+        let pin_r   = rotate_point(nat_pin,   center, rotation);
+        let stub_r  = rotate_point(nat_stub,  center, rotation);
+        let label_r = rotate_point(nat_label, center, rotation);
+        painter.line_segment([pin_r, stub_r], stroke);
+        painter.text(label_r, Align2::CENTER_CENTER, *label,
+            egui::FontId::proportional(9.0), Color32::from_rgb(185, 195, 205));
     }
 
+    // Right pins: natural position on right edge, then rotated
     for (i, label) in right_labels.iter().enumerate() {
         let y = module_pin_y(rect, right_labels.len(), i);
-        let pin = Pos2::new(rect.right(), y);
-        painter.line_segment([pin - Vec2::new(10.0, 0.0), pin], stroke);
-        painter.text(
-            pin - Vec2::new(13.0, 0.0),
-            Align2::RIGHT_CENTER,
-            *label,
-            egui::FontId::proportional(9.0),
-            Color32::from_rgb(185, 195, 205),
-        );
+        let nat_pin   = Pos2::new(rect.right(), y);
+        let nat_stub  = nat_pin - Vec2::new(10.0, 0.0);
+        let nat_label = nat_pin - Vec2::new(13.0, 0.0);
+        let pin_r   = rotate_point(nat_pin,   center, rotation);
+        let stub_r  = rotate_point(nat_stub,  center, rotation);
+        let label_r = rotate_point(nat_label, center, rotation);
+        painter.line_segment([pin_r, stub_r], stroke);
+        painter.text(label_r, Align2::CENTER_CENTER, *label,
+            egui::FontId::proportional(9.0), Color32::from_rgb(185, 195, 205));
     }
 }
 
