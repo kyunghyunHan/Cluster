@@ -130,6 +130,11 @@ struct CircuitApp {
     history: Vec<CircuitSnapshot>,
     redo_history: Vec<CircuitSnapshot>,
     dirty: bool,
+    // View
+    zoom: f32,
+    pan: Vec2,
+    // Clipboard
+    clipboard: Option<Component>,
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +198,9 @@ impl CircuitApp {
             history: Vec::new(),
             redo_history: Vec::new(),
             dirty: false,
+            zoom: 1.0,
+            pan: Vec2::ZERO,
+            clipboard: None,
         }
     }
 
@@ -493,8 +501,8 @@ impl CircuitApp {
     }
 
     fn push_wire_point(&mut self, pos: Pos2) {
-        if self.orthogonal_wires {
-            if let Some(&last) = self.draft_wire.last() {
+        if self.orthogonal_wires
+            && let Some(&last) = self.draft_wire.last() {
                 let dx = (pos.x - last.x).abs();
                 let dy = (pos.y - last.y).abs();
                 if dx > 0.1 && dy > 0.1 {
@@ -506,7 +514,6 @@ impl CircuitApp {
                     push_unique_point(&mut self.draft_wire, corner);
                 }
             }
-        }
         push_unique_point(&mut self.draft_wire, pos);
     }
 
@@ -1066,7 +1073,37 @@ impl eframe::App for CircuitApp {
                 ctx.request_repaint();
             }
 
-            draw_grid(&painter, rect, self.grid);
+            // ── View transform ──────────────────────────────────────────
+            let view = CanvasView { zoom: self.zoom, pan: self.pan, origin: rect.min };
+
+            // Scroll-wheel zoom (centered on cursor)
+            let scroll_delta = ctx.input(|i| i.smooth_scroll_delta.y);
+            if scroll_delta != 0.0 && rect.contains(ctx.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
+                let factor = if scroll_delta > 0.0 { 1.08_f32 } else { 1.0 / 1.08 };
+                let new_zoom = (self.zoom * factor).clamp(0.2, 5.0);
+                if let Some(cursor) = ctx.input(|i| i.pointer.hover_pos()) {
+                    // Keep the world point under the cursor fixed
+                    let world_under = view.to_world(cursor);
+                    let new_view = CanvasView { zoom: new_zoom, pan: self.pan, origin: rect.min };
+                    let new_screen = new_view.to_screen(world_under);
+                    self.pan += cursor - new_screen;
+                }
+                self.zoom = new_zoom;
+            }
+
+            // Middle-mouse or Alt+drag to pan
+            let panning = ctx.input(|i| i.pointer.middle_down())
+                || (response.dragged() && ctx.input(|i| i.modifiers.alt));
+            if panning {
+                self.pan += ctx.input(|i| i.pointer.delta());
+                ctx.request_repaint();
+            }
+
+            // Recompute view after possible pan/zoom changes this frame
+            let view = CanvasView { zoom: self.zoom, pan: self.pan, origin: rect.min };
+
+            // ── Draw ─────────────────────────────────────────────────────
+            draw_grid(&painter, rect, self.grid, view);
             if self.components.is_empty() && self.wires.is_empty() {
                 draw_empty_canvas_hint(&painter, rect);
             }
@@ -1080,6 +1117,7 @@ impl eframe::App for CircuitApp {
                     energized,
                     show_flow && energized,
                     flow_phase,
+                    view,
                 );
             }
 
@@ -1090,70 +1128,61 @@ impl eframe::App for CircuitApp {
                     self.selected == Some(Selection::Component(component.id)),
                     self.show_pins,
                     simulation.energized_components.contains(&component.id),
+                    view,
                 );
             }
 
-            draw_junctions(&painter, &self.wires);
             draw_title_block(&painter, rect, &self.components, &self.wires, &simulation);
 
+            // ── Hover / cursor helpers ───────────────────────────────────
             let hover_pos = ui.input(|i| i.pointer.hover_pos());
             let pointer_in_rect = hover_pos.filter(|pos| rect.contains(*pos));
 
             if let Some(raw_hover) = pointer_in_rect {
-                let mut pos = snap_pos(raw_hover, rect, self.grid, self.snap);
+                // Convert screen → world, snap in world space, convert back for draw
+                let world_hover = view.to_world(raw_hover);
+                let mut world_pos = snap_pos(world_hover, rect, self.grid, self.snap);
                 let in_wire_mode = self.tool == Tool::Wire;
                 let in_select_mode = self.tool == Tool::Select;
                 if in_wire_mode || in_select_mode {
-                    let snapped = snap_to_nearest_connection(pos, &self.components, &self.wires);
-                    if let Some(p) = snapped {
-                        pos = p;
+                    if let Some(p) = snap_to_nearest_connection(world_pos, &self.components, &self.wires) {
+                        world_pos = p;
                     }
-                    // Highlight snap target in both modes
-                    if is_connection_point(pos, &self.components, &self.wires) {
-                        painter.circle_stroke(
-                            pos,
-                            7.0,
-                            Stroke::new(1.5, Color32::from_rgb(120, 230, 160)),
-                        );
-                        painter.circle_filled(pos, 3.0, Color32::from_rgb(120, 230, 160));
+                    if is_connection_point(world_pos, &self.components, &self.wires) {
+                        let sp = view.to_screen(world_pos);
+                        painter.circle_stroke(sp, view.scale_f(7.0), Stroke::new(1.5, Color32::from_rgb(120, 230, 160)));
+                        painter.circle_filled(sp, view.scale_f(3.0), Color32::from_rgb(120, 230, 160));
                     }
                 }
                 if in_wire_mode && !self.draft_wire.is_empty() {
-                    let preview = preview_wire_points(&self.draft_wire, pos, self.orthogonal_wires);
-                    draw_wire_preview(&painter, &preview);
+                    let preview = preview_wire_points(&self.draft_wire, world_pos, self.orthogonal_wires);
+                    let screen_preview: Vec<Pos2> = preview.iter().map(|&p| view.to_screen(p)).collect();
+                    draw_wire_preview(&painter, &screen_preview);
                 }
             }
 
-            if response.clicked_by(egui::PointerButton::Primary) {
-                if let Some(raw_pos) = pointer_in_rect {
-                    let pos = snap_pos(raw_pos, rect, self.grid, self.snap);
+            // ── Click / drag interactions (all in world space) ───────────
+            if response.clicked_by(egui::PointerButton::Primary) && !panning
+                && let Some(raw_pos) = pointer_in_rect {
+                    let world_raw = view.to_world(raw_pos);
+                    let world_pos = snap_pos(world_raw, rect, self.grid, self.snap);
                     match self.tool {
                         Tool::Select => {
-                            let snapped = snap_to_nearest_connection(pos, &self.components, &self.wires);
-                            if let Some(pin_pos) = snapped {
-                                // Clicking a pin/endpoint in Select mode starts a wire
-                                self.tool = Tool::Wire;
-                                self.wire_from_select = true;
-                                self.draft_wire.clear();
-                                self.push_wire_point(pin_pos);
-                            } else if let Some(selection) =
-                                hit_test(raw_pos, &self.components, &self.wires)
-                            {
-                                self.selected = Some(selection);
+                            if let Some(sel) = hit_test(world_raw, &self.components, &self.wires) {
+                                self.selected = Some(sel);
                             } else {
                                 self.selected = None;
                             }
                         }
                         Tool::Place(kind) => {
-                            self.add_component(kind, pos);
+                            self.add_component(kind, world_pos);
                         }
                         Tool::Wire => {
-                            let pos = snap_to_nearest_connection(pos, &self.components, &self.wires).unwrap_or(pos);
+                            let wp = snap_to_nearest_connection(world_pos, &self.components, &self.wires).unwrap_or(world_pos);
                             let already_started = !self.draft_wire.is_empty();
-                            let landed_on_target = is_connection_point(pos, &self.components, &self.wires);
-                            self.push_wire_point(pos);
-                            // Auto-finish when clicking a pin/endpoint after wire has started
-                            if already_started && landed_on_target && self.draft_wire.len() >= 2 {
+                            let landed = is_connection_point(wp, &self.components, &self.wires);
+                            self.push_wire_point(wp);
+                            if already_started && landed && self.draft_wire.len() >= 2 {
                                 let points = std::mem::take(&mut self.draft_wire);
                                 self.add_wire(points);
                                 if self.wire_from_select {
@@ -1164,10 +1193,9 @@ impl eframe::App for CircuitApp {
                         }
                     }
                 }
-            }
 
-            if response.clicked_by(egui::PointerButton::Secondary) {
-                if self.tool == Tool::Wire {
+            if response.clicked_by(egui::PointerButton::Secondary)
+                && self.tool == Tool::Wire {
                     if !self.draft_wire.is_empty() {
                         let points = std::mem::take(&mut self.draft_wire);
                         self.add_wire(points);
@@ -1177,10 +1205,9 @@ impl eframe::App for CircuitApp {
                         self.wire_from_select = false;
                     }
                 }
-            }
 
-            if response.double_clicked() {
-                if self.tool == Tool::Wire && self.draft_wire.len() >= 2 {
+            if response.double_clicked()
+                && self.tool == Tool::Wire && self.draft_wire.len() >= 2 {
                     let points = std::mem::take(&mut self.draft_wire);
                     self.add_wire(points);
                     if self.wire_from_select {
@@ -1188,71 +1215,46 @@ impl eframe::App for CircuitApp {
                         self.wire_from_select = false;
                     }
                 }
-            }
 
-            if response.drag_started() {
-                if self.tool == Tool::Select {
-                    if let Some(pos) = pointer_in_rect {
-                        if let Some((wire_id, point_index)) =
-                            hit_test_wire_control_point(pos, &self.wires)
-                        {
+            if response.drag_started() && !panning
+                && self.tool == Tool::Select
+                    && let Some(pos) = pointer_in_rect {
+                        let world = view.to_world(pos);
+                        if let Some((wire_id, point_index)) = hit_test_wire_control_point(world, &self.wires) {
                             self.record_history();
-                            self.drag = Some(DragState::WirePoint {
-                                wire_id,
-                                point_index,
-                            });
+                            self.drag = Some(DragState::WirePoint { wire_id, point_index });
                             self.selected = Some(Selection::Wire(wire_id));
-                        } else {
+                        } else if let Some(Selection::Component(id)) = hit_test_component(world, &self.components) {
                             self.record_history();
-                            if let Some((wire_id, point_index)) =
-                                insert_wire_control_point(pos, &mut self.wires)
-                            {
-                                self.drag = Some(DragState::WirePoint {
-                                    wire_id,
-                                    point_index,
+                            if let Some(component) = self.components.iter().find(|c| c.id == id) {
+                                self.drag = Some(DragState::Component {
+                                    id,
+                                    offset: world - component.pos,
                                 });
-                                self.selected = Some(Selection::Wire(wire_id));
-                            } else if let Some(Selection::Component(id)) =
-                                hit_test_component(pos, &self.components)
-                            {
-                                if let Some(component) = self.components.iter().find(|c| c.id == id)
-                                {
-                                    self.drag = Some(DragState::Component {
-                                        id,
-                                        offset: pos - component.pos,
-                                    });
-                                    self.selected = Some(Selection::Component(id));
-                                }
-                            } else {
-                                let _ = self.history.pop();
+                                self.selected = Some(Selection::Component(id));
                             }
                         }
                     }
-                }
-            }
 
-            if response.dragged() {
-                if let (Some(drag), Some(pos)) = (self.drag.clone(), pointer_in_rect) {
+            if response.dragged() && !panning
+                && let (Some(drag), Some(pos)) = (self.drag.clone(), pointer_in_rect) {
+                    let world = view.to_world(pos);
                     match drag {
                         DragState::Component { id, offset } => {
                             if let Some(index) = self.components.iter().position(|c| c.id == id) {
                                 let old_pins = component_pins(&self.components[index]);
-                                let pos = snap_pos(pos, rect, self.grid, self.snap);
-                                self.components[index].pos = pos - offset;
+                                let snapped = snap_pos(world, rect, self.grid, self.snap);
+                                self.components[index].pos = snapped - offset;
                                 let new_pins = component_pins(&self.components[index]);
                                 move_attached_wire_endpoints(&mut self.wires, &old_pins, &new_pins);
                             }
                         }
-                        DragState::WirePoint {
-                            wire_id,
-                            point_index,
-                        } => {
-                            let pos = snap_pos(pos, rect, self.grid, self.snap);
-                            move_wire_control_point(&mut self.wires, wire_id, point_index, pos);
+                        DragState::WirePoint { wire_id, point_index } => {
+                            let snapped = snap_pos(world, rect, self.grid, self.snap);
+                            move_wire_control_point(&mut self.wires, wire_id, point_index, snapped);
                         }
                     }
                 }
-            }
 
             let primary_down = ctx.input(|i| i.pointer.primary_down());
             if !primary_down {
@@ -1260,6 +1262,7 @@ impl eframe::App for CircuitApp {
             }
         });
 
+        // ── Keyboard shortcuts ────────────────────────────────────────────
         let delete_pressed = ctx.input(|i| i.key_pressed(egui::Key::Delete))
             || ctx.input(|i| i.key_pressed(egui::Key::Backspace));
         if delete_pressed {
@@ -1292,6 +1295,38 @@ impl eframe::App for CircuitApp {
             self.duplicate_selected();
         }
 
+        // Ctrl+C — copy selected component
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C))
+            && let Some(Selection::Component(id)) = self.selected
+                && let Some(c) = self.components.iter().find(|c| c.id == id) {
+                    self.clipboard = Some(c.clone());
+                    self.status = format!("Copied {}.", c.label);
+                }
+
+        // Ctrl+V — paste clipboard component (offset by one grid step)
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::V)) {
+            if let Some(src) = self.clipboard.clone() {
+                self.record_history();
+                let new_id = self.next_id();
+                let new_label = self.next_label(src.kind);
+                let offset = Vec2::new(self.grid * 2.0, self.grid * 2.0);
+                let new_comp = Component {
+                    id: new_id,
+                    kind: src.kind,
+                    pos: src.pos + offset,
+                    rotation: src.rotation,
+                    label: new_label,
+                    value: src.value.clone(),
+                };
+                self.selected = Some(Selection::Component(new_id));
+                self.status = format!("Pasted {}.", new_comp.label);
+                self.components.push(new_comp);
+                self.dirty = true;
+            } else {
+                self.status = "Nothing in clipboard. Use Ctrl+C to copy first.".to_string();
+            }
+        }
+
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             self.save_circuit_json();
         }
@@ -1300,11 +1335,19 @@ impl eframe::App for CircuitApp {
             self.load_circuit_json();
         }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            if self.tool == Tool::Wire && self.draft_wire.len() >= 2 {
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter))
+            && self.tool == Tool::Wire && self.draft_wire.len() >= 2 {
                 let points = std::mem::take(&mut self.draft_wire);
                 self.add_wire(points);
             }
+
+        // Home / Ctrl+0 — reset view
+        if ctx.input(|i| i.key_pressed(egui::Key::Home))
+            || ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Num0))
+        {
+            self.zoom = 1.0;
+            self.pan = Vec2::ZERO;
+            self.status = "View reset.".to_string();
         }
 
         // T — tidy selected wire; Ctrl+T — tidy all wires
@@ -1314,28 +1357,54 @@ impl eframe::App for CircuitApp {
                 tidy_wire_points(wire);
             }
             self.status = format!("Tidied {} wire(s).", self.wires.len());
-        } else if ctx.input(|i| i.key_pressed(egui::Key::T)) {
-            if let Some(Selection::Wire(id)) = self.selected {
-                if self.wires.iter().any(|w| w.id == id) {
+        } else if ctx.input(|i| i.key_pressed(egui::Key::T))
+            && let Some(Selection::Wire(id)) = self.selected
+                && self.wires.iter().any(|w| w.id == id) {
                     self.record_history();
                     if let Some(wire) = self.wires.iter_mut().find(|w| w.id == id) {
                         tidy_wire_points(wire);
                     }
                     self.status = "Wire straightened.".to_string();
                 }
-            }
-        }
     }
 }
 
-fn snap_pos(pos: Pos2, rect: Rect, grid: f32, snap: bool) -> Pos2 {
-    let mut pos = pos;
-    if snap {
-        let x = ((pos.x - rect.left()) / grid).round() * grid + rect.left();
-        let y = ((pos.y - rect.top()) / grid).round() * grid + rect.top();
-        pos = Pos2::new(x, y);
+/// Canvas coordinate transform: world ↔ screen.
+///
+/// World positions are the stored component/wire positions.
+/// Screen positions are egui painter pixel positions.
+/// At zoom=1 and pan=ZERO the two spaces are identical.
+#[derive(Clone, Copy)]
+struct CanvasView {
+    zoom: f32,
+    pan: Vec2,
+    origin: Pos2, // canvas rect.min
+}
+
+impl CanvasView {
+    fn to_screen(&self, world: Pos2) -> Pos2 {
+        self.origin + (world - self.origin) * self.zoom + self.pan
     }
-    pos
+
+    fn to_world(&self, screen: Pos2) -> Pos2 {
+        self.origin + ((screen - self.origin) - self.pan) / self.zoom
+    }
+
+    fn scale_stroke(&self, s: Stroke) -> Stroke {
+        Stroke::new((s.width * self.zoom.min(1.5)).max(0.8), s.color)
+    }
+
+    fn scale_f(&self, f: f32) -> f32 {
+        (f * self.zoom).clamp(f * 0.4, f * 2.0)
+    }
+}
+
+fn snap_pos(pos: Pos2, _rect: Rect, grid: f32, snap: bool) -> Pos2 {
+    if snap {
+        Pos2::new((pos.x / grid).round() * grid, (pos.y / grid).round() * grid)
+    } else {
+        pos
+    }
 }
 
 fn hit_test(pos: Pos2, components: &[Component], wires: &[Wire]) -> Option<Selection> {
@@ -1392,7 +1461,7 @@ fn hit_test_wire(pos: Pos2, wires: &[Wire]) -> Option<Selection> {
 }
 
 fn hit_test_wire_control_point(pos: Pos2, wires: &[Wire]) -> Option<(u64, usize)> {
-    let threshold = 9.0;
+    let threshold = 14.0;
     for wire in wires.iter().rev() {
         for (index, point) in wire.points.iter().enumerate() {
             if pos.distance(*point) <= threshold {
@@ -1435,7 +1504,10 @@ fn move_wire_control_point(wires: &mut [Wire], wire_id: u64, point_index: usize,
         return;
     }
     wire.points[point_index] = pos;
-    straighten_neighbor_segments(wire, point_index);
+    let is_endpoint = point_index == 0 || point_index + 1 == wire.points.len();
+    if !is_endpoint {
+        straighten_neighbor_segments(wire, point_index);
+    }
 }
 
 fn straighten_neighbor_segments(wire: &mut Wire, point_index: usize) {
@@ -1861,8 +1933,8 @@ fn simplify_wire(points: Vec<Pos2>) -> Vec<Pos2> {
 
 fn preview_wire_points(points: &[Pos2], cursor: Pos2, orthogonal: bool) -> Vec<Pos2> {
     let mut preview = points.to_vec();
-    if orthogonal {
-        if let Some(&last) = preview.last() {
+    if orthogonal
+        && let Some(&last) = preview.last() {
             let dx = (cursor.x - last.x).abs();
             let dy = (cursor.y - last.y).abs();
             if dx > 0.1 && dy > 0.1 {
@@ -1874,7 +1946,6 @@ fn preview_wire_points(points: &[Pos2], cursor: Pos2, orthogonal: bool) -> Vec<P
                 push_unique_point(&mut preview, corner);
             }
         }
-    }
     push_unique_point(&mut preview, cursor);
     preview
 }
@@ -2039,6 +2110,63 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         }
     }
 
+    // Pass 3: modules powered by already-powered modules (e.g., OLED via ESP32's 3V3 output).
+    // Collect positive/ground pin nodes from modules powered in Pass 2, then check remaining modules.
+    {
+        let mut ext_positive = positive_nodes.clone();
+        let mut ext_return = return_nodes.clone();
+        for (powered_id, _, _) in &powered_module_edges {
+            if let Some(c) = components.iter().find(|c| c.id == *powered_id) {
+                for pin in component_pin_defs(c) {
+                    let Some(n) = nodes.find_existing(pin.pos) else { continue };
+                    match pin.role {
+                        PinRole::Positive => ext_positive.push(n),
+                        PinRole::Ground => ext_return.push(n),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let ext_wire_pos = reachable_nodes(&wire_graph, &ext_positive);
+        let ext_wire_ret = reachable_nodes(&wire_graph, &ext_return);
+
+        for component in components {
+            if !component_is_powered_module(component) { continue; }
+            if powered_module_edges.iter().any(|(id, _, _)| *id == component.id) { continue; }
+
+            let pins = component_pin_defs(component);
+            let positives: Vec<usize> = pins.iter()
+                .filter(|p| p.role == PinRole::Positive)
+                .filter_map(|p| nodes.find_existing(p.pos))
+                .collect();
+            let grounds: Vec<usize> = pins.iter()
+                .filter(|p| p.role == PinRole::Ground)
+                .filter_map(|p| nodes.find_existing(p.pos))
+                .collect();
+
+            if positives.is_empty() || grounds.is_empty() { continue; }
+
+            let vcc_ok = positives.iter().any(|&n| ext_wire_pos.contains(&n));
+            let gnd_ok = grounds.iter().any(|&n| ext_wire_ret.contains(&n));
+
+            if vcc_ok && gnd_ok {
+                for &pos in &positives {
+                    for &gnd in &grounds {
+                        connect(&mut graph, pos, gnd);
+                        powered_module_edges.push((component.id, pos, gnd));
+                    }
+                }
+            } else if !ext_wire_pos.is_empty() && !ext_wire_ret.is_empty() {
+                let vcc_on_ret = positives.iter().any(|&n| ext_wire_ret.contains(&n));
+                let gnd_on_pos = grounds.iter().any(|&n| ext_wire_pos.contains(&n));
+                if vcc_on_ret || gnd_on_pos {
+                    component_warnings.entry(component.id)
+                        .or_insert_with(|| "Polarity reversed: swap VCC and GND connections.".to_string());
+                }
+            }
+        }
+    }
+
     let mut details = validate_i2c_links(components, &nodes, &wire_graph);
 
     if positive_nodes.is_empty() || return_nodes.is_empty() {
@@ -2117,48 +2245,50 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         .intersection(&wire_from_return)
         .next()
         .is_some();
-    let shorted = energized_loads.is_empty() || (direct_wire_short && energized_loads.is_empty());
+    // Short if + reaches return via bare wires, OR if the closed loop has no resistive/module load.
+    let shorted = direct_wire_short || energized_loads.is_empty();
 
-    // OLED / Sensor: only mark as energized if I2C (SDA+SCL) is also connected
+    // OLED / Sensor: always require I2C (SDA+SCL) to be wired to a controller.
+    // The guard was previously `if !ctrl_sda.is_empty() || !ctrl_scl.is_empty()`,
+    // but that skipped the check entirely when the controller's I2C pins had no wires,
+    // letting OLED appear energized with wrong or missing connections.
     let (ctrl_sda, ctrl_scl) = collect_controller_i2c_nodes(components, &nodes);
-    if !ctrl_sda.is_empty() || !ctrl_scl.is_empty() {
-        for component in components {
-            if !matches!(component.kind, ComponentKind::Oled | ComponentKind::Sensor) {
+    for component in components {
+        if !matches!(component.kind, ComponentKind::Oled | ComponentKind::Sensor) {
+            continue;
+        }
+        if !energized_components.contains(&component.id) {
+            continue;
+        }
+        let mut sda_ok = false;
+        let mut scl_ok = false;
+        for pin in component_pin_defs(component) {
+            let Some(node) = nodes.find_existing(pin.pos) else {
                 continue;
+            };
+            let label = pin.label.to_lowercase();
+            if label.contains("sda") {
+                sda_ok = ctrl_sda
+                    .iter()
+                    .any(|&s| nodes_connected(&wire_graph, node, s));
             }
-            if !energized_components.contains(&component.id) {
-                continue;
+            if label.contains("scl") {
+                scl_ok = ctrl_scl
+                    .iter()
+                    .any(|&s| nodes_connected(&wire_graph, node, s));
             }
-            let mut sda_ok = false;
-            let mut scl_ok = false;
-            for pin in component_pin_defs(component) {
-                let Some(node) = nodes.find_existing(pin.pos) else {
-                    continue;
+        }
+        if !sda_ok || !scl_ok {
+            energized_components.remove(&component.id);
+            component_warnings.entry(component.id).or_insert_with(|| {
+                let msg = match (sda_ok, scl_ok) {
+                    (false, false) => "SDA and SCL not connected — wire to an I2C controller.",
+                    (false, true) => "SDA not connected — wire to controller SDA pin.",
+                    (true, false) => "SCL not connected — wire to controller SCL pin.",
+                    _ => unreachable!(),
                 };
-                let label = pin.label.to_lowercase();
-                if label.contains("sda") {
-                    sda_ok = ctrl_sda
-                        .iter()
-                        .any(|&s| nodes_connected(&wire_graph, node, s));
-                }
-                if label.contains("scl") {
-                    scl_ok = ctrl_scl
-                        .iter()
-                        .any(|&s| nodes_connected(&wire_graph, node, s));
-                }
-            }
-            if !sda_ok || !scl_ok {
-                energized_components.remove(&component.id);
-                if !component_warnings.contains_key(&component.id) {
-                    let msg = match (sda_ok, scl_ok) {
-                        (false, false) => "SDA and SCL not connected — wire to an I2C controller.",
-                        (false, true) => "SDA not connected — wire to controller SDA pin.",
-                        (true, false) => "SCL not connected — wire to controller SCL pin.",
-                        _ => unreachable!(),
-                    };
-                    component_warnings.insert(component.id, msg.to_string());
-                }
-            }
+                msg.to_string()
+            });
         }
     }
 
@@ -2217,7 +2347,7 @@ impl CircuitNodes {
     fn find_existing(&self, pos: Pos2) -> Option<usize> {
         self.positions
             .iter()
-            .position(|existing| existing.distance(pos) <= 12.0)
+            .position(|existing| existing.distance(pos) <= 4.0)
     }
 }
 
@@ -2394,10 +2524,16 @@ fn parse_metric_value(value: &str, unit_hint: &str) -> Option<f32> {
         0.001
     } else if suffix.starts_with('k') {
         1_000.0
-    } else if suffix.starts_with("meg") || suffix.starts_with('m') && unit_hint == "ohm" {
+    } else if suffix.starts_with("meg") || (suffix.starts_with('m') && unit_hint == "ohm") {
         1_000_000.0
+    } else if suffix.starts_with('m') {
+        0.001
     } else if suffix.starts_with('u') {
         0.000_001
+    } else if suffix.starts_with('n') {
+        0.000_000_001
+    } else if suffix.starts_with('p') {
+        0.000_000_000_001
     } else {
         1.0
     };
@@ -2516,50 +2652,62 @@ fn component_size(component: &Component) -> Vec2 {
         ComponentKind::Oled => (100.0, 120.0),
         ComponentKind::Sensor => (96.0, 100.0),
     };
-    if component.rotation % 180 == 0 {
-        Vec2::new(w, h)
-    } else {
-        Vec2::new(h, w)
-    }
+    Vec2::new(w, h)
 }
 
-fn draw_grid(painter: &egui::Painter, rect: Rect, grid: f32) {
+fn draw_grid(painter: &egui::Painter, rect: Rect, grid: f32, view: CanvasView) {
     painter.rect_filled(rect, 0.0, Color32::from_rgb(18, 22, 28));
-    let line_color = Color32::from_rgb(44, 52, 62);
-    let stroke = Stroke::new(1.0, line_color);
-    let mut x = rect.left();
-    while x <= rect.right() {
-        painter.line_segment(
-            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            stroke,
-        );
-        x += grid;
+
+    let screen_grid = (grid * view.zoom).max(4.0);
+
+    // Compute first grid line in screen space that is inside rect
+    let start_x = {
+        let origin_x = view.to_screen(Pos2::new(rect.left(), 0.0)).x;
+        let offset = (rect.left() - origin_x).rem_euclid(screen_grid);
+        rect.left() + offset
+    };
+    let start_y = {
+        let origin_y = view.to_screen(Pos2::new(0.0, rect.top())).y;
+        let offset = (rect.top() - origin_y).rem_euclid(screen_grid);
+        rect.top() + offset
+    };
+
+    if screen_grid >= 6.0 {
+        let line_color = Color32::from_rgb(44, 52, 62);
+        let stroke = Stroke::new(1.0, line_color);
+        let mut x = start_x;
+        while x <= rect.right() {
+            painter.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], stroke);
+            x += screen_grid;
+        }
+        let mut y = start_y;
+        while y <= rect.bottom() {
+            painter.line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], stroke);
+            y += screen_grid;
+        }
     }
-    let mut y = rect.top();
-    while y <= rect.bottom() {
-        painter.line_segment(
-            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-            stroke,
-        );
-        y += grid;
-    }
+
+    let major_screen = screen_grid * 5.0;
     let major_stroke = Stroke::new(1.0, Color32::from_rgb(67, 78, 92));
-    let major = grid * 5.0;
-    let mut x = rect.left();
+    let start_mx = {
+        let origin_x = view.to_screen(Pos2::new(rect.left(), 0.0)).x;
+        let offset = (rect.left() - origin_x).rem_euclid(major_screen);
+        rect.left() + offset
+    };
+    let start_my = {
+        let origin_y = view.to_screen(Pos2::new(0.0, rect.top())).y;
+        let offset = (rect.top() - origin_y).rem_euclid(major_screen);
+        rect.top() + offset
+    };
+    let mut x = start_mx;
     while x <= rect.right() {
-        painter.line_segment(
-            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            major_stroke,
-        );
-        x += major;
+        painter.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], major_stroke);
+        x += major_screen;
     }
-    let mut y = rect.top();
+    let mut y = start_my;
     while y <= rect.bottom() {
-        painter.line_segment(
-            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-            major_stroke,
-        );
-        y += major;
+        painter.line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], major_stroke);
+        y += major_screen;
     }
 }
 
@@ -2667,6 +2815,7 @@ fn draw_component(
     selected: bool,
     show_pins: bool,
     energized: bool,
+    view: CanvasView,
 ) {
     let stroke = if selected {
         Stroke::new(2.2, Color32::from_rgb(90, 235, 170))
@@ -2675,9 +2824,17 @@ fn draw_component(
     } else {
         Stroke::new(2.0, Color32::from_rgb(222, 226, 232))
     };
-    let size = component_size(component);
-    let rect = Rect::from_center_size(component.pos, size);
-    let bounds = component_bounds(component); // effective (swapped for 90/270)
+    let screen_center = view.to_screen(component.pos);
+    let size = component_size(component) * view.zoom;
+    let rect = Rect::from_center_size(screen_center, size);
+    // Effective bounds (swapped for 90/270 rotation)
+    let rot = ((component.rotation % 360) + 360) % 360;
+    let bounds_size = if rot == 90 || rot == 270 {
+        Vec2::new(size.y, size.x)
+    } else {
+        size
+    };
+    let bounds = Rect::from_center_size(screen_center, bounds_size);
 
     if selected {
         painter.rect_stroke(
@@ -2749,14 +2906,16 @@ fn draw_component(
 
     if show_pins {
         for pin in component_pin_defs(component) {
-            painter.circle_filled(pin.pos, 3.0, Color32::from_rgb(250, 205, 95));
+            let spos = view.to_screen(pin.pos);
+            painter.circle_filled(spos, 3.0, Color32::from_rgb(250, 205, 95));
             painter.circle_stroke(
-                pin.pos,
+                spos,
                 4.0,
                 Stroke::new(1.0, Color32::from_rgb(40, 35, 20)),
             );
             if should_draw_pin_label(component.kind, &pin) {
-                draw_pin_label(painter, component.pos, &pin);
+                let screen_pin = CircuitPin { pos: spos, label: pin.label, role: pin.role };
+                draw_pin_label(painter, screen_center, &screen_pin);
             }
         }
     }
@@ -2790,6 +2949,7 @@ fn draw_wire(
     energized: bool,
     show_flow: bool,
     flow_phase: f32,
+    view: CanvasView,
 ) {
     let stroke = if selected {
         Stroke::new(3.0, Color32::from_rgb(90, 235, 170))
@@ -2798,14 +2958,12 @@ fn draw_wire(
     } else {
         Stroke::new(2.0, Color32::from_rgb(105, 178, 255))
     };
-    for segment in wire.points.windows(2) {
+    let screen_points: Vec<Pos2> = wire.points.iter().map(|&p| view.to_screen(p)).collect();
+    for segment in screen_points.windows(2) {
         painter.line_segment([segment[0], segment[1]], stroke);
     }
-    for point in &wire.points {
-        painter.circle_filled(*point, 2.8, stroke.color);
-    }
     if show_flow {
-        draw_flow_markers(painter, &wire.points, flow_phase);
+        draw_flow_markers(painter, &screen_points, flow_phase);
     }
 }
 
@@ -2904,7 +3062,7 @@ fn draw_wire_preview(painter: &egui::Painter, points: &[Pos2]) {
 }
 
 fn rotate_point(point: Pos2, center: Pos2, rotation: i32) -> Pos2 {
-    let rot = ((rotation % 360) + 360) % 360;
+    let rot = rotation.rem_euclid(360);
     let translated = point - center;
     match rot {
         90 => Pos2::new(center.x - translated.y, center.y + translated.x),
@@ -3233,7 +3391,7 @@ fn breadboard_pin_defs(rect: Rect) -> Vec<CircuitPin> {
     ]
 }
 
-fn draw_junctions(painter: &egui::Painter, wires: &[Wire]) {
+fn draw_junctions(painter: &egui::Painter, wires: &[Wire], view: CanvasView) {
     let mut junction_keys: HashSet<(i32, i32)> = HashSet::new();
     let mut junctions: Vec<Pos2> = Vec::new();
 
@@ -3264,9 +3422,8 @@ fn draw_junctions(painter: &egui::Painter, wires: &[Wire]) {
         .flat_map(|w| {
             let mut pts = Vec::new();
             if let Some(&p) = w.points.first() { pts.push(p); }
-            if w.points.len() > 1 {
-                if let Some(&p) = w.points.last() { pts.push(p); }
-            }
+            if w.points.len() > 1
+                && let Some(&p) = w.points.last() { pts.push(p); }
             pts
         })
         .collect();
@@ -3290,7 +3447,7 @@ fn draw_junctions(painter: &egui::Painter, wires: &[Wire]) {
     }
 
     for pos in junctions {
-        painter.circle_filled(pos, 4.2, Color32::from_rgb(105, 178, 255));
+        painter.circle_filled(view.to_screen(pos), 4.2, Color32::from_rgb(105, 178, 255));
     }
 }
 
@@ -3542,20 +3699,22 @@ fn draw_oled(
     energized: bool,
     rotation: i32,
 ) {
-    let rot = ((rotation % 360) + 360) % 360;
+    let rot = rotation.rem_euclid(360);
     let center = rect.center();
 
-    // PCB body: swap dims for 90/270
     let body_rect = if rot == 90 || rot == 270 {
         Rect::from_center_size(center, Vec2::new(rect.height(), rect.width()))
     } else {
         rect
     };
-    let body_fill = Color32::from_rgb(20, 26, 34);
+    let body_fill = if energized {
+        Color32::from_rgb(22, 30, 42)
+    } else {
+        Color32::from_rgb(20, 26, 34)
+    };
     painter.rect_filled(body_rect, 5.0, body_fill);
     painter.rect_stroke(body_rect, 5.0, stroke, StrokeKind::Outside);
 
-    // Screen rect computed in natural space, then rotated to axis-aligned rect
     let nat_screen = Rect::from_min_max(
         rect.min + Vec2::new(10.0, 20.0),
         rect.max - Vec2::new(10.0, 10.0),
@@ -3570,46 +3729,99 @@ fn draw_oled(
     let screen_rect = Rect::from_points(&sc_corners);
 
     if energized {
-        painter.rect_filled(screen_rect, 3.0, Color32::from_rgb(8, 14, 48));
+        // True OLED black background (unlit pixels are pure black)
+        painter.rect_filled(screen_rect, 3.0, Color32::BLACK);
+
+        // Outer glow around screen
         painter.rect_stroke(
-            screen_rect, 3.0,
-            Stroke::new(1.0, Color32::from_rgb(60, 120, 200)),
+            screen_rect.expand(2.5), 4.0,
+            Stroke::new(2.0, Color32::from_rgba_unmultiplied(80, 200, 255, 60)),
             StrokeKind::Outside,
         );
-        let line_color = Color32::from_rgba_unmultiplied(100, 160, 255, 28);
-        let mut y = screen_rect.top() + 5.0;
-        while y < screen_rect.bottom() - 2.0 {
-            painter.line_segment(
-                [Pos2::new(screen_rect.left() + 3.0, y), Pos2::new(screen_rect.right() - 3.0, y)],
-                Stroke::new(1.0, line_color),
+        painter.rect_stroke(
+            screen_rect, 3.0,
+            Stroke::new(1.0, Color32::from_rgb(40, 160, 220)),
+            StrokeKind::Outside,
+        );
+
+        let sw = screen_rect.width();
+        let sh = screen_rect.height();
+        let sx = screen_rect.left();
+        let sy = screen_rect.top();
+
+        // Top title bar in bright cyan/white — characteristic OLED look
+        let title_y = sy + sh * 0.18;
+        painter.text(
+            Pos2::new(sx + sw * 0.5, sy + sh * 0.08),
+            Align2::CENTER_TOP,
+            "CLUSTER",
+            egui::FontId::monospace(7.0),
+            Color32::from_rgb(255, 255, 255),
+        );
+
+        // Separator line
+        painter.line_segment(
+            [Pos2::new(sx + 4.0, title_y), Pos2::new(sx + sw - 4.0, title_y)],
+            Stroke::new(1.0, Color32::from_rgb(60, 160, 220)),
+        );
+
+        // Signal-bar icon (3 bars, left side)
+        let bar_x = sx + 5.0;
+        let bar_bot = sy + sh * 0.52;
+        for (i, h_frac) in [0.25_f32, 0.45, 0.65].iter().enumerate() {
+            let bh = sh * h_frac;
+            let bx = bar_x + i as f32 * 6.0;
+            painter.rect_filled(
+                Rect::from_min_size(Pos2::new(bx, bar_bot - bh), Vec2::new(4.0, bh)),
+                1.0,
+                if i < 2 { Color32::from_rgb(80, 220, 180) } else { Color32::from_rgb(40, 100, 80) },
             );
-            y += 4.0;
         }
-        let text_color = Color32::from_rgb(180, 220, 255);
-        for (i, line) in ["Hello World", "Cluster v0.2"].iter().enumerate() {
-            let y_off = screen_rect.top() + 10.0 + i as f32 * 16.0;
-            if y_off + 10.0 < screen_rect.bottom() {
-                painter.text(
-                    Pos2::new(screen_rect.center().x, y_off),
-                    Align2::CENTER_TOP, *line,
-                    egui::FontId::monospace(8.0), text_color,
-                );
-            }
-        }
-        painter.rect_stroke(
-            screen_rect.expand(1.5), 4.0,
-            Stroke::new(1.5, Color32::from_rgba_unmultiplied(80, 160, 255, 80)),
-            StrokeKind::Outside,
+
+        // "ON" status text
+        painter.text(
+            Pos2::new(sx + sw - 6.0, sy + sh * 0.38),
+            Align2::RIGHT_CENTER,
+            "ON",
+            egui::FontId::monospace(7.0),
+            Color32::from_rgb(80, 240, 130),
         );
+
+        // Bottom address line (I2C address hint)
+        painter.text(
+            Pos2::new(sx + sw * 0.5, sy + sh * 0.72),
+            Align2::CENTER_TOP,
+            "0x3C",
+            egui::FontId::monospace(7.0),
+            Color32::from_rgb(130, 180, 255),
+        );
+
+        // Pixel-dot decoration row
+        let dot_y = sy + sh * 0.88;
+        let dot_count = ((sw - 10.0) / 5.0) as usize;
+        for i in 0..dot_count {
+            let brightness = if i % 3 == 0 { 180u8 } else { 60 };
+            painter.circle_filled(
+                Pos2::new(sx + 5.0 + i as f32 * 5.0, dot_y),
+                1.2,
+                Color32::from_rgb(brightness, brightness, 255),
+            );
+        }
     } else {
-        painter.rect_filled(screen_rect, 3.0, Color32::from_rgb(14, 16, 20));
+        // Screen off — OLED goes fully dark
+        painter.rect_filled(screen_rect, 3.0, Color32::from_rgb(8, 9, 11));
         painter.rect_stroke(
             screen_rect, 3.0,
-            Stroke::new(1.0, Color32::from_rgb(38, 44, 52)),
+            Stroke::new(1.0, Color32::from_rgb(32, 36, 42)),
             StrokeKind::Outside,
         );
-        painter.text(screen_rect.center(), Align2::CENTER_CENTER, "OFF",
-            egui::FontId::proportional(9.0), Color32::from_rgb(52, 58, 66));
+        painter.text(
+            screen_rect.center(),
+            Align2::CENTER_CENTER,
+            "OFF",
+            egui::FontId::proportional(9.0),
+            Color32::from_rgb(45, 50, 56),
+        );
     }
 
     // Pin header: natural positions at top edge, then rotated
@@ -4016,7 +4228,7 @@ fn draw_module(
     right_labels: &[&str],
 ) {
     let center = rect.center();
-    let rot = ((rotation % 360) + 360) % 360;
+    let rot = rotation.rem_euclid(360);
 
     // Body: swap dims for 90/270
     let body_rect = if rot == 90 || rot == 270 {
@@ -4565,6 +4777,56 @@ mod tests {
         assert_eq!(snapshot.components.len(), app.components.len());
         assert_eq!(snapshot.wires.len(), app.wires.len());
         assert!(snapshot.next_id > app.components.len() as u64);
+    }
+
+    #[test]
+    fn oled_without_i2c_is_not_energized() {
+        // Battery → OLED VCC/GND directly, but NO I2C wires → OLED must stay OFF
+        let mut app = CircuitApp::new();
+        app.reset_canvas();
+        let battery = app.place_component(ComponentKind::Battery, Pos2::new(180.0, 300.0));
+        let oled = app.place_component(ComponentKind::Oled, Pos2::new(420.0, 300.0));
+        app.add_wire_between(battery, "+", oled, "VCC");
+        app.add_wire_between(battery, "-", oled, "GND");
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+        let oled_id = app.components.iter().find(|c| c.kind == ComponentKind::Oled).unwrap().id;
+
+        assert!(
+            !sim.energized_components.contains(&oled_id),
+            "OLED must NOT be energized without I2C connections"
+        );
+        assert!(
+            sim.component_warnings.contains_key(&oled_id),
+            "OLED must have a warning about missing I2C"
+        );
+    }
+
+    #[test]
+    fn esp32_oled_demo_energizes_oled_via_3v3() {
+        let mut app = CircuitApp::new();
+        app.load_esp32_oled_demo();
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+
+        let oled_id = app
+            .components
+            .iter()
+            .find(|c| c.kind == ComponentKind::Oled)
+            .map(|c| c.id)
+            .expect("OLED not placed");
+
+        assert!(sim.closed, "Circuit should be closed");
+        assert!(!sim.shorted, "Circuit should not be shorted");
+        assert!(
+            sim.energized_components.contains(&oled_id),
+            "OLED should be energized when powered via ESP32 3V3 with I2C wired"
+        );
+        assert!(
+            sim.component_warnings.get(&oled_id).is_none(),
+            "OLED should have no warnings: {:?}",
+            sim.component_warnings.get(&oled_id)
+        );
     }
 }
 
