@@ -135,6 +135,16 @@ struct CircuitApp {
     pan: Vec2,
     // Clipboard
     clipboard: Option<Component>,
+    // Last known canvas rect (updated each frame)
+    canvas_rect: Rect,
+    // Cursor world-space position while hovering the canvas
+    cursor_world_pos: Option<Pos2>,
+    // Multi-select: component IDs
+    multi_selected: HashSet<u64>,
+    // World-space anchor for rectangle selection drag
+    rect_select_start: Option<Pos2>,
+    // Palette search filter
+    palette_filter: String,
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +211,11 @@ impl CircuitApp {
             zoom: 1.0,
             pan: Vec2::ZERO,
             clipboard: None,
+            canvas_rect: Rect::EVERYTHING,
+            cursor_world_pos: None,
+            multi_selected: HashSet::new(),
+            rect_select_start: None,
+            palette_filter: String::new(),
         }
     }
 
@@ -518,6 +533,15 @@ impl CircuitApp {
     }
 
     fn delete_selected(&mut self) {
+        if !self.multi_selected.is_empty() {
+            self.record_history();
+            let count = self.multi_selected.len();
+            self.components.retain(|c| !self.multi_selected.contains(&c.id));
+            self.multi_selected.clear();
+            self.selected = None;
+            self.status = format!("Deleted {count} component(s).");
+            return;
+        }
         match self.selected.take() {
             Some(Selection::Component(id)) => {
                 self.record_history();
@@ -616,6 +640,36 @@ impl CircuitApp {
                 self.status = format!("Save failed: {err}");
             }
         }
+    }
+
+    fn export_bom_csv(&mut self) {
+        let mut sorted = self.components.clone();
+        sorted.retain(|c| c.kind != ComponentKind::Ground);
+        sorted.sort_by(|a, b| a.label.cmp(&b.label));
+        let mut lines = vec!["Label,Kind,Value".to_string()];
+        for c in &sorted {
+            lines.push(format!("{},{},{}", c.label, component_kind_label(c.kind), c.value));
+        }
+        let csv = lines.join("\n") + "\n";
+        match fs::write("cluster_bom.csv", csv) {
+            Ok(()) => self.status = format!("Saved cluster_bom.csv ({} parts).", sorted.len()),
+            Err(e) => self.status = format!("BOM export failed: {e}"),
+        }
+    }
+
+    fn zoom_to_fit(&mut self) {
+        let Some(bounds) = circuit_bounds(&self.components, &self.wires) else { return };
+        let canvas = self.canvas_rect;
+        if canvas.width() < 1.0 || canvas.height() < 1.0 { return }
+        let margin = 80.0;
+        let zoom_x = canvas.width() / (bounds.width() + margin * 2.0);
+        let zoom_y = canvas.height() / (bounds.height() + margin * 2.0);
+        self.zoom = zoom_x.min(zoom_y).clamp(0.2, 5.0);
+        let origin = canvas.min;
+        let world_center = bounds.center();
+        let canvas_center = canvas.center();
+        self.pan = (canvas_center - origin) - (world_center - origin) * self.zoom;
+        self.status = "Zoomed to fit.".to_string();
     }
 
     fn load_circuit_json(&mut self) {
@@ -809,6 +863,10 @@ impl eframe::App for CircuitApp {
                         self.export_spice_netlist();
                         ui.close();
                     }
+                    if menu_action(ui, "Export BOM CSV").clicked() {
+                        self.export_bom_csv();
+                        ui.close();
+                    }
                     ui.separator();
                     if menu_action(ui, "Blank schematic").clicked() {
                         self.reset_canvas();
@@ -833,37 +891,38 @@ impl eframe::App for CircuitApp {
             .show(ctx, |ui| {
                 ui.heading("Parts");
                 ui.separator();
+                ui.add_sized(
+                    Vec2::new(ui.available_width(), 22.0),
+                    egui::TextEdit::singleline(&mut self.palette_filter)
+                        .hint_text("Filter parts...")
+                        .text_color(Color32::from_rgb(210, 218, 226)),
+                );
+                ui.add_space(2.0);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        let filter = self.palette_filter.clone();
                         part_section(
-                            ui,
-                            self,
-                            "Passives",
-                            SectionMode::Open,
+                            ui, self, "Passives", SectionMode::Open,
                             &[
                                 ("Resistor", ComponentKind::Resistor),
                                 ("Capacitor", ComponentKind::Capacitor),
                                 ("Inductor", ComponentKind::Inductor),
                                 ("Lamp", ComponentKind::Lamp),
                             ],
+                            &filter,
                         );
                         part_section(
-                            ui,
-                            self,
-                            "Semiconductors",
-                            SectionMode::Open,
+                            ui, self, "Semiconductors", SectionMode::Open,
                             &[
                                 ("Diode", ComponentKind::Diode),
                                 ("LED", ComponentKind::Led),
                                 ("Op Amp", ComponentKind::OpAmp),
                             ],
+                            &filter,
                         );
                         part_section(
-                            ui,
-                            self,
-                            "Sources and IO",
-                            SectionMode::Open,
+                            ui, self, "Sources and IO", SectionMode::Open,
                             &[
                                 ("Ground", ComponentKind::Ground),
                                 ("Voltage Source", ComponentKind::VSource),
@@ -873,12 +932,10 @@ impl eframe::App for CircuitApp {
                                 ("Push Button", ComponentKind::PushButton),
                                 ("Slide Switch", ComponentKind::SlideSwitch),
                             ],
+                            &filter,
                         );
                         part_section(
-                            ui,
-                            self,
-                            "Modules",
-                            SectionMode::Collapsed,
+                            ui, self, "Modules", SectionMode::Collapsed,
                             &[
                                 ("ESP32 WROOM", ComponentKind::Esp32),
                                 ("ESP32-S3", ComponentKind::Esp32S3),
@@ -889,17 +946,16 @@ impl eframe::App for CircuitApp {
                                 ("OLED I2C", ComponentKind::Oled),
                                 ("Sensor", ComponentKind::Sensor),
                             ],
+                            &filter,
                         );
                         part_section(
-                            ui,
-                            self,
-                            "Actuators",
-                            SectionMode::Collapsed,
+                            ui, self, "Actuators", SectionMode::Collapsed,
                             &[
                                 ("Relay", ComponentKind::Relay),
                                 ("DC Motor", ComponentKind::DcMotor),
                                 ("Servo", ComponentKind::Servo),
                             ],
+                            &filter,
                         );
 
                         palette_section(ui, "Examples", SectionMode::Open, |ui| {
@@ -950,6 +1006,9 @@ impl eframe::App for CircuitApp {
                         });
 
                         palette_section(ui, "Shortcuts", SectionMode::Collapsed, |ui| {
+                            metric_row(ui, "W", "wire tool");
+                            metric_row(ui, "S", "select tool");
+                            metric_row(ui, "F", "zoom to fit");
                             metric_row(ui, "R", "rotate");
                             metric_row(ui, "Del", "delete");
                             metric_row(ui, "Enter", "finish wire");
@@ -1046,11 +1105,18 @@ impl eframe::App for CircuitApp {
                 ui.separator();
                 ui.monospace(format!("Grid: {:.0}px", self.grid));
                 ui.separator();
+                ui.monospace(format!("Zoom: {:.0}%", self.zoom * 100.0));
+                ui.separator();
                 ui.label(selection_summary(
                     self.selected,
                     &self.components,
                     &self.wires,
                 ));
+                ui.separator();
+                if let Some(cursor) = self.cursor_world_pos {
+                    ui.separator();
+                    ui.monospace(format!("({:.0}, {:.0})", cursor.x, cursor.y));
+                }
                 ui.separator();
                 ui.colored_label(
                     if self.dirty {
@@ -1067,6 +1133,7 @@ impl eframe::App for CircuitApp {
             let available = ui.available_size();
             let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
             let rect = response.rect;
+            self.canvas_rect = rect;
             let flow_phase = ctx.input(|i| i.time) as f32 * 90.0;
             let show_flow = self.simulate && simulation.closed && !simulation.shorted;
             if show_flow {
@@ -1091,9 +1158,16 @@ impl eframe::App for CircuitApp {
                 self.zoom = new_zoom;
             }
 
-            // Middle-mouse or Alt+drag to pan
+            // Middle-mouse, Alt+drag, or Space+drag to pan
+            let space_held = ctx.input(|i| i.key_down(egui::Key::Space));
+            if space_held {
+                if ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| rect.contains(p)) {
+                    ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                }
+            }
             let panning = ctx.input(|i| i.pointer.middle_down())
-                || (response.dragged() && ctx.input(|i| i.modifiers.alt));
+                || (response.dragged() && ctx.input(|i| i.modifiers.alt))
+                || (response.dragged() && space_held);
             if panning {
                 self.pan += ctx.input(|i| i.pointer.delta());
                 ctx.request_repaint();
@@ -1132,15 +1206,43 @@ impl eframe::App for CircuitApp {
                 );
             }
 
+            // Multi-select highlight boxes
+            for comp in &self.components {
+                if self.multi_selected.contains(&comp.id) {
+                    let sc = view.to_screen(comp.pos);
+                    let sz = component_size(comp) * view.zoom;
+                    let rot = ((comp.rotation % 360) + 360) % 360;
+                    let eff = if rot == 90 || rot == 270 { Vec2::new(sz.y, sz.x) } else { sz };
+                    let sb = Rect::from_center_size(sc, eff);
+                    painter.rect_stroke(
+                        sb.expand(8.0), 4.0,
+                        Stroke::new(1.5, Color32::from_rgb(110, 170, 220)),
+                        StrokeKind::Outside,
+                    );
+                }
+            }
+
+            // Rectangle selection preview
+            if let (Some(start), Some(end)) = (self.rect_select_start, self.cursor_world_pos) {
+                let ss = view.to_screen(start);
+                let se = view.to_screen(end);
+                let sel_rect = Rect::from_two_pos(ss, se);
+                painter.rect_filled(sel_rect, 0.0, Color32::from_rgba_unmultiplied(100, 178, 255, 18));
+                painter.rect_stroke(sel_rect, 0.0, Stroke::new(1.0, Color32::from_rgb(100, 178, 255)), StrokeKind::Outside);
+            }
+
+            draw_junctions(&painter, &self.wires, view);
             draw_title_block(&painter, rect, &self.components, &self.wires, &simulation);
 
             // ── Hover / cursor helpers ───────────────────────────────────
             let hover_pos = ui.input(|i| i.pointer.hover_pos());
             let pointer_in_rect = hover_pos.filter(|pos| rect.contains(*pos));
 
+            self.cursor_world_pos = None;
             if let Some(raw_hover) = pointer_in_rect {
                 // Convert screen → world, snap in world space, convert back for draw
                 let world_hover = view.to_world(raw_hover);
+                self.cursor_world_pos = Some(world_hover);
                 let mut world_pos = snap_pos(world_hover, rect, self.grid, self.snap);
                 let in_wire_mode = self.tool == Tool::Wire;
                 let in_select_mode = self.tool == Tool::Select;
@@ -1159,6 +1261,20 @@ impl eframe::App for CircuitApp {
                     let screen_preview: Vec<Pos2> = preview.iter().map(|&p| view.to_screen(p)).collect();
                     draw_wire_preview(&painter, &screen_preview);
                 }
+
+                // Component hover tooltip drawn directly on the canvas
+                if self.tool == Tool::Select {
+                    if let Some(Selection::Component(hov_id)) = hit_test_component(world_hover, &self.components) {
+                        if let Some(comp) = self.components.iter().find(|c| c.id == hov_id) {
+                            let tip_text = format!("{} — {}", component_kind_label(comp.kind), comp.value);
+                            let tip_pos = raw_hover + egui::Vec2::new(14.0, -8.0);
+                            let bg = Rect::from_min_size(tip_pos - egui::Vec2::new(4.0, 4.0), egui::Vec2::new(tip_text.len() as f32 * 6.5 + 8.0, 20.0));
+                            painter.rect_filled(bg, 3.0, Color32::from_rgba_unmultiplied(20, 24, 30, 220));
+                            painter.rect_stroke(bg, 3.0, Stroke::new(1.0, Color32::from_rgb(60, 68, 78)), StrokeKind::Outside);
+                            painter.text(tip_pos, Align2::LEFT_TOP, &tip_text, egui::FontId::proportional(11.0), Color32::from_rgb(210, 218, 226));
+                        }
+                    }
+                }
             }
 
             // ── Click / drag interactions (all in world space) ───────────
@@ -1168,10 +1284,39 @@ impl eframe::App for CircuitApp {
                     let world_pos = snap_pos(world_raw, rect, self.grid, self.snap);
                     match self.tool {
                         Tool::Select => {
+                            let ctrl = ctx.input(|i| i.modifiers.command);
                             if let Some(sel) = hit_test(world_raw, &self.components, &self.wires) {
-                                self.selected = Some(sel);
-                            } else {
+                                // Toggle switch on single click (immutable check first, then mutate)
+                                if let Selection::Component(cid) = sel {
+                                    let is_sw = self.components.iter()
+                                        .find(|c| c.id == cid)
+                                        .is_some_and(|c| component_is_switch(c.kind));
+                                    if is_sw {
+                                        self.record_history();
+                                        if let Some(comp) = self.components.iter_mut().find(|c| c.id == cid) {
+                                            let open = comp.value.to_lowercase().contains("open");
+                                            comp.value = if open { "closed".to_string() } else { "open".to_string() };
+                                            self.status = format!("{}: {}", comp.label, comp.value);
+                                        }
+                                        self.selected = Some(Selection::Component(cid));
+                                    }
+                                }
+                                // Ctrl+click toggles multi-select; plain click sets primary selection
+                                if ctrl {
+                                    if let Selection::Component(cid) = sel {
+                                        if self.multi_selected.contains(&cid) {
+                                            self.multi_selected.remove(&cid);
+                                        } else {
+                                            self.multi_selected.insert(cid);
+                                        }
+                                    }
+                                } else {
+                                    self.selected = Some(sel);
+                                    self.multi_selected.clear();
+                                }
+                            } else if !ctrl {
                                 self.selected = None;
+                                self.multi_selected.clear();
                             }
                         }
                         Tool::Place(kind) => {
@@ -1224,6 +1369,12 @@ impl eframe::App for CircuitApp {
                             self.record_history();
                             self.drag = Some(DragState::WirePoint { wire_id, point_index });
                             self.selected = Some(Selection::Wire(wire_id));
+                        } else if hit_test_wire(world, &self.wires).is_some() {
+                            self.record_history();
+                            if let Some((wire_id, point_index)) = insert_wire_control_point(world, &mut self.wires) {
+                                self.drag = Some(DragState::WirePoint { wire_id, point_index });
+                                self.selected = Some(Selection::Wire(wire_id));
+                            }
                         } else if let Some(Selection::Component(id)) = hit_test_component(world, &self.components) {
                             self.record_history();
                             if let Some(component) = self.components.iter().find(|c| c.id == id) {
@@ -1232,6 +1383,18 @@ impl eframe::App for CircuitApp {
                                     offset: world - component.pos,
                                 });
                                 self.selected = Some(Selection::Component(id));
+                                // Ensure dragged component is in multi_selected if multi_selected is active
+                                if !self.multi_selected.is_empty() {
+                                    self.multi_selected.insert(id);
+                                }
+                            }
+                        } else {
+                            // Empty area — start rectangle selection
+                            let ctrl = ctx.input(|i| i.modifiers.command);
+                            self.rect_select_start = Some(world);
+                            if !ctrl {
+                                self.selected = None;
+                                self.multi_selected.clear();
                             }
                         }
                     }
@@ -1241,9 +1404,22 @@ impl eframe::App for CircuitApp {
                     let world = view.to_world(pos);
                     match drag {
                         DragState::Component { id, offset } => {
-                            if let Some(index) = self.components.iter().position(|c| c.id == id) {
+                            let snapped = snap_pos(world, rect, self.grid, self.snap);
+                            let in_multi = self.multi_selected.len() > 1 && self.multi_selected.contains(&id);
+                            if in_multi {
+                                // Move all multi-selected components by the same delta
+                                let old_pos = self.components.iter().find(|c| c.id == id).map(|c| c.pos);
+                                if let Some(old_pos) = old_pos {
+                                    let delta = snapped - offset - old_pos;
+                                    let ids = self.multi_selected.clone();
+                                    for comp in self.components.iter_mut() {
+                                        if ids.contains(&comp.id) {
+                                            comp.pos += delta;
+                                        }
+                                    }
+                                }
+                            } else if let Some(index) = self.components.iter().position(|c| c.id == id) {
                                 let old_pins = component_pins(&self.components[index]);
-                                let snapped = snap_pos(world, rect, self.grid, self.snap);
                                 self.components[index].pos = snapped - offset;
                                 let new_pins = component_pins(&self.components[index]);
                                 move_attached_wire_endpoints(&mut self.wires, &old_pins, &new_pins);
@@ -1259,13 +1435,37 @@ impl eframe::App for CircuitApp {
             let primary_down = ctx.input(|i| i.pointer.primary_down());
             if !primary_down {
                 self.drag = None;
+                if let Some(start) = self.rect_select_start.take() {
+                    if let Some(end) = self.cursor_world_pos {
+                        if start.distance(end) > 4.0 {
+                            let sel = Rect::from_two_pos(start, end);
+                            for comp in &self.components {
+                                if sel.contains(comp.pos) {
+                                    self.multi_selected.insert(comp.id);
+                                }
+                            }
+                            self.status = format!("{} component(s) selected.", self.multi_selected.len());
+                        }
+                    }
+                }
             }
         });
 
         // ── Keyboard shortcuts ────────────────────────────────────────────
-        let delete_pressed = ctx.input(|i| i.key_pressed(egui::Key::Delete))
-            || ctx.input(|i| i.key_pressed(egui::Key::Backspace));
-        if delete_pressed {
+        let backspace = ctx.input(|i| i.key_pressed(egui::Key::Backspace));
+        // Backspace during wire drawing removes the last placed point
+        if backspace && self.tool == Tool::Wire && !self.draft_wire.is_empty() {
+            self.draft_wire.pop();
+            if self.orthogonal_wires && self.draft_wire.len() >= 2 {
+                // pop the auto-inserted L-bend corner too
+                self.draft_wire.pop();
+            }
+            self.status = if self.draft_wire.is_empty() {
+                "Wire cancelled.".to_string()
+            } else {
+                "Wire point removed.".to_string()
+            };
+        } else if ctx.input(|i| i.key_pressed(egui::Key::Delete)) || backspace {
             self.delete_selected();
         }
 
@@ -1327,6 +1527,11 @@ impl eframe::App for CircuitApp {
             }
         }
 
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+            self.multi_selected = self.components.iter().map(|c| c.id).collect();
+            self.status = format!("Selected all {} component(s).", self.multi_selected.len());
+        }
+
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             self.save_circuit_json();
         }
@@ -1366,6 +1571,26 @@ impl eframe::App for CircuitApp {
                     }
                     self.status = "Wire straightened.".to_string();
                 }
+
+        // W — Wire tool
+        if ctx.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::W)) {
+            self.tool = Tool::Wire;
+            self.draft_wire.clear();
+            self.status = "Wire tool.".to_string();
+        }
+
+        // S — Select tool
+        if ctx.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::S)) {
+            self.tool = Tool::Select;
+            self.draft_wire.clear();
+            self.wire_from_select = false;
+            self.status = "Select tool.".to_string();
+        }
+
+        // F — Zoom to fit
+        if ctx.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::F)) {
+            self.zoom_to_fit();
+        }
     }
 }
 
@@ -1780,9 +2005,20 @@ fn part_section(
     title: &str,
     mode: SectionMode,
     parts: &[(&str, ComponentKind)],
+    filter: &str,
 ) {
-    palette_section(ui, title, mode, |ui| {
-        for (label, kind) in parts {
+    let lf = filter.to_lowercase();
+    let filtered: Vec<_> = if lf.is_empty() {
+        parts.iter().copied().collect()
+    } else {
+        parts.iter().copied().filter(|(label, _)| label.to_lowercase().contains(&lf)).collect()
+    };
+    if filtered.is_empty() {
+        return;
+    }
+    let effective_mode = if lf.is_empty() { mode } else { SectionMode::Open };
+    palette_section(ui, title, effective_mode, |ui| {
+        for (label, kind) in &filtered {
             part_button(ui, app, label, *kind);
         }
     });
