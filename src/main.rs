@@ -18,6 +18,7 @@ enum ComponentKind {
     Inductor,
     Diode,
     Led,
+    ZenerDiode,
     Switch,
     PushButton,
     SlideSwitch,
@@ -27,6 +28,19 @@ enum ComponentKind {
     Battery,
     OpAmp,
     Lamp,
+    Potentiometer,
+    NpnTransistor,
+    PnpTransistor,
+    Nmosfet,
+    Pmosfet,
+    VoltageReg,
+    Fuse,
+    LogicNot,
+    LogicAnd,
+    LogicOr,
+    LogicNand,
+    LogicNor,
+    LogicXor,
     Esp32,
     Esp32S3,
     Esp32C3,
@@ -93,6 +107,7 @@ struct Counters {
     inductor: usize,
     diode: usize,
     led: usize,
+    zener: usize,
     switch: usize,
     ground: usize,
     vsource: usize,
@@ -100,6 +115,13 @@ struct Counters {
     battery: usize,
     opamp: usize,
     lamp: usize,
+    pot: usize,
+    npn: usize,
+    pnp: usize,
+    mosfet: usize,
+    vreg: usize,
+    fuse: usize,
+    logic_gate: usize,
     esp32: usize,
     arduino: usize,
     pico: usize,
@@ -297,6 +319,52 @@ impl CircuitApp {
                 self.counters.led += 1;
                 format!("LED{}", self.counters.led)
             }
+            ComponentKind::ZenerDiode => {
+                self.counters.zener += 1;
+                format!("ZD{}", self.counters.zener)
+            }
+            ComponentKind::NpnTransistor => {
+                self.counters.npn += 1;
+                format!("Q{}", self.counters.npn)
+            }
+            ComponentKind::PnpTransistor => {
+                self.counters.pnp += 1;
+                format!("Q{}", self.counters.pnp + 100)
+            }
+            ComponentKind::Nmosfet => {
+                self.counters.mosfet += 1;
+                format!("M{}", self.counters.mosfet)
+            }
+            ComponentKind::Pmosfet => {
+                self.counters.mosfet += 1;
+                format!("M{}", self.counters.mosfet + 100)
+            }
+            ComponentKind::Potentiometer => {
+                self.counters.pot += 1;
+                format!("RV{}", self.counters.pot)
+            }
+            ComponentKind::VoltageReg => {
+                self.counters.vreg += 1;
+                format!("U{}", self.counters.vreg + 50)
+            }
+            ComponentKind::Fuse => {
+                self.counters.fuse += 1;
+                format!("F{}", self.counters.fuse)
+            }
+            ComponentKind::LogicNot | ComponentKind::LogicAnd | ComponentKind::LogicOr
+            | ComponentKind::LogicNand | ComponentKind::LogicNor | ComponentKind::LogicXor => {
+                self.counters.logic_gate += 1;
+                let prefix = match kind {
+                    ComponentKind::LogicNot => "INV",
+                    ComponentKind::LogicAnd => "AND",
+                    ComponentKind::LogicOr  => "OR",
+                    ComponentKind::LogicNand => "NAND",
+                    ComponentKind::LogicNor  => "NOR",
+                    ComponentKind::LogicXor  => "XOR",
+                    _ => "G",
+                };
+                format!("{}{}", prefix, self.counters.logic_gate)
+            }
             ComponentKind::Switch | ComponentKind::PushButton | ComponentKind::SlideSwitch => {
                 self.counters.switch += 1;
                 format!("SW{}", self.counters.switch)
@@ -375,6 +443,20 @@ impl CircuitApp {
             ComponentKind::Inductor => "10uH".to_string(),
             ComponentKind::Diode => "1N4148".to_string(),
             ComponentKind::Led => "red".to_string(),
+            ComponentKind::ZenerDiode => "5.1V".to_string(),
+            ComponentKind::NpnTransistor => "2N2222".to_string(),
+            ComponentKind::PnpTransistor => "2N2907".to_string(),
+            ComponentKind::Nmosfet => "2N7000".to_string(),
+            ComponentKind::Pmosfet => "IRF9540".to_string(),
+            ComponentKind::Potentiometer => "10k".to_string(),
+            ComponentKind::VoltageReg => "LM7805".to_string(),
+            ComponentKind::Fuse => "500mA".to_string(),
+            ComponentKind::LogicNot => "74HC04".to_string(),
+            ComponentKind::LogicAnd => "74HC08".to_string(),
+            ComponentKind::LogicOr => "74HC32".to_string(),
+            ComponentKind::LogicNand => "74HC00".to_string(),
+            ComponentKind::LogicNor => "74HC02".to_string(),
+            ComponentKind::LogicXor => "74HC86".to_string(),
             ComponentKind::Switch => "closed".to_string(),
             ComponentKind::PushButton => "open".to_string(),
             ComponentKind::SlideSwitch => "closed".to_string(),
@@ -513,6 +595,57 @@ impl CircuitApp {
         self.add_wire_between(motor, "-", relay, "COM");
         self.add_wire_between(relay, "NO", ground, "GND");
         self.status = "Loaded relay-controlled motor demo.".to_string();
+    }
+
+    fn load_transistor_switch_demo(&mut self) {
+        self.reset_canvas();
+        let battery  = self.place_component(ComponentKind::Battery,      Pos2::new(180.0, 380.0));
+        let resistor = self.place_component(ComponentKind::Resistor,     Pos2::new(360.0, 200.0));
+        let led      = self.place_component(ComponentKind::Led,          Pos2::new(520.0, 200.0));
+        let npn      = self.place_component(ComponentKind::NpnTransistor, Pos2::new(600.0, 360.0));
+        let rb       = self.place_component(ComponentKind::Resistor,     Pos2::new(400.0, 400.0));
+        let ground   = self.place_component(ComponentKind::Ground,       Pos2::new(700.0, 500.0));
+
+        self.add_wire_between(battery, "+", resistor, "A");
+        self.add_wire_between(resistor, "B", led, "A");
+        self.add_wire_between(led, "B", npn, "C");
+        self.add_wire_between(npn, "E", ground, "GND");
+        self.add_wire_between(battery, "+", rb, "A");
+        self.add_wire_between(rb, "B", npn, "B");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.status = "Loaded NPN transistor switch demo.".to_string();
+    }
+
+    fn load_voltage_divider_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery,  Pos2::new(200.0, 300.0));
+        let r1      = self.place_component(ComponentKind::Resistor, Pos2::new(400.0, 200.0));
+        let r2      = self.place_component(ComponentKind::Resistor, Pos2::new(400.0, 380.0));
+        let ground  = self.place_component(ComponentKind::Ground,   Pos2::new(560.0, 480.0));
+
+        self.add_wire_between(battery, "+", r1, "A");
+        self.add_wire_between(r1, "B", r2, "A");
+        self.add_wire_between(r2, "B", ground, "GND");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.status = "Loaded voltage divider demo. Middle node = Vout.".to_string();
+    }
+
+    fn load_logic_demo(&mut self) {
+        self.reset_canvas();
+        let vsrc  = self.place_component(ComponentKind::VSource,  Pos2::new(160.0, 300.0));
+        let not1  = self.place_component(ComponentKind::LogicNot,  Pos2::new(360.0, 260.0));
+        let not2  = self.place_component(ComponentKind::LogicNot,  Pos2::new(500.0, 260.0));
+        let led   = self.place_component(ComponentKind::Led,       Pos2::new(660.0, 260.0));
+        let r     = self.place_component(ComponentKind::Resistor,  Pos2::new(580.0, 260.0));
+        let ground = self.place_component(ComponentKind::Ground,   Pos2::new(760.0, 360.0));
+
+        self.add_wire_between(vsrc, "+", not1, "IN");
+        self.add_wire_between(not1, "OUT", not2, "IN");
+        self.add_wire_between(not2, "OUT", r, "A");
+        self.add_wire_between(r, "B", led, "A");
+        self.add_wire_between(led, "B", ground, "GND");
+        self.add_wire_between(vsrc, "-", ground, "GND");
+        self.status = "Loaded double-inverter LED demo.".to_string();
     }
 
     fn push_wire_point(&mut self, pos: Pos2) {
@@ -903,31 +1036,57 @@ impl eframe::App for CircuitApp {
                     .show(ui, |ui| {
                         let filter = self.palette_filter.clone();
                         part_section(
-                            ui, self, "Passives", SectionMode::Open,
+                            ui, self, "Passives  [Q]R [A]C [I]L", SectionMode::Open,
                             &[
-                                ("Resistor", ComponentKind::Resistor),
-                                ("Capacitor", ComponentKind::Capacitor),
-                                ("Inductor", ComponentKind::Inductor),
+                                ("Resistor [Q]", ComponentKind::Resistor),
+                                ("Capacitor [A]", ComponentKind::Capacitor),
+                                ("Inductor [I]", ComponentKind::Inductor),
+                                ("Potentiometer", ComponentKind::Potentiometer),
                                 ("Lamp", ComponentKind::Lamp),
+                                ("Fuse", ComponentKind::Fuse),
                             ],
                             &filter,
                         );
                         part_section(
-                            ui, self, "Semiconductors", SectionMode::Open,
+                            ui, self, "Semiconductors  [D]iode [E]LED", SectionMode::Open,
                             &[
-                                ("Diode", ComponentKind::Diode),
-                                ("LED", ComponentKind::Led),
+                                ("Diode [D]", ComponentKind::Diode),
+                                ("Zener Diode [Z]", ComponentKind::ZenerDiode),
+                                ("LED [E]", ComponentKind::Led),
                                 ("Op Amp", ComponentKind::OpAmp),
                             ],
                             &filter,
                         );
                         part_section(
-                            ui, self, "Sources and IO", SectionMode::Open,
+                            ui, self, "Transistors", SectionMode::Open,
                             &[
-                                ("Ground", ComponentKind::Ground),
+                                ("NPN BJT [N]", ComponentKind::NpnTransistor),
+                                ("PNP BJT [P]", ComponentKind::PnpTransistor),
+                                ("N-MOSFET", ComponentKind::Nmosfet),
+                                ("P-MOSFET", ComponentKind::Pmosfet),
+                                ("Voltage Reg", ComponentKind::VoltageReg),
+                            ],
+                            &filter,
+                        );
+                        part_section(
+                            ui, self, "Logic Gates", SectionMode::Collapsed,
+                            &[
+                                ("NOT  (Inverter)", ComponentKind::LogicNot),
+                                ("AND", ComponentKind::LogicAnd),
+                                ("OR",  ComponentKind::LogicOr),
+                                ("NAND", ComponentKind::LogicNand),
+                                ("NOR",  ComponentKind::LogicNor),
+                                ("XOR",  ComponentKind::LogicXor),
+                            ],
+                            &filter,
+                        );
+                        part_section(
+                            ui, self, "Sources and IO  [B]attery [G]nd", SectionMode::Open,
+                            &[
+                                ("Ground [G]", ComponentKind::Ground),
                                 ("Voltage Source", ComponentKind::VSource),
                                 ("Current Source", ComponentKind::ISource),
-                                ("Battery", ComponentKind::Battery),
+                                ("Battery [B]", ComponentKind::Battery),
                                 ("Switch", ComponentKind::Switch),
                                 ("Push Button", ComponentKind::PushButton),
                                 ("Slide Switch", ComponentKind::SlideSwitch),
@@ -961,6 +1120,15 @@ impl eframe::App for CircuitApp {
                         palette_section(ui, "Examples", SectionMode::Open, |ui| {
                             if palette_action(ui, "LED Circuit").clicked() {
                                 self.load_led_demo();
+                            }
+                            if palette_action(ui, "Transistor Switch").clicked() {
+                                self.load_transistor_switch_demo();
+                            }
+                            if palette_action(ui, "Voltage Divider").clicked() {
+                                self.load_voltage_divider_demo();
+                            }
+                            if palette_action(ui, "Logic Inverter").clicked() {
+                                self.load_logic_demo();
                             }
                             if palette_action(ui, "ESP32 + OLED").clicked() {
                                 self.load_esp32_oled_demo();
@@ -1012,7 +1180,17 @@ impl eframe::App for CircuitApp {
                             metric_row(ui, "R", "rotate");
                             metric_row(ui, "Del", "delete");
                             metric_row(ui, "Enter", "finish wire");
-                            metric_row(ui, "Esc", "select");
+                            metric_row(ui, "Esc", "cancel / select");
+                            metric_row(ui, "Q", "place resistor");
+                            metric_row(ui, "A", "place capacitor");
+                            metric_row(ui, "I", "place inductor");
+                            metric_row(ui, "D", "place diode");
+                            metric_row(ui, "Z", "place zener");
+                            metric_row(ui, "E", "place LED");
+                            metric_row(ui, "N", "place NPN BJT");
+                            metric_row(ui, "P", "place PNP BJT");
+                            metric_row(ui, "B", "place battery");
+                            metric_row(ui, "G", "place ground");
                         });
                     });
             });
@@ -1590,6 +1768,32 @@ impl eframe::App for CircuitApp {
         // F — Zoom to fit
         if ctx.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::F)) {
             self.zoom_to_fit();
+        }
+
+        // Quick-place shortcuts
+        let place_shortcuts: &[(egui::Key, ComponentKind, &str)] = &[
+            (egui::Key::Q, ComponentKind::Resistor,     "Resistor"),
+            (egui::Key::A, ComponentKind::Capacitor,    "Capacitor"),
+            (egui::Key::I, ComponentKind::Inductor,     "Inductor"),
+            (egui::Key::D, ComponentKind::Diode,        "Diode"),
+            (egui::Key::Z, ComponentKind::ZenerDiode,   "Zener"),
+            (egui::Key::E, ComponentKind::Led,          "LED"),
+            (egui::Key::N, ComponentKind::NpnTransistor,"NPN BJT"),
+            (egui::Key::P, ComponentKind::PnpTransistor,"PNP BJT"),
+            (egui::Key::B, ComponentKind::Battery,      "Battery"),
+            (egui::Key::G, ComponentKind::Ground,       "Ground"),
+        ];
+        for &(key, kind, name) in place_shortcuts {
+            if ctx.input(|i| !i.modifiers.any() && i.key_pressed(key)) {
+                if self.tool == Tool::Place(kind) {
+                    self.tool = Tool::Select;
+                    self.status = "Select tool.".to_string();
+                } else {
+                    self.tool = Tool::Place(kind);
+                    self.draft_wire.clear();
+                    self.status = format!("Placing {}. Click the canvas.", name);
+                }
+            }
         }
     }
 }
@@ -2735,8 +2939,13 @@ fn estimate_loop_resistance(
         .filter(|component| energized_loads.contains(&component.id))
         .filter_map(|component| match component.kind {
             ComponentKind::Resistor => parse_metric_value(&component.value, "ohm"),
-            ComponentKind::Led | ComponentKind::Diode => Some(220.0),
+            ComponentKind::Potentiometer => parse_metric_value(&component.value, "ohm").map(|r| r * 0.5),
+            ComponentKind::Led | ComponentKind::Diode | ComponentKind::ZenerDiode => Some(220.0),
             ComponentKind::Lamp => Some(60.0),
+            ComponentKind::NpnTransistor | ComponentKind::PnpTransistor => Some(100.0),
+            ComponentKind::Nmosfet | ComponentKind::Pmosfet => Some(50.0),
+            ComponentKind::VoltageReg => Some(10.0),
+            ComponentKind::Fuse => Some(1.0),
             _ => None,
         })
         .sum::<f32>();
@@ -2800,8 +3009,16 @@ fn component_conductance(component: &Component) -> Conductance {
     match component.kind {
         ComponentKind::Resistor
         | ComponentKind::Diode
+        | ComponentKind::ZenerDiode
         | ComponentKind::Led
-        | ComponentKind::Lamp => Conductance::Load,
+        | ComponentKind::Lamp
+        | ComponentKind::Fuse => Conductance::Load,
+        ComponentKind::Potentiometer => Conductance::Load,
+        ComponentKind::NpnTransistor | ComponentKind::PnpTransistor
+        | ComponentKind::Nmosfet | ComponentKind::Pmosfet => Conductance::Load,
+        ComponentKind::VoltageReg => Conductance::Load,
+        ComponentKind::LogicNot | ComponentKind::LogicAnd | ComponentKind::LogicOr
+        | ComponentKind::LogicNand | ComponentKind::LogicNor | ComponentKind::LogicXor => Conductance::Open,
         ComponentKind::Inductor => Conductance::Conductor,
         ComponentKind::Switch | ComponentKind::PushButton | ComponentKind::SlideSwitch => {
             let value = component.value.to_lowercase();
@@ -2865,7 +3082,9 @@ fn component_bounds(component: &Component) -> Rect {
 
 fn component_size(component: &Component) -> Vec2 {
     let (w, h) = match component.kind {
-        ComponentKind::Resistor | ComponentKind::Inductor | ComponentKind::Diode => (72.0, 28.0),
+        ComponentKind::Resistor | ComponentKind::Inductor | ComponentKind::Diode
+        | ComponentKind::ZenerDiode | ComponentKind::Fuse => (72.0, 28.0),
+        ComponentKind::Potentiometer => (72.0, 40.0),
         ComponentKind::Capacitor
         | ComponentKind::Switch
         | ComponentKind::PushButton
@@ -2876,6 +3095,13 @@ fn component_size(component: &Component) -> Vec2 {
         | ComponentKind::ISource
         | ComponentKind::Lamp
         | ComponentKind::Led => (56.0, 56.0),
+        ComponentKind::NpnTransistor | ComponentKind::PnpTransistor => (64.0, 64.0),
+        ComponentKind::Nmosfet | ComponentKind::Pmosfet => (64.0, 64.0),
+        ComponentKind::VoltageReg => (72.0, 48.0),
+        ComponentKind::LogicNot => (56.0, 40.0),
+        ComponentKind::LogicAnd | ComponentKind::LogicOr
+        | ComponentKind::LogicNand | ComponentKind::LogicNor
+        | ComponentKind::LogicXor => (64.0, 48.0),
         ComponentKind::OpAmp => (82.0, 68.0),
         ComponentKind::Esp32 | ComponentKind::Esp32S3 => (140.0, 160.0),
         ComponentKind::Esp32C3 => (118.0, 138.0),
@@ -3086,7 +3312,21 @@ fn draw_component(
         ComponentKind::Capacitor => draw_capacitor(painter, rect, component.rotation, stroke),
         ComponentKind::Inductor => draw_inductor(painter, rect, component.rotation, stroke),
         ComponentKind::Diode => draw_diode(painter, rect, component.rotation, stroke, false),
+        ComponentKind::ZenerDiode => draw_zener(painter, rect, component.rotation, stroke),
         ComponentKind::Led => draw_led(painter, rect, component.rotation, stroke),
+        ComponentKind::NpnTransistor => draw_npn(painter, rect, component.rotation, stroke, energized),
+        ComponentKind::PnpTransistor => draw_pnp(painter, rect, component.rotation, stroke, energized),
+        ComponentKind::Nmosfet => draw_nmosfet(painter, rect, component.rotation, stroke, energized),
+        ComponentKind::Pmosfet => draw_pmosfet(painter, rect, component.rotation, stroke, energized),
+        ComponentKind::Potentiometer => draw_potentiometer(painter, rect, component.rotation, stroke),
+        ComponentKind::VoltageReg => draw_voltage_reg(painter, rect, component.rotation, stroke, energized),
+        ComponentKind::Fuse => draw_fuse(painter, rect, component.rotation, stroke),
+        ComponentKind::LogicNot => draw_logic_not(painter, rect, component.rotation, stroke),
+        ComponentKind::LogicAnd => draw_logic_and(painter, rect, component.rotation, stroke, false),
+        ComponentKind::LogicOr => draw_logic_or(painter, rect, component.rotation, stroke, false),
+        ComponentKind::LogicNand => draw_logic_and(painter, rect, component.rotation, stroke, true),
+        ComponentKind::LogicNor => draw_logic_or(painter, rect, component.rotation, stroke, true),
+        ComponentKind::LogicXor => draw_logic_xor(painter, rect, component.rotation, stroke, false),
         ComponentKind::Switch | ComponentKind::SlideSwitch => {
             draw_switch(painter, rect, component.rotation, stroke)
         }
@@ -3461,6 +3701,54 @@ fn component_pin_defs(component: &Component) -> Vec<CircuitPin> {
                 ("RUN", PinRole::Control),
             ],
         ),
+        ComponentKind::ZenerDiode => vec![
+            CircuitPin { label: "A", role: PinRole::Passive, pos: Pos2::new(rect.left(), center.y) },
+            CircuitPin { label: "K", role: PinRole::Passive, pos: Pos2::new(rect.right(), center.y) },
+        ],
+        ComponentKind::NpnTransistor => vec![
+            CircuitPin { label: "B",  role: PinRole::Control, pos: Pos2::new(rect.left(), center.y) },
+            CircuitPin { label: "C",  role: PinRole::Positive, pos: Pos2::new(rect.right(), rect.top() + rect.height() * 0.22) },
+            CircuitPin { label: "E",  role: PinRole::Ground,   pos: Pos2::new(rect.right(), rect.bottom() - rect.height() * 0.22) },
+        ],
+        ComponentKind::PnpTransistor => vec![
+            CircuitPin { label: "B",  role: PinRole::Control,  pos: Pos2::new(rect.left(), center.y) },
+            CircuitPin { label: "C",  role: PinRole::Ground,    pos: Pos2::new(rect.right(), rect.bottom() - rect.height() * 0.22) },
+            CircuitPin { label: "E",  role: PinRole::Positive,  pos: Pos2::new(rect.right(), rect.top() + rect.height() * 0.22) },
+        ],
+        ComponentKind::Nmosfet => vec![
+            CircuitPin { label: "G", role: PinRole::Control,  pos: Pos2::new(rect.left(), center.y) },
+            CircuitPin { label: "D", role: PinRole::Positive, pos: Pos2::new(rect.right(), rect.top() + rect.height() * 0.22) },
+            CircuitPin { label: "S", role: PinRole::Ground,   pos: Pos2::new(rect.right(), rect.bottom() - rect.height() * 0.22) },
+        ],
+        ComponentKind::Pmosfet => vec![
+            CircuitPin { label: "G", role: PinRole::Control,  pos: Pos2::new(rect.left(), center.y) },
+            CircuitPin { label: "D", role: PinRole::Ground,   pos: Pos2::new(rect.right(), rect.bottom() - rect.height() * 0.22) },
+            CircuitPin { label: "S", role: PinRole::Positive, pos: Pos2::new(rect.right(), rect.top() + rect.height() * 0.22) },
+        ],
+        ComponentKind::Potentiometer => vec![
+            CircuitPin { label: "A", role: PinRole::Passive, pos: Pos2::new(rect.left(), center.y) },
+            CircuitPin { label: "W", role: PinRole::Passive, pos: Pos2::new(center.x, rect.bottom()) },
+            CircuitPin { label: "B", role: PinRole::Passive, pos: Pos2::new(rect.right(), center.y) },
+        ],
+        ComponentKind::VoltageReg => vec![
+            CircuitPin { label: "IN",  role: PinRole::Positive, pos: Pos2::new(rect.left(),  center.y) },
+            CircuitPin { label: "GND", role: PinRole::Ground,   pos: Pos2::new(center.x,    rect.bottom()) },
+            CircuitPin { label: "OUT", role: PinRole::Positive, pos: Pos2::new(rect.right(), center.y) },
+        ],
+        ComponentKind::Fuse => vec![
+            CircuitPin { label: "A", role: PinRole::Passive, pos: Pos2::new(rect.left(),  center.y) },
+            CircuitPin { label: "B", role: PinRole::Passive, pos: Pos2::new(rect.right(), center.y) },
+        ],
+        ComponentKind::LogicNot => vec![
+            CircuitPin { label: "IN",  role: PinRole::Digital, pos: Pos2::new(rect.left(),  center.y) },
+            CircuitPin { label: "OUT", role: PinRole::Output,  pos: Pos2::new(rect.right(), center.y) },
+        ],
+        ComponentKind::LogicAnd | ComponentKind::LogicOr | ComponentKind::LogicNand
+        | ComponentKind::LogicNor | ComponentKind::LogicXor => vec![
+            CircuitPin { label: "A",   role: PinRole::Digital, pos: Pos2::new(rect.left(), center.y - rect.height() * 0.25) },
+            CircuitPin { label: "B",   role: PinRole::Digital, pos: Pos2::new(rect.left(), center.y + rect.height() * 0.25) },
+            CircuitPin { label: "OUT", role: PinRole::Output,  pos: Pos2::new(rect.right(), center.y) },
+        ],
         ComponentKind::Breadboard => breadboard_pin_defs(rect),
         ComponentKind::Relay => vec![
             CircuitPin {
@@ -3625,6 +3913,358 @@ fn breadboard_pin_defs(rect: Rect) -> Vec<CircuitPin> {
             pos: Pos2::new(rect.center().x + 50.0, rect.center().y),
         },
     ]
+}
+
+fn draw_zener(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
+    let center = rect.center();
+    let left   = Pos2::new(rect.left(), center.y);
+    let right  = Pos2::new(rect.right(), center.y);
+    let anode  = Pos2::new(center.x - rect.width() * 0.18, center.y);
+    let cathode = Pos2::new(center.x + rect.width() * 0.2, center.y);
+    let tri_top    = Pos2::new(center.x - rect.width() * 0.18, center.y - rect.height() * 0.42);
+    let tri_bottom = Pos2::new(center.x - rect.width() * 0.18, center.y + rect.height() * 0.42);
+    let cathode_top    = Pos2::new(cathode.x,                center.y - rect.height() * 0.42);
+    let cathode_bottom = Pos2::new(cathode.x,                center.y + rect.height() * 0.42);
+    let zbar_top    = Pos2::new(cathode.x + rect.width() * 0.06, center.y - rect.height() * 0.42);
+    let zbar_bottom = Pos2::new(cathode.x - rect.width() * 0.06, center.y + rect.height() * 0.42);
+
+    let pts = [left, right, anode, cathode, tri_top, tri_bottom, cathode_top, cathode_bottom, zbar_top, zbar_bottom];
+    let r: Vec<Pos2> = pts.iter().map(|&p| rotate_point(p, center, rotation)).collect();
+
+    painter.line_segment([r[0], r[2]], stroke);
+    painter.line_segment([r[3], r[1]], stroke);
+    painter.line_segment([r[4], r[5]], stroke);
+    painter.line_segment([r[5], r[3]], stroke);
+    painter.line_segment([r[3], r[4]], stroke);
+    painter.line_segment([r[8], r[6]], stroke);
+    painter.line_segment([r[6], r[7]], stroke);
+    painter.line_segment([r[7], r[9]], stroke);
+}
+
+fn draw_npn(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke, energized: bool) {
+    let center = rect.center();
+    let circle_r = rect.width().min(rect.height()) * 0.46;
+    let base_x = rect.left() + rect.width() * 0.18;
+    let body_fill = if energized { Color32::from_rgba_unmultiplied(255, 185, 80, 18) } else { Color32::TRANSPARENT };
+    painter.circle_filled(center, circle_r, body_fill);
+    painter.circle_stroke(center, circle_r, stroke);
+
+    let base_in  = Pos2::new(base_x, center.y);
+    let base_out = Pos2::new(rect.left(), center.y);
+    let ce_x = center.x + circle_r * 0.22;
+    let c_top    = Pos2::new(ce_x, center.y - rect.height() * 0.28);
+    let c_pin    = Pos2::new(rect.right(), rect.top() + rect.height() * 0.22);
+    let e_bottom = Pos2::new(ce_x, center.y + rect.height() * 0.28);
+    let e_pin    = Pos2::new(rect.right(), rect.bottom() - rect.height() * 0.22);
+    let bar_top  = Pos2::new(base_x, center.y - rect.height() * 0.32);
+    let bar_bot  = Pos2::new(base_x, center.y + rect.height() * 0.32);
+
+    let pts = [base_in, base_out, c_top, c_pin, e_bottom, e_pin, bar_top, bar_bot];
+    let r: Vec<Pos2> = pts.iter().map(|&p| rotate_point(p, center, rotation)).collect();
+
+    painter.line_segment([r[1], r[0]], stroke);
+    painter.line_segment([r[6], r[7]], stroke);
+    painter.line_segment([r[0], r[2]], stroke);
+    painter.line_segment([r[2], r[3]], stroke);
+    painter.line_segment([r[0], r[4]], stroke);
+    painter.line_segment([r[4], r[5]], stroke);
+    // Emitter arrow
+    let dir = (r[5] - r[4]).normalized();
+    let perp = Vec2::new(-dir.y, dir.x);
+    let arr = r[4] + dir * 8.0;
+    painter.line_segment([arr, arr - dir * 7.0 + perp * 4.0], stroke);
+    painter.line_segment([arr, arr - dir * 7.0 - perp * 4.0], stroke);
+}
+
+fn draw_pnp(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke, energized: bool) {
+    let center = rect.center();
+    let circle_r = rect.width().min(rect.height()) * 0.46;
+    let base_x = rect.left() + rect.width() * 0.18;
+    let body_fill = if energized { Color32::from_rgba_unmultiplied(255, 185, 80, 18) } else { Color32::TRANSPARENT };
+    painter.circle_filled(center, circle_r, body_fill);
+    painter.circle_stroke(center, circle_r, stroke);
+
+    let base_out = Pos2::new(rect.left(), center.y);
+    let ce_x = center.x + circle_r * 0.22;
+    let e_top    = Pos2::new(ce_x, center.y - rect.height() * 0.28);
+    let e_pin    = Pos2::new(rect.right(), rect.top() + rect.height() * 0.22);
+    let c_bottom = Pos2::new(ce_x, center.y + rect.height() * 0.28);
+    let c_pin    = Pos2::new(rect.right(), rect.bottom() - rect.height() * 0.22);
+    let bar_top  = Pos2::new(base_x, center.y - rect.height() * 0.32);
+    let bar_bot  = Pos2::new(base_x, center.y + rect.height() * 0.32);
+    let base_in  = Pos2::new(base_x, center.y);
+
+    let pts = [base_in, base_out, e_top, e_pin, c_bottom, c_pin, bar_top, bar_bot];
+    let r: Vec<Pos2> = pts.iter().map(|&p| rotate_point(p, center, rotation)).collect();
+
+    painter.line_segment([r[1], r[0]], stroke);
+    painter.line_segment([r[6], r[7]], stroke);
+    painter.line_segment([r[0], r[2]], stroke);
+    painter.line_segment([r[2], r[3]], stroke);
+    painter.line_segment([r[0], r[4]], stroke);
+    painter.line_segment([r[4], r[5]], stroke);
+    // Emitter arrow (inward for PNP)
+    let dir = (r[2] - r[3]).normalized();
+    let perp = Vec2::new(-dir.y, dir.x);
+    let arr = r[2] - dir * 2.0;
+    painter.line_segment([arr, arr - dir * 7.0 + perp * 4.0], stroke);
+    painter.line_segment([arr, arr - dir * 7.0 - perp * 4.0], stroke);
+}
+
+fn draw_nmosfet(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke, energized: bool) {
+    let center = rect.center();
+    let circle_r = rect.width().min(rect.height()) * 0.44;
+    let body_fill = if energized { Color32::from_rgba_unmultiplied(255, 185, 80, 18) } else { Color32::TRANSPARENT };
+    painter.circle_filled(center, circle_r, body_fill);
+    painter.circle_stroke(center, circle_r, stroke);
+
+    let gate_out = Pos2::new(rect.left(), center.y);
+    let gate_in  = Pos2::new(center.x - circle_r * 0.55, center.y);
+    let gate_bar_top = Pos2::new(center.x - circle_r * 0.55, center.y - rect.height() * 0.30);
+    let gate_bar_bot = Pos2::new(center.x - circle_r * 0.55, center.y + rect.height() * 0.30);
+    let chan_top = Pos2::new(center.x - circle_r * 0.20, center.y - rect.height() * 0.30);
+    let chan_bot = Pos2::new(center.x - circle_r * 0.20, center.y + rect.height() * 0.30);
+    let d_inner  = Pos2::new(center.x + circle_r * 0.18, center.y - rect.height() * 0.28);
+    let d_pin    = Pos2::new(rect.right(), rect.top() + rect.height() * 0.22);
+    let s_inner  = Pos2::new(center.x + circle_r * 0.18, center.y + rect.height() * 0.28);
+    let s_pin    = Pos2::new(rect.right(), rect.bottom() - rect.height() * 0.22);
+
+    let pts = [gate_out, gate_in, gate_bar_top, gate_bar_bot, chan_top, chan_bot, d_inner, d_pin, s_inner, s_pin];
+    let r: Vec<Pos2> = pts.iter().map(|&p| rotate_point(p, center, rotation)).collect();
+
+    painter.line_segment([r[0], r[1]], stroke);
+    painter.line_segment([r[2], r[3]], Stroke::new(stroke.width * 2.0, stroke.color));
+    painter.line_segment([r[4], r[5]], stroke);
+    painter.line_segment([r[6], r[7]], stroke);
+    painter.line_segment([r[8], r[9]], stroke);
+    // Arrow (N-type points inward)
+    let mid = r[4].lerp(r[5], 0.5);
+    let dir = (r[8] - r[6]).normalized();
+    painter.line_segment([r[1], mid], stroke);
+    let arr = mid + dir * 2.0;
+    let perp = Vec2::new(-dir.y, dir.x);
+    painter.line_segment([arr, arr - dir * 6.0 + perp * 3.5], stroke);
+    painter.line_segment([arr, arr - dir * 6.0 - perp * 3.5], stroke);
+}
+
+fn draw_pmosfet(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke, energized: bool) {
+    // Same as NMOSFET but arrow points out, bubble on gate
+    draw_nmosfet(painter, rect, rotation, stroke, energized);
+    // Draw bubble on gate
+    let center = rect.center();
+    let bubble_center_nat = Pos2::new(rect.left() + rect.width() * 0.14, center.y);
+    let bubble = rotate_point(bubble_center_nat, center, rotation);
+    painter.circle_stroke(bubble, 4.5, stroke);
+}
+
+fn draw_potentiometer(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
+    let center = rect.center();
+    let left = Pos2::new(rect.left(), center.y);
+    let right = Pos2::new(rect.right(), center.y);
+    let mut points = Vec::new();
+    let zig_count = 6;
+    let step = rect.width() / (zig_count as f32 + 1.0);
+    points.push(left);
+    for i in 1..=zig_count {
+        let x = rect.left() + step * i as f32;
+        let y = if i % 2 == 0 { center.y - rect.height() * 0.28 } else { center.y + rect.height() * 0.28 };
+        points.push(Pos2::new(x, y));
+    }
+    points.push(right);
+
+    let rotated: Vec<Pos2> = points.into_iter().map(|p| rotate_point(p, center, rotation)).collect();
+    for seg in rotated.windows(2) {
+        painter.line_segment([seg[0], seg[1]], stroke);
+    }
+
+    // Wiper arrow
+    let wiper_start_nat = Pos2::new(center.x, center.y - rect.height() * 0.55);
+    let wiper_tip_nat   = Pos2::new(center.x, center.y);
+    let wiper_pin_nat   = Pos2::new(center.x, rect.bottom());
+    let ws = rotate_point(wiper_start_nat, center, rotation);
+    let wt = rotate_point(wiper_tip_nat,   center, rotation);
+    let wp = rotate_point(wiper_pin_nat,   center, rotation);
+    painter.line_segment([ws, wt], stroke);
+    painter.line_segment([wt, wp], stroke);
+    let dir = (wt - ws).normalized();
+    let perp = Vec2::new(-dir.y, dir.x);
+    painter.line_segment([wt, wt - dir * 6.0 + perp * 3.5], stroke);
+    painter.line_segment([wt, wt - dir * 6.0 - perp * 3.5], stroke);
+}
+
+fn draw_voltage_reg(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke, energized: bool) {
+    let center = rect.center();
+    let body_fill = if energized { Color32::from_rgb(38, 52, 28) } else { Color32::from_rgb(22, 28, 36) };
+    let box_rect = Rect::from_center_size(center, Vec2::new(rect.width() * 0.72, rect.height() * 0.72));
+    painter.rect_filled(box_rect, 4.0, body_fill);
+    painter.rect_stroke(box_rect, 4.0, stroke, StrokeKind::Outside);
+    painter.text(center, Align2::CENTER_CENTER, "REG",
+        egui::FontId::proportional(11.0), stroke.color);
+
+    let pts = [
+        Pos2::new(rect.left(),  center.y),
+        Pos2::new(box_rect.left(), center.y),
+        Pos2::new(center.x, rect.bottom()),
+        Pos2::new(center.x, box_rect.bottom()),
+        Pos2::new(rect.right(), center.y),
+        Pos2::new(box_rect.right(), center.y),
+    ];
+    let r: Vec<Pos2> = pts.iter().map(|&p| rotate_point(p, center, rotation)).collect();
+    painter.line_segment([r[0], r[1]], stroke);
+    painter.line_segment([r[2], r[3]], stroke);
+    painter.line_segment([r[4], r[5]], stroke);
+}
+
+fn draw_fuse(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
+    let center = rect.center();
+    let left  = Pos2::new(rect.left(), center.y);
+    let right = Pos2::new(rect.right(), center.y);
+    let box_w = rect.width() * 0.44;
+    let box_h = rect.height() * 0.56;
+    let bl = Pos2::new(center.x - box_w * 0.5, center.y - box_h * 0.5);
+    let br = Pos2::new(center.x + box_w * 0.5, center.y - box_h * 0.5);
+    let tl = Pos2::new(center.x - box_w * 0.5, center.y + box_h * 0.5);
+    let tr = Pos2::new(center.x + box_w * 0.5, center.y + box_h * 0.5);
+
+    let pts = [left, right, bl, br, tl, tr,
+               Pos2::new(center.x - box_w * 0.5, center.y),
+               Pos2::new(center.x + box_w * 0.5, center.y)];
+    let r: Vec<Pos2> = pts.iter().map(|&p| rotate_point(p, center, rotation)).collect();
+
+    painter.line_segment([r[0], r[6]], stroke);
+    painter.line_segment([r[7], r[1]], stroke);
+    painter.rect_stroke(Rect::from_points(&[r[2], r[3], r[4], r[5]]), 2.0, stroke, StrokeKind::Outside);
+    // Fuse element line
+    painter.line_segment([r[6], r[7]], Stroke::new(stroke.width * 0.8, stroke.color));
+}
+
+fn draw_logic_not(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
+    let center = rect.center();
+    let apex  = Pos2::new(rect.right() - 7.0, center.y);
+    let tl    = Pos2::new(rect.left() + 4.0, rect.top() + 4.0);
+    let bl    = Pos2::new(rect.left() + 4.0, rect.bottom() - 4.0);
+    let in_pin  = Pos2::new(rect.left(), center.y);
+    let out_pin = Pos2::new(rect.right(), center.y);
+    let bubble_center = Pos2::new(rect.right() - 4.5, center.y);
+
+    let pts = [apex, tl, bl, in_pin, out_pin, bubble_center];
+    let r: Vec<Pos2> = pts.iter().map(|&p| rotate_point(p, center, rotation)).collect();
+
+    painter.line_segment([r[1], r[0]], stroke);
+    painter.line_segment([r[0], r[2]], stroke);
+    painter.line_segment([r[2], r[1]], stroke);
+    painter.line_segment([r[3], r[1].lerp(r[2], 0.5)], stroke);
+    painter.circle_stroke(r[5], 4.5, stroke);
+}
+
+fn draw_logic_and(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke, bubble: bool) {
+    let center = rect.center();
+    let x0 = rect.left() + 4.0;
+    let x1 = rect.center().x + 2.0;
+    let right_x = if bubble { rect.right() - 8.0 } else { rect.right() };
+    let top_y = rect.top() + 4.0;
+    let bot_y = rect.bottom() - 4.0;
+
+    let in_a = Pos2::new(rect.left(), center.y - rect.height() * 0.25);
+    let in_b = Pos2::new(rect.left(), center.y + rect.height() * 0.25);
+    let out  = Pos2::new(rect.right(), center.y);
+    let tl = Pos2::new(x0, top_y);
+    let bl = Pos2::new(x0, bot_y);
+    let tr = Pos2::new(x1, top_y);
+    let br = Pos2::new(x1, bot_y);
+    let arc_right = Pos2::new(right_x, center.y);
+
+    let pts = [in_a, in_b, out, tl, bl, tr, br, arc_right];
+    let r: Vec<Pos2> = pts.iter().map(|&p| rotate_point(p, center, rotation)).collect();
+
+    painter.line_segment([r[3], r[4]], stroke);
+    painter.line_segment([r[3], r[5]], stroke);
+    painter.line_segment([r[4], r[6]], stroke);
+    // Approximated semicircle on right side
+    let steps = 12;
+    let mut prev = r[5];
+    for i in 1..=steps {
+        let a = std::f32::consts::PI * 0.5 - std::f32::consts::PI * i as f32 / steps as f32;
+        let nat_p = Pos2::new(x1 + (bot_y - top_y) * 0.5 * a.cos(), center.y - (bot_y - top_y) * 0.5 * a.sin());
+        let p = rotate_point(nat_p, center, rotation);
+        painter.line_segment([prev, p], stroke);
+        prev = p;
+    }
+    painter.line_segment([r[0], rotate_point(Pos2::new(x0, center.y - rect.height() * 0.25), center, rotation)], stroke);
+    painter.line_segment([r[1], rotate_point(Pos2::new(x0, center.y + rect.height() * 0.25), center, rotation)], stroke);
+    painter.line_segment([r[7], r[2]], stroke);
+    if bubble {
+        let bc = rotate_point(Pos2::new(rect.right() - 4.5, center.y), center, rotation);
+        painter.circle_stroke(bc, 4.5, stroke);
+    }
+}
+
+fn draw_logic_or(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke, bubble: bool) {
+    let center = rect.center();
+    let x0 = rect.left() + 4.0;
+    let right_x = if bubble { rect.right() - 8.0 } else { rect.right() };
+    let top_y = rect.top() + 4.0;
+    let bot_y = rect.bottom() - 4.0;
+
+    let in_a = Pos2::new(rect.left(), center.y - rect.height() * 0.25);
+    let in_b = Pos2::new(rect.left(), center.y + rect.height() * 0.25);
+    let out  = Pos2::new(rect.right(), center.y);
+    let tl = Pos2::new(x0, top_y);
+    let bl = Pos2::new(x0, bot_y);
+
+    let pts = [in_a, in_b, out, tl, bl];
+    let r: Vec<Pos2> = pts.iter().map(|&p| rotate_point(p, center, rotation)).collect();
+
+    // Back curve
+    let hw = (bot_y - top_y) * 0.5;
+    let steps = 16;
+    let mut prev_bot = r[4];
+    let mut prev_top = r[3];
+    for i in 1..=steps {
+        let t = i as f32 / steps as f32;
+        let fa = std::f32::consts::PI * 0.5 - std::f32::consts::PI * t;
+        let nat_f = Pos2::new(x0 + hw * fa.cos() + hw, center.y - hw * fa.sin());
+        let f = rotate_point(nat_f, center, rotation);
+        if i == steps {
+            painter.line_segment([prev_top, f], stroke);
+            painter.line_segment([prev_bot, f], stroke);
+        } else {
+            painter.line_segment([prev_top, f], stroke);
+            prev_top = f;
+            let ba = std::f32::consts::PI * t - std::f32::consts::PI * 0.5;
+            let nat_b = Pos2::new(x0 + hw * 0.22 * ba.cos(), center.y - hw * ba.sin());
+            let b = rotate_point(nat_b, center, rotation);
+            painter.line_segment([prev_bot, b], stroke);
+            prev_bot = b;
+        }
+    }
+    painter.line_segment([r[0], rotate_point(Pos2::new(x0, center.y - rect.height() * 0.25), center, rotation)], stroke);
+    painter.line_segment([r[1], rotate_point(Pos2::new(x0, center.y + rect.height() * 0.25), center, rotation)], stroke);
+
+    let end_pt = rotate_point(Pos2::new(right_x, center.y), center, rotation);
+    painter.line_segment([end_pt, r[2]], stroke);
+    if bubble {
+        let bc = rotate_point(Pos2::new(rect.right() - 4.5, center.y), center, rotation);
+        painter.circle_stroke(bc, 4.5, stroke);
+    }
+}
+
+fn draw_logic_xor(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke, bubble: bool) {
+    draw_logic_or(painter, rect, rotation, stroke, bubble);
+    let center = rect.center();
+    let hw = (rect.bottom() - 4.0 - (rect.top() + 4.0)) * 0.5;
+    let x0 = rect.left();
+    let steps = 10;
+    let bot_y = rect.bottom() - 4.0;
+    let mut prev = rotate_point(Pos2::new(x0, bot_y), center, rotation);
+    for i in 1..=steps {
+        let t = i as f32 / steps as f32;
+        let ba = std::f32::consts::PI * t - std::f32::consts::PI * 0.5;
+        let nat_b = Pos2::new(x0 - 4.0 + hw * 0.22 * ba.cos(), center.y - hw * ba.sin());
+        let b = rotate_point(nat_b, center, rotation);
+        painter.line_segment([prev, b], stroke);
+        prev = b;
+    }
 }
 
 fn draw_junctions(painter: &egui::Painter, wires: &[Wire], view: CanvasView) {
@@ -4626,6 +5266,11 @@ fn circuit_to_spice_netlist(components: &[Component], wires: &[Wire]) -> String 
     let mut skipped = Vec::new();
     let mut uses_diode_model = false;
     let mut uses_led_model = false;
+    let mut uses_zener_model = false;
+    let mut uses_npn_model = false;
+    let mut uses_pnp_model = false;
+    let mut uses_nmos_model = false;
+    let mut uses_pmos_model = false;
 
     for component in components {
         let pins = component_pin_defs(component);
@@ -4634,19 +5279,26 @@ fn circuit_to_spice_netlist(components: &[Component], wires: &[Wire]) -> String 
             | ComponentKind::Capacitor
             | ComponentKind::Inductor
             | ComponentKind::Diode
+            | ComponentKind::ZenerDiode
             | ComponentKind::Led
             | ComponentKind::VSource
             | ComponentKind::ISource
-            | ComponentKind::Battery => {
+            | ComponentKind::Battery
+            | ComponentKind::Fuse
+            | ComponentKind::Potentiometer => {
                 let Some((a, b)) = spice_two_pin_nets(component, &pins, &mut net_name) else {
                     skipped.push(format!("* skipped {}: missing pins", component.label));
                     continue;
                 };
                 match component.kind {
-                    ComponentKind::Resistor => Some(format!(
+                    ComponentKind::Resistor | ComponentKind::Potentiometer => Some(format!(
                         "{} {a} {b} {}",
                         unique_spice_name("R", &component.label, component.id, &mut used_names),
                         spice_value(component, "1k")
+                    )),
+                    ComponentKind::Fuse => Some(format!(
+                        "{} {a} {b} 0.1",
+                        unique_spice_name("R", &component.label, component.id, &mut used_names),
                     )),
                     ComponentKind::Capacitor => Some(format!(
                         "{} {a} {b} {}",
@@ -4675,6 +5327,13 @@ fn circuit_to_spice_netlist(components: &[Component], wires: &[Wire]) -> String 
                             unique_spice_name("D", &component.label, component.id, &mut used_names)
                         ))
                     }
+                    ComponentKind::ZenerDiode => {
+                        uses_zener_model = true;
+                        Some(format!(
+                            "{} {a} {b} DZEN",
+                            unique_spice_name("D", &component.label, component.id, &mut used_names)
+                        ))
+                    }
                     ComponentKind::Led => {
                         uses_led_model = true;
                         Some(format!(
@@ -4684,6 +5343,91 @@ fn circuit_to_spice_netlist(components: &[Component], wires: &[Wire]) -> String 
                     }
                     _ => None,
                 }
+            }
+            ComponentKind::NpnTransistor => {
+                let result = (|| -> Option<String> {
+                    let c_pin = pins.iter().find(|p| p.label == "C")?;
+                    let b_pin = pins.iter().find(|p| p.label == "B")?;
+                    let e_pin = pins.iter().find(|p| p.label == "E")?;
+                    let c_net = net_name(c_pin.pos);
+                    let b_net = net_name(b_pin.pos);
+                    let e_net = net_name(e_pin.pos);
+                    Some(format!(
+                        "{} {c_net} {b_net} {e_net} NBJT",
+                        unique_spice_name("Q", &component.label, component.id, &mut used_names)
+                    ))
+                })();
+                uses_npn_model = result.is_some();
+                result
+            }
+            ComponentKind::PnpTransistor => {
+                let result = (|| -> Option<String> {
+                    let c_pin = pins.iter().find(|p| p.label == "C")?;
+                    let b_pin = pins.iter().find(|p| p.label == "B")?;
+                    let e_pin = pins.iter().find(|p| p.label == "E")?;
+                    let c_net = net_name(c_pin.pos);
+                    let b_net = net_name(b_pin.pos);
+                    let e_net = net_name(e_pin.pos);
+                    Some(format!(
+                        "{} {c_net} {b_net} {e_net} PBJT",
+                        unique_spice_name("Q", &component.label, component.id, &mut used_names)
+                    ))
+                })();
+                uses_pnp_model = result.is_some();
+                result
+            }
+            ComponentKind::Nmosfet => {
+                let result = (|| -> Option<String> {
+                    let d_pin = pins.iter().find(|p| p.label == "D")?;
+                    let g_pin = pins.iter().find(|p| p.label == "G")?;
+                    let s_pin = pins.iter().find(|p| p.label == "S")?;
+                    let d_net = net_name(d_pin.pos);
+                    let g_net = net_name(g_pin.pos);
+                    let s_net = net_name(s_pin.pos);
+                    Some(format!(
+                        "{} {d_net} {g_net} {s_net} {s_net} NMOS",
+                        unique_spice_name("M", &component.label, component.id, &mut used_names)
+                    ))
+                })();
+                uses_nmos_model = result.is_some();
+                result
+            }
+            ComponentKind::Pmosfet => {
+                let result = (|| -> Option<String> {
+                    let d_pin = pins.iter().find(|p| p.label == "D")?;
+                    let g_pin = pins.iter().find(|p| p.label == "G")?;
+                    let s_pin = pins.iter().find(|p| p.label == "S")?;
+                    let d_net = net_name(d_pin.pos);
+                    let g_net = net_name(g_pin.pos);
+                    let s_net = net_name(s_pin.pos);
+                    Some(format!(
+                        "{} {d_net} {g_net} {s_net} {s_net} PMOS",
+                        unique_spice_name("M", &component.label, component.id, &mut used_names)
+                    ))
+                })();
+                uses_pmos_model = result.is_some();
+                result
+            }
+            ComponentKind::VoltageReg => {
+                (|| -> Option<String> {
+                    let in_pin  = pins.iter().find(|p| p.label == "IN")?;
+                    let out_pin = pins.iter().find(|p| p.label == "OUT")?;
+                    let gnd_pin = pins.iter().find(|p| p.label == "GND")?;
+                    let in_net  = net_name(in_pin.pos);
+                    let out_net = net_name(out_pin.pos);
+                    let gnd_net = net_name(gnd_pin.pos);
+                    Some(format!(
+                        "* {} LM7805: IN={in_net} OUT={out_net} GND={gnd_net} (5V fixed)",
+                        component.label
+                    ))
+                })()
+            }
+            ComponentKind::LogicNot | ComponentKind::LogicAnd | ComponentKind::LogicOr
+            | ComponentKind::LogicNand | ComponentKind::LogicNor | ComponentKind::LogicXor => {
+                let kind_str = component_kind_label(component.kind);
+                let nets: Vec<String> = pins.iter().map(|p| net_name(p.pos)).collect();
+                let net_str = nets.join(" ");
+                Some(format!("* {} {} [{}]", component.label, kind_str, net_str))
             }
             ComponentKind::Ground => None,
             _ => {
@@ -4714,8 +5458,23 @@ fn circuit_to_spice_netlist(components: &[Component], wires: &[Wire]) -> String 
     if uses_diode_model {
         output.push_str(".model DGEN D(Is=2n Rs=0.6 N=1.8)\n");
     }
+    if uses_zener_model {
+        output.push_str(".model DZEN D(Is=1e-14 Rs=0.5 N=1.0 BV=5.1 IBV=10m)\n");
+    }
     if uses_led_model {
         output.push_str(".model LEDGEN D(Is=10n Rs=4 N=2.0 Eg=2.0)\n");
+    }
+    if uses_npn_model {
+        output.push_str(".model NBJT NPN(Is=1e-14 Bf=200 Br=2 Cje=10p Cjc=5p)\n");
+    }
+    if uses_pnp_model {
+        output.push_str(".model PBJT PNP(Is=1e-14 Bf=200 Br=2 Cje=10p Cjc=5p)\n");
+    }
+    if uses_nmos_model {
+        output.push_str(".model NMOS NMOS(Level=1 Vto=2 Kp=200u W=10u L=1u)\n");
+    }
+    if uses_pmos_model {
+        output.push_str(".model PMOS PMOS(Level=1 Vto=-2 Kp=80u W=20u L=1u)\n");
     }
     for line in skipped {
         output.push_str(&line);
@@ -4930,6 +5689,7 @@ fn component_kind_label(kind: ComponentKind) -> &'static str {
         ComponentKind::Inductor => "Inductor",
         ComponentKind::Diode => "Diode",
         ComponentKind::Led => "LED",
+        ComponentKind::ZenerDiode => "Zener",
         ComponentKind::Switch => "Switch",
         ComponentKind::PushButton => "Push Button",
         ComponentKind::SlideSwitch => "Slide Switch",
@@ -4939,6 +5699,19 @@ fn component_kind_label(kind: ComponentKind) -> &'static str {
         ComponentKind::Battery => "Battery",
         ComponentKind::OpAmp => "Op Amp",
         ComponentKind::Lamp => "Lamp",
+        ComponentKind::Potentiometer => "Potentiometer",
+        ComponentKind::NpnTransistor => "NPN BJT",
+        ComponentKind::PnpTransistor => "PNP BJT",
+        ComponentKind::Nmosfet => "N-MOSFET",
+        ComponentKind::Pmosfet => "P-MOSFET",
+        ComponentKind::VoltageReg => "Voltage Reg",
+        ComponentKind::Fuse => "Fuse",
+        ComponentKind::LogicNot => "NOT Gate",
+        ComponentKind::LogicAnd => "AND Gate",
+        ComponentKind::LogicOr => "OR Gate",
+        ComponentKind::LogicNand => "NAND Gate",
+        ComponentKind::LogicNor => "NOR Gate",
+        ComponentKind::LogicXor => "XOR Gate",
         ComponentKind::Esp32 => "ESP32 WROOM",
         ComponentKind::Esp32S3 => "ESP32-S3",
         ComponentKind::Esp32C3 => "ESP32-C3",
