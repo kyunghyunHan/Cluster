@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 
+const SAVE_PATH: &str = "cluster_circuit.json";
+const AUTORECOVER_PATH: &str = "cluster_autorecover.json";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tool {
     Select,
@@ -167,6 +170,12 @@ struct CircuitApp {
     rect_select_start: Option<Pos2>,
     // Palette search filter
     palette_filter: String,
+    // Net highlighting: wire ID hovered in select mode → highlight whole net
+    hovered_net_wire: Option<u64>,
+    // Cache of which wire IDs share the same net as hovered wire
+    highlighted_net_wires: HashSet<u64>,
+    // Pin snap preview (world pos of pin we're about to snap to)
+    snap_target: Option<Pos2>,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +247,9 @@ impl CircuitApp {
             multi_selected: HashSet::new(),
             rect_select_start: None,
             palette_filter: String::new(),
+            hovered_net_wire: None,
+            highlighted_net_wires: HashSet::new(),
+            snap_target: None,
         }
     }
 
@@ -506,12 +518,85 @@ impl CircuitApp {
             return;
         }
         self.record_history();
+        // Auto-split any existing wire that our endpoints land on
+        let endpoints: Vec<Pos2> = points.first().copied().into_iter()
+            .chain(points.last().copied()).collect();
+        for ep in endpoints {
+            self.split_wire_at_point(ep);
+        }
         let id = self.next_id();
         self.wires.push(Wire { id, points });
         self.status = "Wire placed.".to_string();
     }
 
+    /// If `point` lies on a segment of any existing wire (not at that wire's
+    /// own endpoints), split that wire into two wires at `point`.
+    fn split_wire_at_point(&mut self, point: Pos2) {
+        let mut split_target: Option<(usize, usize)> = None;
+        'outer: for (wi, wire) in self.wires.iter().enumerate() {
+            for si in 0..wire.points.len().saturating_sub(1) {
+                let a = wire.points[si];
+                let b = wire.points[si + 1];
+                if distance_to_segment(point, a, b) < 2.5
+                    && point.distance(a) > 3.0
+                    && point.distance(b) > 3.0
+                {
+                    split_target = Some((wi, si));
+                    break 'outer;
+                }
+            }
+        }
+        if let Some((wi, si)) = split_target {
+            let mut first = self.wires[wi].points[..=si].to_vec();
+            first.push(point);
+            let mut second = vec![point];
+            second.extend_from_slice(&self.wires[wi].points[si + 1..]);
+            self.wires[wi].points = simplify_wire(first);
+            let new_id = self.next_id();
+            self.wires.push(Wire { id: new_id, points: simplify_wire(second) });
+        }
+    }
+
+    /// Compute all wire IDs in the same net as `wire_id` using the wire graph.
+    fn same_net_wires(&self, wire_id: u64) -> HashSet<u64> {
+        // Build adjacency: wires that share an endpoint
+        let mut same_net = HashSet::new();
+        if !self.wires.iter().any(|w| w.id == wire_id) {
+            return same_net;
+        }
+        let mut queue = Vec::new();
+        queue.push(wire_id);
+        same_net.insert(wire_id);
+
+        while let Some(wid) = queue.pop() {
+            let Some(wire) = self.wires.iter().find(|w| w.id == wid) else { continue };
+            let wire_eps: Vec<Pos2> = wire.points.first().copied().into_iter()
+                .chain(wire.points.last().copied()).collect();
+
+            for other in &self.wires {
+                if same_net.contains(&other.id) { continue; }
+                let other_eps: Vec<Pos2> = other.points.first().copied().into_iter()
+                    .chain(other.points.last().copied()).collect();
+                // Connected if any endpoint pair is within tolerance, OR
+                // if any endpoint of `other` lies on a segment of `wire` (T-junction)
+                let connected = wire_eps.iter().any(|&ep| other_eps.iter().any(|&oep| ep.distance(oep) < 4.0))
+                    || other_eps.iter().any(|&oep| {
+                        wire.points.windows(2).any(|seg| distance_to_segment(oep, seg[0], seg[1]) < 2.5)
+                    })
+                    || wire_eps.iter().any(|&ep| {
+                        other.points.windows(2).any(|seg| distance_to_segment(ep, seg[0], seg[1]) < 2.5)
+                    });
+                if connected {
+                    same_net.insert(other.id);
+                    queue.push(other.id);
+                }
+            }
+        }
+        same_net
+    }
+
     fn reset_canvas(&mut self) {
+        self.backup_dirty_work("reset");
         self.record_history();
         self.components.clear();
         self.wires.clear();
@@ -760,14 +845,10 @@ impl CircuitApp {
     }
 
     fn save_circuit_json(&mut self) {
-        let saved = SavedCircuit::from_app(self);
-        match serde_json::to_string_pretty(&saved)
-            .map_err(|err| err.to_string())
-            .and_then(|json| fs::write("cluster_circuit.json", json).map_err(|err| err.to_string()))
-        {
+        match self.write_circuit_json(SAVE_PATH) {
             Ok(()) => {
                 self.dirty = false;
-                self.status = "Saved cluster_circuit.json.".to_string();
+                self.status = format!("Saved {SAVE_PATH}.");
             }
             Err(err) => {
                 self.status = format!("Save failed: {err}");
@@ -806,21 +887,60 @@ impl CircuitApp {
     }
 
     fn load_circuit_json(&mut self) {
-        match fs::read_to_string("cluster_circuit.json")
+        self.load_circuit_json_from(SAVE_PATH, false);
+    }
+
+    fn recover_autosave(&mut self) {
+        self.load_circuit_json_from(AUTORECOVER_PATH, true);
+    }
+
+    fn write_circuit_json(&self, path: &str) -> Result<(), String> {
+        let saved = SavedCircuit::from_app(self);
+        serde_json::to_string_pretty(&saved)
+            .map_err(|err| err.to_string())
+            .and_then(|json| fs::write(path, json).map_err(|err| err.to_string()))
+    }
+
+    fn backup_dirty_work(&mut self, reason: &str) {
+        if !self.dirty || (self.components.is_empty() && self.wires.is_empty()) {
+            return;
+        }
+        match self.write_circuit_json(AUTORECOVER_PATH) {
+            Ok(()) => {
+                self.status = format!("Auto-saved recovery before {reason}.");
+            }
+            Err(err) => {
+                self.status = format!("Recovery save failed before {reason}: {err}");
+            }
+        }
+    }
+
+    fn load_circuit_json_from(&mut self, path: &str, recovery: bool) {
+        if path != AUTORECOVER_PATH {
+            self.backup_dirty_work("load");
+        }
+        match fs::read_to_string(path)
             .map_err(|err| err.to_string())
             .and_then(|json| {
                 serde_json::from_str::<SavedCircuit>(&json).map_err(|err| err.to_string())
             })
             .and_then(SavedCircuit::into_snapshot)
         {
-            Ok(snapshot) => {
+            Ok((snapshot, load_notes)) => {
                 self.record_history();
                 self.restore_snapshot(snapshot);
-                self.dirty = false;
-                self.status = "Loaded cluster_circuit.json.".to_string();
+                self.dirty = recovery;
+                self.status = if load_notes.is_empty() {
+                    format!("Loaded {path}.")
+                } else {
+                    format!(
+                        "Loaded {path} with {} repair(s).",
+                        load_notes.len()
+                    )
+                };
             }
             Err(err) => {
-                self.status = format!("Load failed: {err}");
+                self.status = format!("Load {path} failed: {err}");
             }
         }
     }
@@ -863,49 +983,97 @@ impl SavedCircuit {
         }
     }
 
-    fn into_snapshot(self) -> Result<CircuitSnapshot, String> {
+    fn into_snapshot(self) -> Result<(CircuitSnapshot, Vec<String>), String> {
         if self.schema_version > 1 {
             return Err(format!(
                 "Unsupported schema version {}.",
                 self.schema_version
             ));
         }
-        let components = self
+        let mut load_notes = Vec::new();
+        let mut used_ids = HashSet::new();
+        let mut repair_id = self
             .components
-            .into_iter()
-            .map(|component| Component {
-                id: component.id,
+            .iter()
+            .map(|component| component.id)
+            .chain(self.wires.iter().map(|wire| wire.id))
+            .max()
+            .unwrap_or(0)
+            .max(self.next_id)
+            + 1;
+
+        let mut components = Vec::new();
+        for component in self.components {
+            if !component.x.is_finite() || !component.y.is_finite() {
+                load_notes.push(format!("Skipped {} with invalid position.", component.label));
+                continue;
+            }
+            let mut id = component.id;
+            if id == 0 || !used_ids.insert(id) {
+                id = repair_id;
+                repair_id += 1;
+                used_ids.insert(id);
+                load_notes.push(format!("Reassigned duplicate component id for {}.", component.label));
+            }
+            components.push(Component {
+                id,
                 kind: component.kind,
                 pos: Pos2::new(component.x, component.y),
                 rotation: component.rotation.rem_euclid(360),
-                label: component.label,
+                label: if component.label.trim().is_empty() {
+                    load_notes.push("Filled an empty component label.".to_string());
+                    component_kind_label(component.kind).to_string()
+                } else {
+                    component.label
+                },
                 value: component.value,
-            })
-            .collect::<Vec<_>>();
-        let wires = self
-            .wires
-            .into_iter()
-            .map(|wire| Wire {
-                id: wire.id,
-                points: wire
-                    .points
-                    .into_iter()
-                    .map(|point| Pos2::new(point.x, point.y))
-                    .collect(),
-            })
-            .collect::<Vec<_>>();
+            });
+        }
+
+        let mut wires = Vec::new();
+        for wire in self.wires {
+            let points = wire
+                .points
+                .into_iter()
+                .filter_map(|point| {
+                    if point.x.is_finite() && point.y.is_finite() {
+                        Some(Pos2::new(point.x, point.y))
+                    } else {
+                        load_notes.push("Dropped an invalid wire point.".to_string());
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            let points = simplify_wire(points);
+            if points.len() < 2 {
+                load_notes.push(format!("Skipped wire {} with fewer than 2 points.", wire.id));
+                continue;
+            }
+            let mut id = wire.id;
+            if id == 0 || !used_ids.insert(id) {
+                id = repair_id;
+                repair_id += 1;
+                used_ids.insert(id);
+                load_notes.push("Reassigned duplicate wire id.".to_string());
+            }
+            wires.push(Wire { id, points });
+        }
+
         let max_id = components
             .iter()
             .map(|component| component.id)
             .chain(wires.iter().map(|wire| wire.id))
             .max()
             .unwrap_or(0);
-        Ok(CircuitSnapshot {
-            components,
-            wires,
-            next_id: self.next_id.max(max_id + 1),
-            counters: self.counters,
-        })
+        Ok((
+            CircuitSnapshot {
+                components,
+                wires,
+                next_id: self.next_id.max(max_id + 1).max(repair_id),
+                counters: self.counters,
+            },
+            load_notes,
+        ))
     }
 }
 
@@ -975,6 +1143,10 @@ impl eframe::App for CircuitApp {
                     }
                     if menu_action(ui, "Load JSON").clicked() {
                         self.load_circuit_json();
+                        ui.close();
+                    }
+                    if menu_action(ui, "Recover Auto Backup").clicked() {
+                        self.recover_autosave();
                         ui.close();
                     }
                     ui.separator();
@@ -1224,6 +1396,8 @@ impl eframe::App for CircuitApp {
                                     } else {
                                         "open".to_string()
                                     };
+                                    self.dirty = true;
+                                    self.status = format!("{}: {}", component.label, component.value);
                                 }
                             }
                             metric_row(ui, "Rotation", format!("{}°", component.rotation));
@@ -1362,6 +1536,8 @@ impl eframe::App for CircuitApp {
 
             for wire in &self.wires {
                 let energized = simulation.energized_wires.contains(&wire.id);
+                let net_highlighted = self.highlighted_net_wires.contains(&wire.id)
+                    && !self.highlighted_net_wires.is_empty();
                 draw_wire(
                     &painter,
                     wire,
@@ -1369,9 +1545,13 @@ impl eframe::App for CircuitApp {
                     energized,
                     show_flow && energized,
                     flow_phase,
+                    net_highlighted,
                     view,
                 );
             }
+
+            // Compute connected pins for unconnected-pin rendering
+            let connected_pins = connected_pin_positions(&self.components, &self.wires);
 
             for component in &self.components {
                 draw_component(
@@ -1380,6 +1560,7 @@ impl eframe::App for CircuitApp {
                     self.selected == Some(Selection::Component(component.id)),
                     self.show_pins,
                     simulation.energized_components.contains(&component.id),
+                    &connected_pins,
                     view,
                 );
             }
@@ -1417,41 +1598,91 @@ impl eframe::App for CircuitApp {
             let pointer_in_rect = hover_pos.filter(|pos| rect.contains(*pos));
 
             self.cursor_world_pos = None;
+            self.snap_target = None;
             if let Some(raw_hover) = pointer_in_rect {
-                // Convert screen → world, snap in world space, convert back for draw
                 let world_hover = view.to_world(raw_hover);
                 self.cursor_world_pos = Some(world_hover);
                 let mut world_pos = snap_pos(world_hover, rect, self.grid, self.snap);
                 let in_wire_mode = self.tool == Tool::Wire;
                 let in_select_mode = self.tool == Tool::Select;
+
                 if in_wire_mode || in_select_mode {
-                    if let Some(p) = snap_to_nearest_connection(world_pos, &self.components, &self.wires) {
-                        world_pos = p;
+                    if let Some(snapped) = snap_to_nearest_connection(world_pos, &self.components, &self.wires) {
+                        world_pos = snapped;
+                        self.snap_target = Some(snapped);
                     }
+                    // Connection-point indicator (green ring + dot)
                     if is_connection_point(world_pos, &self.components, &self.wires) {
                         let sp = view.to_screen(world_pos);
-                        painter.circle_stroke(sp, view.scale_f(7.0), Stroke::new(1.5, Color32::from_rgb(120, 230, 160)));
-                        painter.circle_filled(sp, view.scale_f(3.0), Color32::from_rgb(120, 230, 160));
+                        painter.circle_stroke(sp, view.scale_f(8.0), Stroke::new(2.0, Color32::from_rgb(100, 240, 160)));
+                        painter.circle_filled(sp, view.scale_f(3.5), Color32::from_rgb(100, 240, 160));
+                    } else if is_on_wire_segment(world_pos, &self.wires) {
+                        // Mid-segment T-junction preview (cyan ring)
+                        let sp = view.to_screen(world_pos);
+                        painter.circle_stroke(sp, view.scale_f(7.0), Stroke::new(1.8, Color32::from_rgb(80, 200, 255)));
+                        painter.circle_filled(sp, view.scale_f(2.5), Color32::from_rgb(80, 200, 255));
                     }
                 }
+
                 if in_wire_mode && !self.draft_wire.is_empty() {
                     let preview = preview_wire_points(&self.draft_wire, world_pos, self.orthogonal_wires);
                     let screen_preview: Vec<Pos2> = preview.iter().map(|&p| view.to_screen(p)).collect();
                     draw_wire_preview(&painter, &screen_preview);
                 }
 
-                // Component hover tooltip drawn directly on the canvas
-                if self.tool == Tool::Select {
+                // Net highlight: update hovered wire in select mode
+                if in_select_mode {
+                    let hov_wire = hit_test_wire(world_hover, &self.wires)
+                        .and_then(|s| if let Selection::Wire(id) = s { Some(id) } else { None });
+                    if hov_wire != self.hovered_net_wire {
+                        self.hovered_net_wire = hov_wire;
+                        self.highlighted_net_wires = hov_wire
+                            .map(|id| self.same_net_wires(id))
+                            .unwrap_or_default();
+                        if hov_wire.is_some() {
+                            ctx.request_repaint();
+                        }
+                    }
+                } else {
+                    self.hovered_net_wire = None;
+                    self.highlighted_net_wires.clear();
+                }
+
+                // Component hover tooltip
+                if in_select_mode {
                     if let Some(Selection::Component(hov_id)) = hit_test_component(world_hover, &self.components) {
                         if let Some(comp) = self.components.iter().find(|c| c.id == hov_id) {
                             let tip_text = format!("{} — {}", component_kind_label(comp.kind), comp.value);
                             let tip_pos = raw_hover + egui::Vec2::new(14.0, -8.0);
-                            let bg = Rect::from_min_size(tip_pos - egui::Vec2::new(4.0, 4.0), egui::Vec2::new(tip_text.len() as f32 * 6.5 + 8.0, 20.0));
+                            let bg = Rect::from_min_size(
+                                tip_pos - egui::Vec2::new(4.0, 4.0),
+                                egui::Vec2::new(tip_text.len() as f32 * 6.5 + 8.0, 20.0),
+                            );
                             painter.rect_filled(bg, 3.0, Color32::from_rgba_unmultiplied(20, 24, 30, 220));
                             painter.rect_stroke(bg, 3.0, Stroke::new(1.0, Color32::from_rgb(60, 68, 78)), StrokeKind::Outside);
                             painter.text(tip_pos, Align2::LEFT_TOP, &tip_text, egui::FontId::proportional(11.0), Color32::from_rgb(210, 218, 226));
                         }
                     }
+                    // Wire net tooltip
+                    if let Some(wid) = self.hovered_net_wire {
+                        let net_size = self.highlighted_net_wires.len();
+                        let tip_text = format!("Net · {} wire(s)", net_size);
+                        let tip_pos = raw_hover + egui::Vec2::new(14.0, -8.0);
+                        let bg = Rect::from_min_size(
+                            tip_pos - egui::Vec2::new(4.0, 4.0),
+                            egui::Vec2::new(tip_text.len() as f32 * 6.5 + 8.0, 20.0),
+                        );
+                        painter.rect_filled(bg, 3.0, Color32::from_rgba_unmultiplied(20, 24, 30, 220));
+                        painter.rect_stroke(bg, 3.0, Stroke::new(1.0, Color32::from_rgb(60, 68, 78)), StrokeKind::Outside);
+                        painter.text(tip_pos, Align2::LEFT_TOP, &tip_text, egui::FontId::proportional(11.0), Color32::from_rgb(140, 210, 255));
+                        let _ = wid;
+                    }
+                }
+            } else {
+                // Pointer left canvas — clear net highlight
+                if self.hovered_net_wire.is_some() {
+                    self.hovered_net_wire = None;
+                    self.highlighted_net_wires.clear();
                 }
             }
 
@@ -1585,16 +1816,28 @@ impl eframe::App for CircuitApp {
                             let snapped = snap_pos(world, rect, self.grid, self.snap);
                             let in_multi = self.multi_selected.len() > 1 && self.multi_selected.contains(&id);
                             if in_multi {
-                                // Move all multi-selected components by the same delta
                                 let old_pos = self.components.iter().find(|c| c.id == id).map(|c| c.pos);
                                 if let Some(old_pos) = old_pos {
                                     let delta = snapped - offset - old_pos;
                                     let ids = self.multi_selected.clone();
+                                    let old_pins = self
+                                        .components
+                                        .iter()
+                                        .filter(|component| ids.contains(&component.id))
+                                        .flat_map(component_pins)
+                                        .collect::<Vec<_>>();
                                     for comp in self.components.iter_mut() {
                                         if ids.contains(&comp.id) {
                                             comp.pos += delta;
                                         }
                                     }
+                                    let new_pins = self
+                                        .components
+                                        .iter()
+                                        .filter(|component| ids.contains(&component.id))
+                                        .flat_map(component_pins)
+                                        .collect::<Vec<_>>();
+                                    move_attached_wire_endpoints(&mut self.wires, &old_pins, &new_pins);
                                 }
                             } else if let Some(index) = self.components.iter().position(|c| c.id == id) {
                                 let old_pins = component_pins(&self.components[index]);
@@ -1819,10 +2062,6 @@ impl CanvasView {
         self.origin + ((screen - self.origin) - self.pan) / self.zoom
     }
 
-    fn scale_stroke(&self, s: Stroke) -> Stroke {
-        Stroke::new((s.width * self.zoom.min(1.5)).max(0.8), s.color)
-    }
-
     fn scale_f(&self, f: f32) -> f32 {
         (f * self.zoom).clamp(f * 0.4, f * 2.0)
     }
@@ -1966,14 +2205,21 @@ fn straighten_neighbor_segments(wire: &mut Wire, point_index: usize) {
 fn is_connection_point(pos: Pos2, components: &[Component], wires: &[Wire]) -> bool {
     for component in components {
         for pin in component_pin_defs(component) {
-            if pin.pos.distance(pos) < 2.0 {
+            if pin.pos.distance(pos) < 3.0 {
                 return true;
             }
         }
     }
     for wire in wires {
+        // Endpoints
         for &ep in wire.points.first().iter().chain(wire.points.last().iter()) {
-            if ep.distance(pos) < 2.0 {
+            if ep.distance(pos) < 3.0 {
+                return true;
+            }
+        }
+        // Mid-segment: a point on a segment is also a valid connection target
+        for seg in wire.points.windows(2) {
+            if distance_to_segment(pos, seg[0], seg[1]) < 2.5 {
                 return true;
             }
         }
@@ -1987,31 +2233,59 @@ fn snap_to_nearest_connection(
     wires: &[Wire],
 ) -> Option<Pos2> {
     let mut best: Option<Pos2> = None;
-    let mut best_distance = 16.0_f32;
+    // Pins get priority (smaller threshold)
+    let mut best_dist_pin = 20.0_f32;
+    let mut best_dist_wire = 14.0_f32;
 
-    // Component pins
+    // Component pins — highest priority
     for component in components {
         for pin in component_pin_defs(component) {
             let d = pin.pos.distance(pos);
-            if d < best_distance {
-                best_distance = d;
+            if d < best_dist_pin {
+                best_dist_pin = d;
                 best = Some(pin.pos);
             }
         }
     }
 
-    // Wire endpoints (first and last point of each wire)
+    // Wire endpoints and all intermediate points
     for wire in wires {
-        for &ep in wire.points.first().iter().chain(wire.points.last().iter()) {
-            let d = ep.distance(pos);
-            if d < best_distance {
-                best_distance = d;
-                best = Some(*ep);
+        for &pt in &wire.points {
+            let d = pt.distance(pos);
+            if d < best_dist_wire {
+                best_dist_wire = d;
+                // Only override if no pin is already closer
+                if best.is_none() || d < best_dist_pin {
+                    best = Some(pt);
+                }
+            }
+        }
+        // Also snap to the closest point on each segment (for T-junctions)
+        for seg in wire.points.windows(2) {
+            let snapped = closest_point_on_segment(pos, seg[0], seg[1]);
+            let d = snapped.distance(pos);
+            if d < best_dist_wire && best_dist_pin > d {
+                best_dist_wire = d;
+                best = Some(snapped);
             }
         }
     }
 
     best
+}
+
+fn is_on_wire_segment(pos: Pos2, wires: &[Wire]) -> bool {
+    for wire in wires {
+        for seg in wire.points.windows(2) {
+            if distance_to_segment(pos, seg[0], seg[1]) < 2.5
+                && pos.distance(seg[0]) > 2.0
+                && pos.distance(seg[1]) > 2.0
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn distance_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
@@ -2463,7 +2737,8 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         }
     }
 
-    // Pass 1: sources/returns + non-module conductor edges
+    // Pass 1: sources/returns only. Component conductance is added after
+    // wire-only reachability exists, so polarity checks can reject bad paths.
     for component in components {
         let pins = component_pin_defs(component);
         let pin_nodes: Vec<usize> = pins.iter().map(|pin| nodes.node_for(pin.pos)).collect();
@@ -2486,16 +2761,7 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
                     return_nodes.push(node);
                 }
             }
-            _ => {
-                let conductance = component_conductance(component);
-                if conductance != Conductance::Open && pin_nodes.len() >= 2 {
-                    let a = pin_nodes[0];
-                    let b = pin_nodes[1];
-                    connect(&mut graph, a, b);
-                    component_edges.push((component.id, a, b, conductance == Conductance::Load));
-                }
-                // Powered modules handled in pass 2 after polarity check
-            }
+            _ => {}
         }
     }
 
@@ -2503,7 +2769,44 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
     let wire_from_positive = reachable_nodes(&wire_graph, &positive_nodes);
     let wire_from_return = reachable_nodes(&wire_graph, &return_nodes);
 
-    // Pass 2: powered modules — only connect if polarity is correct
+    // Pass 2: non-module conductor/load edges.
+    for component in components {
+        if matches!(
+            component.kind,
+            ComponentKind::VSource | ComponentKind::Battery | ComponentKind::ISource | ComponentKind::Ground
+        ) || component_is_powered_module(component)
+        {
+            continue;
+        }
+
+        let conductance = component_conductance(component);
+        if conductance == Conductance::Open {
+            continue;
+        }
+
+        let pins = component_pin_defs(component);
+        let pin_nodes: Vec<usize> = pins.iter().map(|pin| nodes.node_for(pin.pos)).collect();
+        if pin_nodes.len() < 2 {
+            continue;
+        }
+
+        if component_is_polarized_diode(component.kind)
+            && diode_appears_reversed(&pins, &pin_nodes, &wire_from_positive, &wire_from_return)
+        {
+            component_warnings.insert(
+                component.id,
+                "Polarity warning: anode appears on return and cathode on source +.".to_string(),
+            );
+            continue;
+        }
+
+        let a = pin_nodes[0];
+        let b = pin_nodes[1];
+        connect(&mut graph, a, b);
+        component_edges.push((component.id, a, b, conductance == Conductance::Load));
+    }
+
+    // Pass 3: powered modules — only connect if polarity is correct
     for component in components {
         if !component_is_powered_module(component) {
             continue;
@@ -2550,8 +2853,8 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         }
     }
 
-    // Pass 3: modules powered by already-powered modules (e.g., OLED via ESP32's 3V3 output).
-    // Collect positive/ground pin nodes from modules powered in Pass 2, then check remaining modules.
+    // Pass 4: modules powered by already-powered modules (e.g., OLED via ESP32's 3V3 output).
+    // Collect positive/ground pin nodes from modules powered above, then check remaining modules.
     {
         let mut ext_positive = positive_nodes.clone();
         let mut ext_return = return_nodes.clone();
@@ -3062,6 +3365,45 @@ fn component_is_powered_module(component: &Component) -> bool {
     )
 }
 
+fn component_is_polarized_diode(kind: ComponentKind) -> bool {
+    matches!(
+        kind,
+        ComponentKind::Diode | ComponentKind::Led | ComponentKind::ZenerDiode
+    )
+}
+
+fn diode_appears_reversed(
+    pins: &[CircuitPin],
+    pin_nodes: &[usize],
+    wire_from_positive: &HashSet<usize>,
+    wire_from_return: &HashSet<usize>,
+) -> bool {
+    let Some((anode, cathode)) = diode_terminal_nodes(pins, pin_nodes) else {
+        return false;
+    };
+    wire_from_return.contains(&anode) && wire_from_positive.contains(&cathode)
+}
+
+fn diode_terminal_nodes(pins: &[CircuitPin], pin_nodes: &[usize]) -> Option<(usize, usize)> {
+    if pins.len() < 2 || pin_nodes.len() < 2 {
+        return None;
+    }
+
+    let anode = pins
+        .iter()
+        .zip(pin_nodes)
+        .find(|(pin, _)| pin.label == "A")
+        .map(|(_, &node)| node)
+        .unwrap_or(pin_nodes[0]);
+    let cathode = pins
+        .iter()
+        .zip(pin_nodes)
+        .find(|(pin, _)| pin.label == "K" || pin.label == "B")
+        .map(|(_, &node)| node)
+        .unwrap_or(pin_nodes[1]);
+    Some((anode, cathode))
+}
+
 fn component_is_switch(kind: ComponentKind) -> bool {
     matches!(
         kind,
@@ -3271,12 +3613,35 @@ fn draw_empty_canvas_hint(painter: &egui::Painter, canvas: Rect) {
     );
 }
 
+/// Returns grid-rounded positions of all component pins that have at least one
+/// wire endpoint or segment passing through them.
+fn connected_pin_positions(components: &[Component], wires: &[Wire]) -> Vec<(i32, i32)> {
+    let mut connected = Vec::new();
+    for component in components {
+        for pin in component_pin_defs(component) {
+            let key = (pin.pos.x.round() as i32, pin.pos.y.round() as i32);
+            let is_conn = wires.iter().any(|w| {
+                // Wire endpoint lands on pin
+                w.points.first().is_some_and(|&p| p.distance(pin.pos) < 4.0)
+                || w.points.last().is_some_and(|&p| p.distance(pin.pos) < 4.0)
+                // Any segment passes through the pin
+                || w.points.windows(2).any(|seg| distance_to_segment(pin.pos, seg[0], seg[1]) < 3.0)
+            });
+            if is_conn {
+                connected.push(key);
+            }
+        }
+    }
+    connected
+}
+
 fn draw_component(
     painter: &egui::Painter,
     component: &Component,
     selected: bool,
     show_pins: bool,
     energized: bool,
+    connected_pins: &[(i32, i32)],
     view: CanvasView,
 ) {
     let stroke = if selected {
@@ -3383,12 +3748,20 @@ fn draw_component(
     if show_pins {
         for pin in component_pin_defs(component) {
             let spos = view.to_screen(pin.pos);
-            painter.circle_filled(spos, 3.0, Color32::from_rgb(250, 205, 95));
-            painter.circle_stroke(
-                spos,
-                4.0,
-                Stroke::new(1.0, Color32::from_rgb(40, 35, 20)),
-            );
+            let key = (pin.pos.x.round() as i32, pin.pos.y.round() as i32);
+            let is_connected = connected_pins.contains(&key);
+            if is_connected {
+                painter.circle_filled(spos, 3.0, Color32::from_rgb(250, 205, 95));
+                painter.circle_stroke(spos, 4.0, Stroke::new(1.0, Color32::from_rgb(40, 35, 20)));
+            } else {
+                // Unconnected pin: hollow circle with small cross
+                painter.circle_stroke(spos, 4.5, Stroke::new(1.5, Color32::from_rgb(220, 80, 60)));
+                let d = 3.0;
+                painter.line_segment([spos - Vec2::new(d, 0.0), spos + Vec2::new(d, 0.0)],
+                    Stroke::new(1.0, Color32::from_rgb(220, 80, 60)));
+                painter.line_segment([spos - Vec2::new(0.0, d), spos + Vec2::new(0.0, d)],
+                    Stroke::new(1.0, Color32::from_rgb(220, 80, 60)));
+            }
             if should_draw_pin_label(component.kind, &pin) {
                 let screen_pin = CircuitPin { pos: spos, label: pin.label, role: pin.role };
                 draw_pin_label(painter, screen_center, &screen_pin);
@@ -3425,12 +3798,15 @@ fn draw_wire(
     energized: bool,
     show_flow: bool,
     flow_phase: f32,
+    net_highlighted: bool,
     view: CanvasView,
 ) {
     let stroke = if selected {
         Stroke::new(3.0, Color32::from_rgb(90, 235, 170))
     } else if energized {
         Stroke::new(3.2, Color32::from_rgb(255, 170, 55))
+    } else if net_highlighted {
+        Stroke::new(2.8, Color32::from_rgb(140, 210, 255))
     } else {
         Stroke::new(2.0, Color32::from_rgb(105, 178, 255))
     };
@@ -4322,8 +4698,61 @@ fn draw_junctions(painter: &egui::Painter, wires: &[Wire], view: CanvasView) {
         }
     }
 
-    for pos in junctions {
-        painter.circle_filled(view.to_screen(pos), 4.2, Color32::from_rgb(105, 178, 255));
+    for pos in &junctions {
+        let sp = view.to_screen(*pos);
+        let r = view.scale_f(5.0).clamp(3.5, 7.0);
+        painter.circle_filled(sp, r, Color32::from_rgb(105, 178, 255));
+        painter.circle_stroke(sp, r + 1.5, Stroke::new(1.0, Color32::from_rgba_unmultiplied(105, 178, 255, 80)));
+    }
+
+    // Draw hop arcs at non-connecting crossings (two wires cross but are NOT in junction list)
+    let junction_set: HashSet<(i32, i32)> = junction_keys;
+    for (i, wa) in wires.iter().enumerate() {
+        for seg_a in wa.points.windows(2) {
+            for wb in wires.iter().skip(i + 1) {
+                for seg_b in wb.points.windows(2) {
+                    if let Some(cross) = segment_intersection(seg_a[0], seg_a[1], seg_b[0], seg_b[1]) {
+                        let key = (cross.x.round() as i32, cross.y.round() as i32);
+                        if junction_set.contains(&key) { continue; }
+                        // Draw a small hop arc on wire B over wire A
+                        let sp = view.to_screen(cross);
+                        let hop_r = view.scale_f(5.5).clamp(3.0, 8.0);
+                        // Direction of segment_b
+                        let dir = (seg_b[1] - seg_b[0]).normalized();
+                        let perp = Vec2::new(-dir.y, dir.x);
+                        let a0 = sp - dir * hop_r;
+                        let a1 = sp + dir * hop_r;
+                        let ctrl = sp + perp * hop_r * 1.2;
+                        // Approximate arc as 3 segments
+                        let p0 = a0.lerp(ctrl, 0.5);
+                        let p1 = ctrl;
+                        let p2 = a1.lerp(ctrl, 0.5);
+                        let bg = Color32::from_rgb(18, 22, 28);
+                        // Erase wire underneath with background color
+                        painter.line_segment([a0, a1], Stroke::new(5.0, bg));
+                        let hop_stroke = Stroke::new(2.0, Color32::from_rgb(105, 178, 255));
+                        painter.line_segment([a0, p0], hop_stroke);
+                        painter.line_segment([p0, p1], hop_stroke);
+                        painter.line_segment([p1, p2], hop_stroke);
+                        painter.line_segment([p2, a1], hop_stroke);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn segment_intersection(a0: Pos2, a1: Pos2, b0: Pos2, b1: Pos2) -> Option<Pos2> {
+    let da = a1 - a0;
+    let db = b1 - b0;
+    let denom = da.x * db.y - da.y * db.x;
+    if denom.abs() < 1e-6 { return None; } // parallel
+    let t = ((b0.x - a0.x) * db.y - (b0.y - a0.y) * db.x) / denom;
+    let u = ((b0.x - a0.x) * da.y - (b0.y - a0.y) * da.x) / denom;
+    if t > 0.01 && t < 0.99 && u > 0.01 && u < 0.99 {
+        Some(a0 + da * t)
+    } else {
+        None
     }
 }
 
@@ -5781,11 +6210,78 @@ mod tests {
 
         let json = serde_json::to_string(&SavedCircuit::from_app(&app)).unwrap();
         let saved = serde_json::from_str::<SavedCircuit>(&json).unwrap();
-        let snapshot = saved.into_snapshot().unwrap();
+        let (snapshot, load_notes) = saved.into_snapshot().unwrap();
 
         assert_eq!(snapshot.components.len(), app.components.len());
         assert_eq!(snapshot.wires.len(), app.wires.len());
         assert!(snapshot.next_id > app.components.len() as u64);
+        assert!(load_notes.is_empty());
+    }
+
+    #[test]
+    fn saved_circuit_repairs_duplicate_ids_and_skips_invalid_geometry() {
+        let saved = SavedCircuit {
+            schema_version: 1,
+            next_id: 2,
+            counters: Counters::default(),
+            components: vec![
+                SavedComponent {
+                    id: 1,
+                    kind: ComponentKind::Resistor,
+                    x: 100.0,
+                    y: 100.0,
+                    rotation: 450,
+                    label: "R1".to_string(),
+                    value: "10k".to_string(),
+                },
+                SavedComponent {
+                    id: 1,
+                    kind: ComponentKind::Battery,
+                    x: 200.0,
+                    y: 100.0,
+                    rotation: 0,
+                    label: "BAT1".to_string(),
+                    value: "9V".to_string(),
+                },
+                SavedComponent {
+                    id: 3,
+                    kind: ComponentKind::Led,
+                    x: f32::NAN,
+                    y: 100.0,
+                    rotation: 0,
+                    label: "LED1".to_string(),
+                    value: "red".to_string(),
+                },
+            ],
+            wires: vec![
+                SavedWire {
+                    id: 1,
+                    points: vec![
+                        SavedPoint { x: 100.0, y: 100.0 },
+                        SavedPoint { x: 160.0, y: 100.0 },
+                    ],
+                },
+                SavedWire {
+                    id: 4,
+                    points: vec![SavedPoint { x: 0.0, y: 0.0 }],
+                },
+            ],
+        };
+
+        let (snapshot, load_notes) = saved.into_snapshot().unwrap();
+        let unique_ids = snapshot
+            .components
+            .iter()
+            .map(|component| component.id)
+            .chain(snapshot.wires.iter().map(|wire| wire.id))
+            .collect::<HashSet<_>>();
+
+        assert_eq!(snapshot.components.len(), 2);
+        assert_eq!(snapshot.wires.len(), 1);
+        assert_eq!(unique_ids.len(), 3);
+        assert_eq!(snapshot.components[0].rotation, 90);
+        assert!(snapshot.next_id > unique_ids.iter().copied().max().unwrap());
+        assert!(load_notes.len() >= 3);
     }
 
     #[test]
@@ -5808,6 +6304,50 @@ mod tests {
         assert!(
             sim.component_warnings.contains_key(&oled_id),
             "OLED must have a warning about missing I2C"
+        );
+    }
+
+    #[test]
+    fn reversed_led_opens_loop_and_reports_polarity_warning() {
+        let mut app = CircuitApp::new();
+        let battery = app.place_component(ComponentKind::Battery, Pos2::new(180.0, 300.0));
+        let led = app.place_component(ComponentKind::Led, Pos2::new(420.0, 300.0));
+        let ground = app.place_component(ComponentKind::Ground, Pos2::new(620.0, 360.0));
+
+        let bat_pos = app.pin_pos(battery, "+").unwrap();
+        let bat_neg = app.pin_pos(battery, "-").unwrap();
+        let led_a = app.pin_pos(led, "A").unwrap();
+        let led_b = app.pin_pos(led, "B").unwrap();
+        let gnd = app.pin_pos(ground, "GND").unwrap();
+
+        app.add_wire(vec![
+            bat_pos,
+            Pos2::new(bat_pos.x, 220.0),
+            Pos2::new(led_b.x, 220.0),
+            led_b,
+        ]);
+        app.add_wire(vec![led_a, Pos2::new(led_a.x, 360.0), gnd]);
+        app.add_wire(vec![
+            bat_neg,
+            Pos2::new(bat_neg.x, 460.0),
+            Pos2::new(gnd.x, 460.0),
+            gnd,
+        ]);
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+
+        assert!(
+            !sim.closed,
+            "Reversed LED should not close the live path: {:?}",
+            sim.details
+        );
+        assert!(!sim.energized_components.contains(&led));
+        assert!(
+            sim.component_warnings
+                .get(&led)
+                .is_some_and(|warning| warning.contains("Polarity warning")),
+            "Reversed LED should report a polarity warning: {:?}",
+            sim.component_warnings.get(&led)
         );
     }
 
