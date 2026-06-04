@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo check *)"
+      "Bash(cargo check *)",
+      "Bash(grep -n \"Sensor,\\\\$\\\\|=> \\\\\"I2C sensor\\\\\"\\\\|sensor: usize,\" /Users/hangyeonghyeon/Desktop/Rust/gui/Cluster/src/main.rs)"
     ]
   }
 }
