@@ -18,7 +18,12 @@ enum Tool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AlignDir {
-    Left, Right, Top, Bottom, CenterH, CenterV,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    CenterH,
+    CenterV,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -214,6 +219,7 @@ struct CircuitApp {
     snap_target: Option<Pos2>,
     circuit_revision: u64,
     cached_simulation: Option<(u64, Simulation)>,
+    cached_connected_pins: Option<(u64, Vec<(i32, i32)>)>,
     last_autorecover_revision: u64,
     /// Show DC voltage labels on every wire
     show_voltage_labels: bool,
@@ -234,11 +240,26 @@ struct CircuitSnapshot {
     wires: Vec<Wire>,
     next_id: u64,
     counters: Counters,
+    pages: Vec<(String, Vec<Component>, Vec<Wire>, u64, Counters)>,
+    current_page: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SavedCircuit {
     schema_version: u32,
+    next_id: u64,
+    counters: Counters,
+    components: Vec<SavedComponent>,
+    wires: Vec<SavedWire>,
+    #[serde(default)]
+    pages: Vec<SavedPage>,
+    #[serde(default)]
+    current_page: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SavedPage {
+    name: String,
     next_id: u64,
     counters: Counters,
     components: Vec<SavedComponent>,
@@ -302,9 +323,16 @@ impl CircuitApp {
             snap_target: None,
             circuit_revision: 1,
             cached_simulation: None,
+            cached_connected_pins: None,
             last_autorecover_revision: 0,
             show_voltage_labels: false,
-            pages: vec![("Page 1".to_string(), Vec::new(), Vec::new(), 1, Counters::default())],
+            pages: vec![(
+                "Page 1".to_string(),
+                Vec::new(),
+                Vec::new(),
+                1,
+                Counters::default(),
+            )],
             current_page: 0,
             show_find: false,
             find_query: String::new(),
@@ -319,6 +347,8 @@ impl CircuitApp {
             wires: self.wires.clone(),
             next_id: self.next_id,
             counters: self.counters.clone(),
+            pages: self.effective_pages(),
+            current_page: self.current_page,
         }
     }
 
@@ -327,6 +357,20 @@ impl CircuitApp {
         self.wires = snapshot.wires;
         self.next_id = snapshot.next_id;
         self.counters = snapshot.counters;
+        self.pages = if snapshot.pages.is_empty() {
+            vec![(
+                "Page 1".to_string(),
+                self.components.clone(),
+                self.wires.clone(),
+                self.next_id,
+                self.counters.clone(),
+            )]
+        } else {
+            snapshot.pages
+        };
+        self.current_page = snapshot
+            .current_page
+            .min(self.pages.len().saturating_sub(1));
         self.selected = None;
         self.drag = None;
         self.draft_wire.clear();
@@ -336,6 +380,7 @@ impl CircuitApp {
         self.dirty = true;
         self.circuit_revision = self.circuit_revision.saturating_add(1);
         self.cached_simulation = None;
+        self.cached_connected_pins = None;
     }
 
     fn record_history(&mut self) {
@@ -1012,6 +1057,7 @@ impl CircuitApp {
     }
 
     fn save_circuit_json(&mut self) {
+        self.save_current_page();
         match self.write_circuit_json(SAVE_PATH) {
             Ok(()) => {
                 self.dirty = false;
@@ -1054,18 +1100,34 @@ impl CircuitApp {
         } else {
             return;
         };
-        if ids.len() < 2 { return; }
+        if ids.len() < 2 {
+            return;
+        }
 
-        let positions: Vec<(u64, Pos2)> = self.components.iter()
+        let positions: Vec<(u64, Pos2)> = self
+            .components
+            .iter()
             .filter(|c| ids.contains(&c.id))
             .map(|c| (c.id, c.pos))
             .collect();
 
         let target = match dir {
-            AlignDir::Left => positions.iter().map(|p| p.1.x).fold(f32::INFINITY, f32::min),
-            AlignDir::Right => positions.iter().map(|p| p.1.x).fold(f32::NEG_INFINITY, f32::max),
-            AlignDir::Top => positions.iter().map(|p| p.1.y).fold(f32::INFINITY, f32::min),
-            AlignDir::Bottom => positions.iter().map(|p| p.1.y).fold(f32::NEG_INFINITY, f32::max),
+            AlignDir::Left => positions
+                .iter()
+                .map(|p| p.1.x)
+                .fold(f32::INFINITY, f32::min),
+            AlignDir::Right => positions
+                .iter()
+                .map(|p| p.1.x)
+                .fold(f32::NEG_INFINITY, f32::max),
+            AlignDir::Top => positions
+                .iter()
+                .map(|p| p.1.y)
+                .fold(f32::INFINITY, f32::min),
+            AlignDir::Bottom => positions
+                .iter()
+                .map(|p| p.1.y)
+                .fold(f32::NEG_INFINITY, f32::max),
             AlignDir::CenterH => {
                 let sum: f32 = positions.iter().map(|p| p.1.x).sum();
                 sum / positions.len() as f32
@@ -1094,9 +1156,13 @@ impl CircuitApp {
         } else {
             return;
         };
-        if ids.len() < 3 { return; }
+        if ids.len() < 3 {
+            return;
+        }
 
-        let mut ordered: Vec<(u64, f32)> = self.components.iter()
+        let mut ordered: Vec<(u64, f32)> = self
+            .components
+            .iter()
             .filter(|c| ids.contains(&c.id))
             .map(|c| (c.id, if vertical { c.pos.y } else { c.pos.x }))
             .collect();
@@ -1110,7 +1176,11 @@ impl CircuitApp {
         for (i, (id, _)) in ordered.iter().enumerate() {
             let val = first + step * i as f32;
             if let Some(comp) = self.components.iter_mut().find(|c| c.id == *id) {
-                if vertical { comp.pos.y = val; } else { comp.pos.x = val; }
+                if vertical {
+                    comp.pos.y = val;
+                } else {
+                    comp.pos.x = val;
+                }
             }
         }
         self.status = format!("Distributed {} components.", ids.len());
@@ -1128,7 +1198,9 @@ impl CircuitApp {
     }
 
     fn switch_page(&mut self, idx: usize) {
-        if idx == self.current_page || idx >= self.pages.len() { return; }
+        if idx == self.current_page || idx >= self.pages.len() {
+            return;
+        }
         self.save_current_page();
         self.current_page = idx;
         let (_, comps, wires, next_id, counters) = &self.pages[idx];
@@ -1146,7 +1218,13 @@ impl CircuitApp {
     fn add_page(&mut self) {
         self.save_current_page();
         let n = self.pages.len() + 1;
-        self.pages.push((format!("Page {n}"), Vec::new(), Vec::new(), 1, Counters::default()));
+        self.pages.push((
+            format!("Page {n}"),
+            Vec::new(),
+            Vec::new(),
+            1,
+            Counters::default(),
+        ));
         let new_idx = self.pages.len() - 1;
         self.switch_page(new_idx);
         self.status = format!("Added Page {n}.");
@@ -1208,6 +1286,7 @@ impl CircuitApp {
         if !self.dirty || (self.components.is_empty() && self.wires.is_empty()) {
             return;
         }
+        self.save_current_page();
         match self.write_circuit_json(AUTORECOVER_PATH) {
             Ok(()) => {
                 self.status = format!("Auto-saved recovery before {reason}.");
@@ -1266,6 +1345,17 @@ impl CircuitApp {
         simulation
     }
 
+    fn current_connected_pins(&mut self) -> Vec<(i32, i32)> {
+        if let Some((revision, pins)) = &self.cached_connected_pins
+            && *revision == self.circuit_revision
+        {
+            return pins.clone();
+        }
+        let pins = connected_pin_positions(&self.components, &self.wires);
+        self.cached_connected_pins = Some((self.circuit_revision, pins.clone()));
+        pins
+    }
+
     fn flush_autorecover_if_needed(&mut self) {
         if !self.dirty
             || self.last_autorecover_revision == self.circuit_revision
@@ -1273,152 +1363,252 @@ impl CircuitApp {
         {
             return;
         }
+        self.save_current_page();
         if let Err(err) = self.write_circuit_json(AUTORECOVER_PATH) {
             self.status = format!("Auto backup failed: {err}");
             return;
         }
         self.last_autorecover_revision = self.circuit_revision;
     }
+
+    fn effective_pages(&self) -> Vec<(String, Vec<Component>, Vec<Wire>, u64, Counters)> {
+        let mut pages = if self.pages.is_empty() {
+            vec![(
+                "Page 1".to_string(),
+                self.components.clone(),
+                self.wires.clone(),
+                self.next_id,
+                self.counters.clone(),
+            )]
+        } else {
+            self.pages.clone()
+        };
+
+        let page_index = self.current_page.min(pages.len().saturating_sub(1));
+        if let Some(page) = pages.get_mut(page_index) {
+            page.1 = self.components.clone();
+            page.2 = self.wires.clone();
+            page.3 = self.next_id;
+            page.4 = self.counters.clone();
+        }
+        pages
+    }
 }
 
 impl SavedCircuit {
     fn from_app(app: &CircuitApp) -> Self {
+        let pages = app
+            .effective_pages()
+            .into_iter()
+            .map(|(name, components, wires, next_id, counters)| SavedPage {
+                name,
+                next_id,
+                counters,
+                components: saved_components_from(&components),
+                wires: saved_wires_from(&wires),
+            })
+            .collect::<Vec<_>>();
         Self {
-            schema_version: 1,
+            schema_version: 2,
             next_id: app.next_id,
             counters: app.counters.clone(),
-            components: app
-                .components
-                .iter()
-                .map(|component| SavedComponent {
-                    id: component.id,
-                    kind: component.kind,
-                    x: component.pos.x,
-                    y: component.pos.y,
-                    rotation: component.rotation,
-                    label: component.label.clone(),
-                    value: component.value.clone(),
-                })
-                .collect(),
-            wires: app
-                .wires
-                .iter()
-                .map(|wire| SavedWire {
-                    id: wire.id,
-                    points: wire
-                        .points
-                        .iter()
-                        .map(|point| SavedPoint {
-                            x: point.x,
-                            y: point.y,
-                        })
-                        .collect(),
-                })
-                .collect(),
+            components: saved_components_from(&app.components),
+            wires: saved_wires_from(&app.wires),
+            pages,
+            current_page: app.current_page,
         }
     }
 
     fn into_snapshot(self) -> Result<(CircuitSnapshot, Vec<String>), String> {
-        if self.schema_version > 1 {
+        if self.schema_version > 2 {
             return Err(format!(
                 "Unsupported schema version {}.",
                 self.schema_version
             ));
         }
+        let current_page = self.current_page;
         let mut load_notes = Vec::new();
-        let mut used_ids = HashSet::new();
-        let mut repair_id = self
-            .components
-            .iter()
-            .map(|component| component.id)
-            .chain(self.wires.iter().map(|wire| wire.id))
-            .max()
-            .unwrap_or(0)
-            .max(self.next_id)
-            + 1;
 
-        let mut components = Vec::new();
-        for component in self.components {
-            if !component.x.is_finite() || !component.y.is_finite() {
-                load_notes.push(format!(
-                    "Skipped {} with invalid position.",
-                    component.label
-                ));
-                continue;
-            }
-            let mut id = component.id;
-            if id == 0 || !used_ids.insert(id) {
-                id = repair_id;
-                repair_id += 1;
-                used_ids.insert(id);
-                load_notes.push(format!(
-                    "Reassigned duplicate component id for {}.",
-                    component.label
-                ));
-            }
-            components.push(Component {
-                id,
-                kind: component.kind,
-                pos: Pos2::new(component.x, component.y),
-                rotation: component.rotation.rem_euclid(360),
-                label: if component.label.trim().is_empty() {
-                    load_notes.push("Filled an empty component label.".to_string());
-                    component_kind_label(component.kind).to_string()
+        let mut pages = Vec::new();
+        if self.pages.is_empty() {
+            let page = repair_saved_page(
+                "Page 1".to_string(),
+                self.components,
+                self.wires,
+                self.next_id,
+                self.counters,
+                &mut load_notes,
+            );
+            pages.push(page);
+        } else {
+            for (idx, page) in self.pages.into_iter().enumerate() {
+                let name = if page.name.trim().is_empty() {
+                    load_notes.push(format!("Filled an empty page name on page {}.", idx + 1));
+                    format!("Page {}", idx + 1)
                 } else {
-                    component.label
-                },
-                value: component.value,
-            });
-        }
-
-        let mut wires = Vec::new();
-        for wire in self.wires {
-            let points = wire
-                .points
-                .into_iter()
-                .filter_map(|point| {
-                    if point.x.is_finite() && point.y.is_finite() {
-                        Some(Pos2::new(point.x, point.y))
-                    } else {
-                        load_notes.push("Dropped an invalid wire point.".to_string());
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-            let points = simplify_wire(points);
-            if points.len() < 2 {
-                load_notes.push(format!(
-                    "Skipped wire {} with fewer than 2 points.",
-                    wire.id
+                    page.name
+                };
+                pages.push(repair_saved_page(
+                    name,
+                    page.components,
+                    page.wires,
+                    page.next_id,
+                    page.counters,
+                    &mut load_notes,
                 ));
-                continue;
             }
-            let mut id = wire.id;
-            if id == 0 || !used_ids.insert(id) {
-                id = repair_id;
-                repair_id += 1;
-                used_ids.insert(id);
-                load_notes.push("Reassigned duplicate wire id.".to_string());
-            }
-            wires.push(Wire { id, points });
         }
 
-        let max_id = components
-            .iter()
-            .map(|component| component.id)
-            .chain(wires.iter().map(|wire| wire.id))
-            .max()
-            .unwrap_or(0);
+        if pages.is_empty() {
+            pages.push((
+                "Page 1".to_string(),
+                Vec::new(),
+                Vec::new(),
+                1,
+                Counters::default(),
+            ));
+        }
+
+        let current_page = current_page.min(pages.len().saturating_sub(1));
+        let (_, components, wires, next_id, counters) = pages[current_page].clone();
         Ok((
             CircuitSnapshot {
                 components,
                 wires,
-                next_id: self.next_id.max(max_id + 1).max(repair_id),
-                counters: self.counters,
+                next_id,
+                counters,
+                pages,
+                current_page,
             },
             load_notes,
         ))
     }
+}
+
+fn saved_components_from(components: &[Component]) -> Vec<SavedComponent> {
+    components
+        .iter()
+        .map(|component| SavedComponent {
+            id: component.id,
+            kind: component.kind,
+            x: component.pos.x,
+            y: component.pos.y,
+            rotation: component.rotation,
+            label: component.label.clone(),
+            value: component.value.clone(),
+        })
+        .collect()
+}
+
+fn saved_wires_from(wires: &[Wire]) -> Vec<SavedWire> {
+    wires
+        .iter()
+        .map(|wire| SavedWire {
+            id: wire.id,
+            points: wire
+                .points
+                .iter()
+                .map(|point| SavedPoint {
+                    x: point.x,
+                    y: point.y,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn repair_saved_page(
+    name: String,
+    saved_components: Vec<SavedComponent>,
+    saved_wires: Vec<SavedWire>,
+    saved_next_id: u64,
+    saved_counters: Counters,
+    load_notes: &mut Vec<String>,
+) -> (String, Vec<Component>, Vec<Wire>, u64, Counters) {
+    let mut used_ids = HashSet::new();
+    let mut repair_id = saved_components
+        .iter()
+        .map(|component| component.id)
+        .chain(saved_wires.iter().map(|wire| wire.id))
+        .max()
+        .unwrap_or(0)
+        .max(saved_next_id)
+        + 1;
+
+    let mut components = Vec::new();
+    for component in saved_components {
+        if !component.x.is_finite() || !component.y.is_finite() {
+            load_notes.push(format!(
+                "Skipped {} with invalid position.",
+                component.label
+            ));
+            continue;
+        }
+        let mut id = component.id;
+        if id == 0 || !used_ids.insert(id) {
+            id = repair_id;
+            repair_id += 1;
+            used_ids.insert(id);
+            load_notes.push(format!(
+                "Reassigned duplicate component id for {}.",
+                component.label
+            ));
+        }
+        components.push(Component {
+            id,
+            kind: component.kind,
+            pos: Pos2::new(component.x, component.y),
+            rotation: component.rotation.rem_euclid(360),
+            label: if component.label.trim().is_empty() {
+                load_notes.push("Filled an empty component label.".to_string());
+                component_kind_label(component.kind).to_string()
+            } else {
+                component.label
+            },
+            value: component.value,
+        });
+    }
+
+    let mut wires = Vec::new();
+    for wire in saved_wires {
+        let points = wire
+            .points
+            .into_iter()
+            .filter_map(|point| {
+                if point.x.is_finite() && point.y.is_finite() {
+                    Some(Pos2::new(point.x, point.y))
+                } else {
+                    load_notes.push("Dropped an invalid wire point.".to_string());
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let points = simplify_wire(points);
+        if points.len() < 2 {
+            load_notes.push(format!(
+                "Skipped wire {} with fewer than 2 points.",
+                wire.id
+            ));
+            continue;
+        }
+        let mut id = wire.id;
+        if id == 0 || !used_ids.insert(id) {
+            id = repair_id;
+            repair_id += 1;
+            used_ids.insert(id);
+            load_notes.push("Reassigned duplicate wire id.".to_string());
+        }
+        wires.push(Wire { id, points });
+    }
+
+    let max_id = components
+        .iter()
+        .map(|component| component.id)
+        .chain(wires.iter().map(|wire| wire.id))
+        .max()
+        .unwrap_or(0);
+    let next_id = saved_next_id.max(max_id + 1).max(repair_id);
+    (name, components, wires, next_id, saved_counters)
 }
 
 impl eframe::App for CircuitApp {
@@ -1469,30 +1659,38 @@ impl eframe::App for CircuitApp {
                 // Align tools
                 toolbar_menu(ui, "Align", |ui| {
                     if menu_action(ui, "Left edges").clicked() {
-                        self.align_selected(AlignDir::Left); ui.close();
+                        self.align_selected(AlignDir::Left);
+                        ui.close();
                     }
                     if menu_action(ui, "Right edges").clicked() {
-                        self.align_selected(AlignDir::Right); ui.close();
+                        self.align_selected(AlignDir::Right);
+                        ui.close();
                     }
                     if menu_action(ui, "Top edges").clicked() {
-                        self.align_selected(AlignDir::Top); ui.close();
+                        self.align_selected(AlignDir::Top);
+                        ui.close();
                     }
                     if menu_action(ui, "Bottom edges").clicked() {
-                        self.align_selected(AlignDir::Bottom); ui.close();
+                        self.align_selected(AlignDir::Bottom);
+                        ui.close();
                     }
                     ui.separator();
                     if menu_action(ui, "Center horizontally").clicked() {
-                        self.align_selected(AlignDir::CenterH); ui.close();
+                        self.align_selected(AlignDir::CenterH);
+                        ui.close();
                     }
                     if menu_action(ui, "Center vertically").clicked() {
-                        self.align_selected(AlignDir::CenterV); ui.close();
+                        self.align_selected(AlignDir::CenterV);
+                        ui.close();
                     }
                     ui.separator();
                     if menu_action(ui, "Distribute horizontally").clicked() {
-                        self.distribute_selected(false); ui.close();
+                        self.distribute_selected(false);
+                        ui.close();
                     }
                     if menu_action(ui, "Distribute vertically").clicked() {
-                        self.distribute_selected(true); ui.close();
+                        self.distribute_selected(true);
+                        ui.close();
                     }
                 });
                 if compact_button(ui, "Find  Ctrl+F").clicked() {
@@ -1562,6 +1760,8 @@ impl eframe::App for CircuitApp {
                         ui.close();
                     }
                 });
+                ui.separator();
+                status_pill(ui, &simulation.summary, simulation_tone(&simulation));
             });
             if !self.status.is_empty() {
                 ui.label(
@@ -1745,15 +1945,12 @@ impl eframe::App for CircuitApp {
                         palette_section(ui, "Circuit", SectionMode::Open, |ui| {
                             metric_row(ui, "Parts", self.components.len().to_string());
                             metric_row(ui, "Wires", self.wires.len().to_string());
+                            let warning_count = simulation_warning_count(&simulation);
+                            if warning_count > 0 {
+                                metric_row(ui, "Warnings", warning_count.to_string());
+                            }
                             if self.simulate {
-                                let tone = if simulation.shorted {
-                                    StatusTone::Error
-                                } else if simulation.closed {
-                                    StatusTone::Live
-                                } else {
-                                    StatusTone::Muted
-                                };
-                                status_pill(ui, &simulation.summary, tone);
+                                status_pill(ui, &simulation.summary, simulation_tone(&simulation));
                                 if let Some(voltage) = simulation.voltage {
                                     metric_row(ui, "Voltage", format!("{:.2} V", voltage));
                                 }
@@ -1916,7 +2113,11 @@ impl eframe::App for CircuitApp {
         // ── Page tabs (bottom strip above status bar) ────────────────────────
         egui::TopBottomPanel::bottom("page_tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Pages:").size(11.0).color(Color32::from_rgb(120, 130, 140)));
+                ui.label(
+                    egui::RichText::new("Pages:")
+                        .size(11.0)
+                        .color(Color32::from_rgb(120, 130, 140)),
+                );
                 let page_count = self.pages.len();
                 for idx in 0..page_count {
                     let name = self.pages[idx].0.clone();
@@ -1927,9 +2128,8 @@ impl eframe::App for CircuitApp {
                         Color32::from_rgb(90, 100, 115)
                     };
                     let resp = ui.add(
-                        egui::Button::new(
-                            egui::RichText::new(&name).size(11.0).color(btn_color)
-                        ).frame(active),
+                        egui::Button::new(egui::RichText::new(&name).size(11.0).color(btn_color))
+                            .frame(active),
                     );
                     if resp.clicked() && !active {
                         self.switch_page(idx);
@@ -1960,6 +2160,18 @@ impl eframe::App for CircuitApp {
                 ui.monospace(format!("Grid: {:.0}px", self.grid));
                 ui.separator();
                 ui.monospace(format!("Zoom: {:.0}%", self.zoom * 100.0));
+                ui.separator();
+                ui.colored_label(
+                    simulation_text_color(&simulation),
+                    format!(
+                        "{}{}",
+                        simulation.summary,
+                        match simulation_warning_count(&simulation) {
+                            0 => String::new(),
+                            count => format!(" / {count} warning(s)"),
+                        }
+                    ),
+                );
                 ui.separator();
                 ui.label(selection_summary(
                     self.selected,
@@ -2061,7 +2273,9 @@ impl eframe::App for CircuitApp {
                 let energized = simulation.energized_wires.contains(&wire.id);
                 let net_highlighted = self.highlighted_net_wires.contains(&wire.id)
                     && !self.highlighted_net_wires.is_empty();
-                let dc_v = simulation.dc.as_ref()
+                let dc_v = simulation
+                    .dc
+                    .as_ref()
                     .and_then(|dc| dc.wire_voltage.get(&wire.id).copied());
                 let dc_vmax = simulation.dc.as_ref().map(|dc| dc.vmax).unwrap_or(1.0);
                 draw_wire(
@@ -2079,8 +2293,9 @@ impl eframe::App for CircuitApp {
                 );
             }
 
-            // Compute connected pins for unconnected-pin rendering
-            let connected_pins = connected_pin_positions(&self.components, &self.wires);
+            // Compute connected pins for unconnected-pin rendering. This can be
+            // expensive on larger circuits, so it is cached by circuit revision.
+            let connected_pins = self.current_connected_pins();
 
             for component in &self.components {
                 draw_component(
@@ -2715,7 +2930,9 @@ impl eframe::App for CircuitApp {
                         );
                         if response.changed() {
                             let q = self.find_query.to_lowercase();
-                            self.find_results = self.components.iter()
+                            self.find_results = self
+                                .components
+                                .iter()
                                 .filter(|c| {
                                     c.label.to_lowercase().contains(&q)
                                         || c.value.to_lowercase().contains(&q)
@@ -2727,7 +2944,8 @@ impl eframe::App for CircuitApp {
                         }
                         if ui.small_button("↑").clicked() {
                             if !self.find_results.is_empty() {
-                                self.find_result_idx = self.find_result_idx
+                                self.find_result_idx = self
+                                    .find_result_idx
                                     .checked_sub(1)
                                     .unwrap_or(self.find_results.len() - 1);
                             }
@@ -2748,9 +2966,8 @@ impl eframe::App for CircuitApp {
                         self.selected = Some(Selection::Component(cur_id));
                         // Pan so it's visible
                         if let Some(comp) = self.components.iter().find(|c| c.id == cur_id) {
-                            let sp = self.canvas_rect.min
-                                + self.pan
-                                + comp.pos.to_vec2() * self.zoom;
+                            let sp =
+                                self.canvas_rect.min + self.pan + comp.pos.to_vec2() * self.zoom;
                             if !self.canvas_rect.contains(sp) {
                                 let canvas_center = self.canvas_rect.center();
                                 self.pan = canvas_center.to_vec2()
@@ -2758,11 +2975,21 @@ impl eframe::App for CircuitApp {
                                     - comp.pos.to_vec2() * self.zoom;
                             }
                         }
-                        ui.label(egui::RichText::new(
-                            format!("{}/{}", self.find_result_idx + 1, self.find_results.len())
-                        ).size(11.0).color(Color32::from_rgb(140, 200, 160)));
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}/{}",
+                                self.find_result_idx + 1,
+                                self.find_results.len()
+                            ))
+                            .size(11.0)
+                            .color(Color32::from_rgb(140, 200, 160)),
+                        );
                     } else if !self.find_query.is_empty() {
-                        ui.label(egui::RichText::new("No results").size(11.0).color(Color32::from_rgb(200, 100, 90)));
+                        ui.label(
+                            egui::RichText::new("No results")
+                                .size(11.0)
+                                .color(Color32::from_rgb(200, 100, 90)),
+                        );
                     }
                 });
         }
@@ -3164,6 +3391,28 @@ fn status_pill(ui: &mut egui::Ui, text: &str, tone: StatusTone) {
         .show(ui, |ui| {
             ui.label(egui::RichText::new(text).size(11.0).strong().color(color));
         });
+}
+
+fn simulation_tone(simulation: &Simulation) -> StatusTone {
+    if simulation.shorted {
+        StatusTone::Error
+    } else if simulation.closed {
+        StatusTone::Live
+    } else {
+        StatusTone::Muted
+    }
+}
+
+fn simulation_text_color(simulation: &Simulation) -> Color32 {
+    match simulation_tone(simulation) {
+        StatusTone::Error => Color32::from_rgb(255, 128, 112),
+        StatusTone::Live => Color32::from_rgb(255, 198, 92),
+        StatusTone::Neutral | StatusTone::Muted => Color32::from_rgb(152, 162, 172),
+    }
+}
+
+fn simulation_warning_count(simulation: &Simulation) -> usize {
+    simulation.component_warnings.len() + usize::from(simulation.shorted)
 }
 
 fn metric_row(ui: &mut egui::Ui, label: impl Into<String>, value: impl Into<String>) {
@@ -4646,14 +4895,28 @@ fn draw_component(
         ),
         ComponentKind::NetLabel => draw_net_label(painter, component, rect, stroke, energized),
         ComponentKind::Timer555 => draw_module(
-            painter, component, rect, stroke, energized, component.rotation,
-            "555", &["GND", "TR", "Q", "R"], &["VCC", "DIS", "THR", "CV"],
+            painter,
+            component,
+            rect,
+            stroke,
+            energized,
+            component.rotation,
+            "555",
+            &["GND", "TR", "Q", "R"],
+            &["VCC", "DIS", "THR", "CV"],
         ),
         ComponentKind::Crystal => draw_crystal(painter, rect, component.rotation, stroke),
         ComponentKind::Transformer => draw_transformer(painter, rect, component.rotation, stroke),
         ComponentKind::Display7Seg => draw_module(
-            painter, component, rect, stroke, energized, component.rotation,
-            "7-SEG", &["COM", "A", "B", "C"], &["D", "E", "F", "G"],
+            painter,
+            component,
+            rect,
+            stroke,
+            energized,
+            component.rotation,
+            "7-SEG",
+            &["COM", "A", "B", "C"],
+            &["D", "E", "F", "G"],
         ),
         ComponentKind::Thermistor => draw_thermistor(painter, rect, component.rotation, stroke),
         ComponentKind::Varistor => draw_varistor(painter, rect, component.rotation, stroke),
@@ -4666,20 +4929,29 @@ fn draw_component(
             let _ = (center, r_h, s);
         }
         ComponentKind::TvsDiode => draw_diode(painter, rect, component.rotation, stroke, true),
-        ComponentKind::VoltageRef => draw_ic_box(
-            painter, rect, component.rotation, stroke, energized, "VREF",
-        ),
+        ComponentKind::VoltageRef => {
+            draw_ic_box(painter, rect, component.rotation, stroke, energized, "VREF")
+        }
         ComponentKind::MotorDriver => draw_module(
-            painter, component, rect, stroke, energized, component.rotation,
-            "H-BRIDGE", &["VCC", "GND", "IN1", "IN2"], &["OUT1", "OUT2", "EN"],
+            painter,
+            component,
+            rect,
+            stroke,
+            energized,
+            component.rotation,
+            "H-BRIDGE",
+            &["VCC", "GND", "IN1", "IN2"],
+            &["OUT1", "OUT2", "EN"],
         ),
-        ComponentKind::Phototransistor => draw_npn(painter, rect, component.rotation, stroke, energized),
-        ComponentKind::Optocoupler => draw_ic_box(
-            painter, rect, component.rotation, stroke, energized, "OPTO",
-        ),
-        ComponentKind::GenericIc => draw_ic_box(
-            painter, rect, component.rotation, stroke, energized, "IC",
-        ),
+        ComponentKind::Phototransistor => {
+            draw_npn(painter, rect, component.rotation, stroke, energized)
+        }
+        ComponentKind::Optocoupler => {
+            draw_ic_box(painter, rect, component.rotation, stroke, energized, "OPTO")
+        }
+        ComponentKind::GenericIc => {
+            draw_ic_box(painter, rect, component.rotation, stroke, energized, "IC")
+        }
     }
 
     if show_pins {
@@ -5325,49 +5597,148 @@ fn component_pin_defs(component: &Component) -> Vec<CircuitPin> {
         | ComponentKind::Varistor
         | ComponentKind::SchottkyDiode
         | ComponentKind::TvsDiode => vec![
-            CircuitPin { label: "A", role: PinRole::Passive, pos: Pos2::new(rect.left(), center.y) },
-            CircuitPin { label: "B", role: PinRole::Passive, pos: Pos2::new(rect.right(), center.y) },
+            CircuitPin {
+                label: "A",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.left(), center.y),
+            },
+            CircuitPin {
+                label: "B",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.right(), center.y),
+            },
         ],
         ComponentKind::Transformer => vec![
-            CircuitPin { label: "P1", role: PinRole::Passive, pos: Pos2::new(rect.left(), center.y - rect.height() * 0.22) },
-            CircuitPin { label: "P2", role: PinRole::Passive, pos: Pos2::new(rect.left(), center.y + rect.height() * 0.22) },
-            CircuitPin { label: "S1", role: PinRole::Passive, pos: Pos2::new(rect.right(), center.y - rect.height() * 0.22) },
-            CircuitPin { label: "S2", role: PinRole::Passive, pos: Pos2::new(rect.right(), center.y + rect.height() * 0.22) },
+            CircuitPin {
+                label: "P1",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.left(), center.y - rect.height() * 0.22),
+            },
+            CircuitPin {
+                label: "P2",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.left(), center.y + rect.height() * 0.22),
+            },
+            CircuitPin {
+                label: "S1",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.right(), center.y - rect.height() * 0.22),
+            },
+            CircuitPin {
+                label: "S2",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.right(), center.y + rect.height() * 0.22),
+            },
         ],
         ComponentKind::VoltageRef => vec![
-            CircuitPin { label: "A", role: PinRole::Passive, pos: Pos2::new(rect.left(), center.y) },
-            CircuitPin { label: "K", role: PinRole::Passive, pos: Pos2::new(rect.right(), center.y) },
-            CircuitPin { label: "ADJ", role: PinRole::Control, pos: Pos2::new(center.x, rect.bottom()) },
+            CircuitPin {
+                label: "A",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.left(), center.y),
+            },
+            CircuitPin {
+                label: "K",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.right(), center.y),
+            },
+            CircuitPin {
+                label: "ADJ",
+                role: PinRole::Control,
+                pos: Pos2::new(center.x, rect.bottom()),
+            },
         ],
         ComponentKind::Phototransistor => vec![
-            CircuitPin { label: "C", role: PinRole::Positive, pos: Pos2::new(rect.right(), rect.top() + rect.height() * 0.22) },
-            CircuitPin { label: "E", role: PinRole::Ground, pos: Pos2::new(rect.right(), rect.bottom() - rect.height() * 0.22) },
+            CircuitPin {
+                label: "C",
+                role: PinRole::Positive,
+                pos: Pos2::new(rect.right(), rect.top() + rect.height() * 0.22),
+            },
+            CircuitPin {
+                label: "E",
+                role: PinRole::Ground,
+                pos: Pos2::new(rect.right(), rect.bottom() - rect.height() * 0.22),
+            },
         ],
         ComponentKind::Optocoupler => vec![
-            CircuitPin { label: "A",   role: PinRole::Passive, pos: Pos2::new(rect.left(), center.y - rect.height() * 0.22) },
-            CircuitPin { label: "K",   role: PinRole::Passive, pos: Pos2::new(rect.left(), center.y + rect.height() * 0.22) },
-            CircuitPin { label: "C",   role: PinRole::Positive, pos: Pos2::new(rect.right(), center.y - rect.height() * 0.22) },
-            CircuitPin { label: "E",   role: PinRole::Ground,   pos: Pos2::new(rect.right(), center.y + rect.height() * 0.22) },
+            CircuitPin {
+                label: "A",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.left(), center.y - rect.height() * 0.22),
+            },
+            CircuitPin {
+                label: "K",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.left(), center.y + rect.height() * 0.22),
+            },
+            CircuitPin {
+                label: "C",
+                role: PinRole::Positive,
+                pos: Pos2::new(rect.right(), center.y - rect.height() * 0.22),
+            },
+            CircuitPin {
+                label: "E",
+                role: PinRole::Ground,
+                pos: Pos2::new(rect.right(), center.y + rect.height() * 0.22),
+            },
         ],
         ComponentKind::Timer555 => module_pin_defs(
             rect,
-            &[("GND", PinRole::Ground), ("TR", PinRole::Digital), ("Q", PinRole::Output), ("RST", PinRole::Control)],
-            &[("VCC", PinRole::Positive), ("DIS", PinRole::Digital), ("THR", PinRole::Digital), ("CV", PinRole::Passive)],
+            &[
+                ("GND", PinRole::Ground),
+                ("TR", PinRole::Digital),
+                ("Q", PinRole::Output),
+                ("RST", PinRole::Control),
+            ],
+            &[
+                ("VCC", PinRole::Positive),
+                ("DIS", PinRole::Digital),
+                ("THR", PinRole::Digital),
+                ("CV", PinRole::Passive),
+            ],
         ),
         ComponentKind::Display7Seg => module_pin_defs(
             rect,
-            &[("COM", PinRole::Ground), ("A", PinRole::Digital), ("B", PinRole::Digital), ("C", PinRole::Digital)],
-            &[("D", PinRole::Digital), ("E", PinRole::Digital), ("F", PinRole::Digital), ("G", PinRole::Digital)],
+            &[
+                ("COM", PinRole::Ground),
+                ("A", PinRole::Digital),
+                ("B", PinRole::Digital),
+                ("C", PinRole::Digital),
+            ],
+            &[
+                ("D", PinRole::Digital),
+                ("E", PinRole::Digital),
+                ("F", PinRole::Digital),
+                ("G", PinRole::Digital),
+            ],
         ),
         ComponentKind::MotorDriver => module_pin_defs(
             rect,
-            &[("VCC", PinRole::Positive), ("GND", PinRole::Ground), ("IN1", PinRole::Digital), ("IN2", PinRole::Digital)],
-            &[("OUT1", PinRole::Output), ("OUT2", PinRole::Output), ("EN", PinRole::Control)],
+            &[
+                ("VCC", PinRole::Positive),
+                ("GND", PinRole::Ground),
+                ("IN1", PinRole::Digital),
+                ("IN2", PinRole::Digital),
+            ],
+            &[
+                ("OUT1", PinRole::Output),
+                ("OUT2", PinRole::Output),
+                ("EN", PinRole::Control),
+            ],
         ),
         ComponentKind::GenericIc => module_pin_defs(
             rect,
-            &[("VCC", PinRole::Positive), ("GND", PinRole::Ground), ("IN1", PinRole::Digital), ("IN2", PinRole::Digital)],
-            &[("OUT1", PinRole::Output), ("OUT2", PinRole::Output), ("CLK", PinRole::Digital), ("RST", PinRole::Control)],
+            &[
+                ("VCC", PinRole::Positive),
+                ("GND", PinRole::Ground),
+                ("IN1", PinRole::Digital),
+                ("IN2", PinRole::Digital),
+            ],
+            &[
+                ("OUT1", PinRole::Output),
+                ("OUT2", PinRole::Output),
+                ("CLK", PinRole::Digital),
+                ("RST", PinRole::Control),
+            ],
         ),
         _ => vec![
             CircuitPin {
@@ -6042,12 +6413,7 @@ fn draw_net_label(
     );
 }
 
-fn draw_crystal(
-    painter: &egui::Painter,
-    rect: Rect,
-    rotation: i32,
-    stroke: Stroke,
-) {
+fn draw_crystal(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
     let center = rect.center();
     let hw = rect.width() * 0.5;
     let hh = rect.height() * 0.45;
@@ -6060,8 +6426,14 @@ fn draw_crystal(
         let c = Pos2::new(center.x, center.y + plate_gap);
         let d = Pos2::new(center.x, rect.bottom());
         let ps = vec![
-            [Pos2::new(center.x - plate_h, center.y - plate_gap), Pos2::new(center.x + plate_h, center.y - plate_gap)],
-            [Pos2::new(center.x - plate_h, center.y + plate_gap), Pos2::new(center.x + plate_h, center.y + plate_gap)],
+            [
+                Pos2::new(center.x - plate_h, center.y - plate_gap),
+                Pos2::new(center.x + plate_h, center.y - plate_gap),
+            ],
+            [
+                Pos2::new(center.x - plate_h, center.y + plate_gap),
+                Pos2::new(center.x + plate_h, center.y + plate_gap),
+            ],
         ];
         (a, b, c, d, ps)
     } else {
@@ -6070,8 +6442,14 @@ fn draw_crystal(
         let c = Pos2::new(center.x + plate_gap, center.y);
         let d = Pos2::new(rect.right(), center.y);
         let ps = vec![
-            [Pos2::new(center.x - plate_gap, center.y - plate_h), Pos2::new(center.x - plate_gap, center.y + plate_h)],
-            [Pos2::new(center.x + plate_gap, center.y - plate_h), Pos2::new(center.x + plate_gap, center.y + plate_h)],
+            [
+                Pos2::new(center.x - plate_gap, center.y - plate_h),
+                Pos2::new(center.x - plate_gap, center.y + plate_h),
+            ],
+            [
+                Pos2::new(center.x + plate_gap, center.y - plate_h),
+                Pos2::new(center.x + plate_gap, center.y + plate_h),
+            ],
         ];
         (a, b, c, d, ps)
     };
@@ -6090,22 +6468,13 @@ fn draw_crystal(
     painter.rect_stroke(body, 2.0, stroke, StrokeKind::Middle);
 }
 
-fn draw_transformer(
-    painter: &egui::Painter,
-    rect: Rect,
-    rotation: i32,
-    stroke: Stroke,
-) {
+fn draw_transformer(painter: &egui::Painter, rect: Rect, _rotation: i32, stroke: Stroke) {
     let center = rect.center();
     let hw = rect.width() * 0.46;
     let hh = rect.height() * 0.38;
     // Primary coil (left side)
     let num_loops = 4;
-    let loop_w = hw * 0.44;
-    let loop_h = hh;
     for i in 0..num_loops {
-        let t = i as f32 / num_loops as f32;
-        let cx = rect.left() + hw * 0.5 + t * loop_w * (num_loops as f32 - 1.0) / (num_loops as f32 - 1.0).max(1.0);
         painter.circle_stroke(
             Pos2::new(rect.left() + hw * 0.22 + i as f32 * (hw * 0.22), center.y),
             hh * 0.28,
@@ -6123,26 +6492,51 @@ fn draw_transformer(
     // Core line
     let core_x = center.x;
     painter.line_segment(
-        [Pos2::new(core_x - 2.0, center.y - hh), Pos2::new(core_x - 2.0, center.y + hh)],
+        [
+            Pos2::new(core_x - 2.0, center.y - hh),
+            Pos2::new(core_x - 2.0, center.y + hh),
+        ],
         Stroke::new(2.0, stroke.color),
     );
     painter.line_segment(
-        [Pos2::new(core_x + 2.0, center.y - hh), Pos2::new(core_x + 2.0, center.y + hh)],
+        [
+            Pos2::new(core_x + 2.0, center.y - hh),
+            Pos2::new(core_x + 2.0, center.y + hh),
+        ],
         Stroke::new(2.0, stroke.color),
     );
     // Lead wires
-    painter.line_segment([Pos2::new(rect.left(), center.y - hh * 0.6), Pos2::new(rect.left() + hw * 0.22 - hh * 0.28, center.y - hh * 0.6)], stroke);
-    painter.line_segment([Pos2::new(rect.left(), center.y + hh * 0.6), Pos2::new(rect.left() + hw * 0.22 - hh * 0.28, center.y + hh * 0.6)], stroke);
-    painter.line_segment([Pos2::new(rect.right(), center.y - hh * 0.6), Pos2::new(rect.right() - hw * 0.22 + hh * 0.28, center.y - hh * 0.6)], stroke);
-    painter.line_segment([Pos2::new(rect.right(), center.y + hh * 0.6), Pos2::new(rect.right() - hw * 0.22 + hh * 0.28, center.y + hh * 0.6)], stroke);
+    painter.line_segment(
+        [
+            Pos2::new(rect.left(), center.y - hh * 0.6),
+            Pos2::new(rect.left() + hw * 0.22 - hh * 0.28, center.y - hh * 0.6),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(rect.left(), center.y + hh * 0.6),
+            Pos2::new(rect.left() + hw * 0.22 - hh * 0.28, center.y + hh * 0.6),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(rect.right(), center.y - hh * 0.6),
+            Pos2::new(rect.right() - hw * 0.22 + hh * 0.28, center.y - hh * 0.6),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(rect.right(), center.y + hh * 0.6),
+            Pos2::new(rect.right() - hw * 0.22 + hh * 0.28, center.y + hh * 0.6),
+        ],
+        stroke,
+    );
 }
 
-fn draw_thermistor(
-    painter: &egui::Painter,
-    rect: Rect,
-    rotation: i32,
-    stroke: Stroke,
-) {
+fn draw_thermistor(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
     // Draw as a resistor with a diagonal arrow through it (NTC symbol)
     draw_resistor(painter, rect, rotation, stroke);
     let center = rect.center();
@@ -6150,11 +6544,20 @@ fn draw_thermistor(
     let hh = rect.height() * 0.55;
     // Diagonal temperature arrow
     let arr_start = Pos2::new(center.x - hw * 0.6, center.y + hh * 0.8);
-    let arr_end   = Pos2::new(center.x + hw * 0.6, center.y - hh * 0.8);
-    painter.line_segment([arr_start, arr_end], Stroke::new(1.5, Color32::from_rgb(255, 160, 80)));
+    let arr_end = Pos2::new(center.x + hw * 0.6, center.y - hh * 0.8);
+    painter.line_segment(
+        [arr_start, arr_end],
+        Stroke::new(1.5, Color32::from_rgb(255, 160, 80)),
+    );
     // Arrowhead
-    painter.line_segment([arr_end, Pos2::new(arr_end.x - 5.0, arr_end.y + 2.0)], Stroke::new(1.5, Color32::from_rgb(255, 160, 80)));
-    painter.line_segment([arr_end, Pos2::new(arr_end.x - 2.0, arr_end.y + 5.0)], Stroke::new(1.5, Color32::from_rgb(255, 160, 80)));
+    painter.line_segment(
+        [arr_end, Pos2::new(arr_end.x - 5.0, arr_end.y + 2.0)],
+        Stroke::new(1.5, Color32::from_rgb(255, 160, 80)),
+    );
+    painter.line_segment(
+        [arr_end, Pos2::new(arr_end.x - 2.0, arr_end.y + 5.0)],
+        Stroke::new(1.5, Color32::from_rgb(255, 160, 80)),
+    );
     painter.text(
         Pos2::new(center.x + hw * 0.7, center.y - hh * 0.9),
         Align2::LEFT_BOTTOM,
@@ -6164,12 +6567,7 @@ fn draw_thermistor(
     );
 }
 
-fn draw_varistor(
-    painter: &egui::Painter,
-    rect: Rect,
-    rotation: i32,
-    stroke: Stroke,
-) {
+fn draw_varistor(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
     draw_resistor(painter, rect, rotation, stroke);
     let center = rect.center();
     // "V" label inside
@@ -7869,6 +8267,31 @@ mod tests {
     }
 
     #[test]
+    fn saved_circuit_round_trips_multiple_pages() {
+        let mut app = CircuitApp::new();
+        app.load_led_demo();
+        app.add_page();
+        app.place_component(ComponentKind::Esp32, Pos2::new(300.0, 300.0));
+        app.save_current_page();
+
+        let json = serde_json::to_string(&SavedCircuit::from_app(&app)).unwrap();
+        let saved = serde_json::from_str::<SavedCircuit>(&json).unwrap();
+        let (snapshot, load_notes) = saved.into_snapshot().unwrap();
+
+        assert!(load_notes.is_empty());
+        assert_eq!(snapshot.pages.len(), 2);
+        assert_eq!(snapshot.current_page, 1);
+        assert_eq!(snapshot.components.len(), 1);
+        assert_eq!(snapshot.components[0].kind, ComponentKind::Esp32);
+        assert!(
+            snapshot.pages[0]
+                .1
+                .iter()
+                .any(|component| component.kind == ComponentKind::Led)
+        );
+    }
+
+    #[test]
     fn saved_circuit_repairs_duplicate_ids_and_skips_invalid_geometry() {
         let saved = SavedCircuit {
             schema_version: 1,
@@ -7916,6 +8339,8 @@ mod tests {
                     points: vec![SavedPoint { x: 0.0, y: 0.0 }],
                 },
             ],
+            pages: Vec::new(),
+            current_page: 0,
         };
 
         let (snapshot, load_notes) = saved.into_snapshot().unwrap();
