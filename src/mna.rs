@@ -1,4 +1,5 @@
 //! Modified Nodal Analysis – DC operating-point solver.
+#![allow(dead_code)]
 //!
 //! Builds the MNA matrix from the schematic, solves with Gaussian elimination
 //! (partial pivoting), and returns node voltages + branch currents.
@@ -299,6 +300,16 @@ struct IsEntry {
     i: f64,
 }
 
+/// Diode companion model: Vf (voltage source) in series with Rb (bulk resistance).
+/// Requires an intermediate virtual node.
+struct DiodeEntry {
+    id: u64,
+    anode: usize,    // MNA node for anode
+    cathode: usize,  // MNA node for cathode
+    vf: f64,         // forward voltage drop (V)
+    rb: f64,         // bulk series resistance (Ω)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Main entry point
 // ─────────────────────────────────────────────────────────────────────────────
@@ -393,6 +404,7 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
     let mut res: Vec<ResEntry> = Vec::new();
     let mut vs: Vec<VsEntry> = Vec::new();
     let mut is_src: Vec<IsEntry> = Vec::new();
+    let mut diode_entries: Vec<DiodeEntry> = Vec::new();
 
     for comp in components {
         let pins = component_pin_defs(comp);
@@ -506,31 +518,28 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
                     .unwrap_or(0);
                 is_src.push(IsEntry { id: comp.id, pos: pos_n, neg: neg_n, i: iv });
             }
-            // ── Diodes (linearised companion model) ───────────────────
+            // ── Diodes (linearised Thevenin companion model) ─────────
+            // Strategy: model each diode as an ideal voltage source Vf
+            // in series with a small bulk resistance Rb.
+            // Series connection requires an intermediate node per diode.
+            // We allocate virtual node indices beyond the normal net range.
             ComponentKind::Diode => {
-                // Forward: 0.7 V drop + 10 Ω bulk; reverse: open
+                // Vf ≈ 0.65 V, Rb ≈ 8 Ω  (1N4148 at ~20 mA)
                 if let (Some(a), Some(k)) = (p0, p1) {
-                    // stamp series resistor
-                    res.push(ResEntry { id: comp.id, a, b: k, r: 10.0 });
-                    // stamp 0.7 V source (for the Vf drop) would add an
-                    // intermediate node; simplified: just use bulk R only.
-                    // The topological analysis already ensures forward polarity.
-                    vs.push(VsEntry { id: comp.id, pos: a, neg: k, v: 0.65 });
+                    diode_entries.push(DiodeEntry { id: comp.id, anode: a, cathode: k, vf: 0.65, rb: 8.0 });
                 }
             }
             ComponentKind::Led => {
+                // Vf ≈ 2.0 V, Rb ≈ 20 Ω  (typical red LED)
                 if let (Some(a), Some(k)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b: k, r: 50.0 });
-                    vs.push(VsEntry { id: comp.id, pos: a, neg: k, v: 2.0 });
+                    diode_entries.push(DiodeEntry { id: comp.id, anode: a, cathode: k, vf: 2.0, rb: 20.0 });
                 }
             }
             ComponentKind::ZenerDiode => {
-                let vz = parse_metric_value(&comp.value, "v").unwrap_or(5.1) as f64;
+                // Forward mode only (simplified): Vf = 0.65 V, Rb = 5 Ω
+                let _vz = parse_metric_value(&comp.value, "v").unwrap_or(5.1) as f64;
                 if let (Some(a), Some(k)) = (p0, p1) {
-                    // Forward: 0.7 V; reverse clamp at vz (simplified as forward 0.7 V here)
-                    res.push(ResEntry { id: comp.id, a, b: k, r: 5.0 });
-                    vs.push(VsEntry { id: comp.id, pos: a, neg: k, v: 0.65 });
-                    let _ = vz;
+                    diode_entries.push(DiodeEntry { id: comp.id, anode: a, cathode: k, vf: 0.65, rb: 5.0 });
                 }
             }
             ComponentKind::Thermistor => {
@@ -546,9 +555,9 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
                 }
             }
             ComponentKind::SchottkyDiode => {
+                // Vf ≈ 0.3 V, Rb ≈ 4 Ω
                 if let (Some(a), Some(k)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b: k, r: 5.0 });
-                    vs.push(VsEntry { id: comp.id, pos: a, neg: k, v: 0.3 });
+                    diode_entries.push(DiodeEntry { id: comp.id, anode: a, cathode: k, vf: 0.30, rb: 4.0 });
                 }
             }
             ComponentKind::TvsDiode => {
@@ -609,12 +618,24 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         }
     }
 
-    // ── 5. Build MNA matrix ──────────────────────────────────────────────
+    // ── 5. Expand diodes into series (Vf + Rb) with virtual intermediate nodes ──
+    // Each diode needs one intermediate node (num_nodes + diode_index).
+    // Virtual nodes are appended after the normal non-GND nodes.
+    let diode_start_node = num_nodes + 1; // 1-indexed virtual node for diode 0
+    for (di, de) in diode_entries.iter().enumerate() {
+        let mid = diode_start_node + di; // MNA node for anode side of Rb
+        // anode → [Vf source] → mid → [Rb] → cathode
+        vs.push(VsEntry { id: de.id, pos: de.anode, neg: mid, v: de.vf });
+        res.push(ResEntry { id: de.id, a: mid, b: de.cathode, r: de.rb });
+    }
+    let total_nodes = num_nodes + diode_entries.len(); // total non-GND nodes incl. virtual
+
+    // ── 6. Build MNA matrix ──────────────────────────────────────────────
     let m = vs.len();
-    if num_nodes == 0 {
+    if total_nodes == 0 {
         return None;
     }
-    let mut mat = Mna::new(num_nodes, m);
+    let mut mat = Mna::new(total_nodes, m);
 
     for re in &res {
         mat.stamp_r(re.a, re.b, re.r);
@@ -629,7 +650,7 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
     // ── 6. Solve ─────────────────────────────────────────────────────────
     let x = mat.solve()?;
 
-    // ── 7. Decode results ─────────────────────────────────────────────────
+    // ── 8. Decode results ─────────────────────────────────────────────────
     let vnode = |mna_idx: usize| -> f64 {
         if mna_idx == 0 {
             0.0
@@ -658,14 +679,32 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
     }
 
     for (k, v_src) in vs.iter().enumerate() {
-        let i_vs = x.get(num_nodes + k).copied().unwrap_or(0.0);
+        let i_vs = x.get(total_nodes + k).copied().unwrap_or(0.0);
         let va = vnode(v_src.pos);
         let vb = vnode(v_src.neg);
         let vd = va - vb;
-        // For components with both R and VS entries, the VS current takes priority
-        component_voltage.insert(v_src.id, vd);
-        branch_current.insert(v_src.id, i_vs);
-        component_power.insert(v_src.id, (vd * i_vs).abs());
+        // Don't overwrite an already-set entry from a better measurement
+        // (diode VS entry is set after res entry — use abs voltage across anode→cathode for diodes)
+        component_voltage.entry(v_src.id).or_insert(vd);
+        branch_current.entry(v_src.id).or_insert(i_vs);
+        component_power.entry(v_src.id).or_insert((vd * i_vs).abs());
+    }
+
+    // For diodes specifically: override with the anode→cathode total voltage drop
+    for de in &diode_entries {
+        let va = vnode(de.anode);
+        let vk = vnode(de.cathode);
+        let vd = va - vk;
+        // current through diode = current through its VS (the k-th VS entry)
+        // We need to find which VS entry corresponds to this diode.
+        // VS entries for diodes were pushed starting at the original vs.len() position.
+        // They're paired: VS at index (original_vs_count + di), R at the same di.
+        // Since we use entry().or_insert above, the VS current is already stored.
+        // Just update the voltage to the full anode-cathode drop:
+        component_voltage.insert(de.id, vd);
+        if let Some(i) = branch_current.get(&de.id) {
+            component_power.insert(de.id, (vd * i).abs());
+        }
     }
 
     for i_src in &is_src {

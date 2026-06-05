@@ -200,7 +200,10 @@ struct CircuitApp {
     zoom: f32,
     pan: Vec2,
     // Clipboard
-    clipboard: Option<Component>,
+    /// Multi-component clipboard (supports single and group copy)
+    clipboard: Vec<Component>,
+    /// Wires internal to the copied group (both endpoints in selection)
+    clipboard_wires: Vec<Wire>,
     // Last known canvas rect (updated each frame)
     canvas_rect: Rect,
     // Cursor world-space position while hovering the canvas
@@ -312,7 +315,8 @@ impl CircuitApp {
             dirty: false,
             zoom: 1.0,
             pan: Vec2::ZERO,
-            clipboard: None,
+            clipboard: Vec::new(),
+            clipboard_wires: Vec::new(),
             canvas_rect: Rect::EVERYTHING,
             cursor_world_pos: None,
             multi_selected: HashSet::new(),
@@ -1004,6 +1008,27 @@ impl CircuitApp {
     }
 
     fn duplicate_selected(&mut self) {
+        // Multi-select duplicate
+        if !self.multi_selected.is_empty() {
+            self.record_history();
+            let offset = Vec2::new(self.grid * 2.0, self.grid * 2.0);
+            let old_ids: Vec<u64> = self.multi_selected.iter().copied().collect();
+            let mut new_ids = Vec::new();
+            let srcs: Vec<Component> = self.components.iter()
+                .filter(|c| old_ids.contains(&c.id))
+                .cloned().collect();
+            for src in srcs {
+                let mut dup = src;
+                dup.id = self.next_id();
+                dup.pos += offset;
+                dup.label = self.next_label(dup.kind);
+                new_ids.push(dup.id);
+                self.components.push(dup);
+            }
+            self.multi_selected = new_ids.iter().copied().collect();
+            self.status = format!("Duplicated {} component(s).", new_ids.len());
+            return;
+        }
         let Some(Selection::Component(id)) = self.selected else {
             self.status = "Select a component to duplicate.".to_string();
             return;
@@ -1020,7 +1045,7 @@ impl CircuitApp {
         self.record_history();
         let mut duplicate = source;
         duplicate.id = self.next_id();
-        duplicate.pos += Vec2::new(40.0, 40.0);
+        duplicate.pos += Vec2::new(self.grid * 2.0, self.grid * 2.0);
         duplicate.label = self.next_label(duplicate.kind);
         let duplicate_id = duplicate.id;
         self.components.push(duplicate);
@@ -1340,7 +1365,9 @@ impl CircuitApp {
         {
             return simulation.clone();
         }
-        let simulation = analyze_circuit(&self.components, &self.wires);
+        let mut simulation = analyze_circuit(&self.components, &self.wires);
+        // Run ERC after topology analysis so it can use simulation results
+        simulation.erc = run_erc(&self.components, &self.wires, &simulation);
         self.cached_simulation = Some((self.circuit_revision, simulation.clone()));
         simulation
     }
@@ -1945,28 +1972,108 @@ impl eframe::App for CircuitApp {
                         palette_section(ui, "Circuit", SectionMode::Open, |ui| {
                             metric_row(ui, "Parts", self.components.len().to_string());
                             metric_row(ui, "Wires", self.wires.len().to_string());
-                            let warning_count = simulation_warning_count(&simulation);
-                            if warning_count > 0 {
-                                metric_row(ui, "Warnings", warning_count.to_string());
-                            }
+                            metric_row(ui, "Pages", self.pages.len().to_string());
                             if self.simulate {
+                                ui.add_space(4.0);
                                 status_pill(ui, &simulation.summary, simulation_tone(&simulation));
-                                if let Some(voltage) = simulation.voltage {
-                                    metric_row(ui, "Voltage", format!("{:.2} V", voltage));
+                                ui.add_space(4.0);
+                                // DC operating point from MNA
+                                if let Some(dc) = &simulation.dc {
+                                    section_title(ui, "DC Operating Point");
+                                    if let Some(voltage) = simulation.voltage {
+                                        metric_row(ui, "Source", format!("{:.2} V", voltage));
+                                    }
+                                    if let Some(resistance) = simulation.resistance {
+                                        metric_row(ui, "Load R", format_resistance(resistance));
+                                    }
+                                    if let Some(current) = simulation.current {
+                                        metric_row(ui, "Loop I", format_current(current));
+                                    }
+                                    // Show top net voltages from MNA
+                                    let mut net_v: Vec<f64> = dc.net_voltages.values()
+                                        .copied().collect();
+                                    net_v.sort_by(|a,b| b.partial_cmp(a).unwrap());
+                                    net_v.dedup();
+                                    if !net_v.is_empty() {
+                                        dc_metric_row(ui, "Max node V",
+                                            &mna::format_voltage(*net_v.first().unwrap()));
+                                        if net_v.len() > 1 {
+                                            dc_metric_row(ui, "Min node V",
+                                                &mna::format_voltage(*net_v.last().unwrap()));
+                                        }
+                                    }
+                                } else {
+                                    if let Some(voltage) = simulation.voltage {
+                                        metric_row(ui, "Voltage", format!("{:.2} V", voltage));
+                                    }
+                                    if let Some(resistance) = simulation.resistance {
+                                        metric_row(ui, "Resistance", format_resistance(resistance));
+                                    }
+                                    if let Some(current) = simulation.current {
+                                        metric_row(ui, "Current", format_current(current));
+                                    }
                                 }
-                                if let Some(resistance) = simulation.resistance {
-                                    metric_row(ui, "Resistance", format_resistance(resistance));
+                            }
+                        });
+
+                        // ── ERC Panel ────────────────────────────────────────────
+                        let erc_errors = simulation.erc.iter()
+                            .filter(|e| e.severity == ErcSeverity::Error).count();
+                        let erc_warnings = simulation.erc.iter()
+                            .filter(|e| e.severity == ErcSeverity::Warning).count();
+                        let erc_title = if erc_errors > 0 {
+                            format!("ERC  ✗{erc_errors} ⚠{erc_warnings}")
+                        } else if erc_warnings > 0 {
+                            format!("ERC  ⚠{erc_warnings}")
+                        } else if simulation.erc.is_empty() && !self.components.is_empty() {
+                            "ERC  ✓ OK".to_string()
+                        } else {
+                            "ERC".to_string()
+                        };
+                        let erc_mode = if erc_errors > 0 || erc_warnings > 0 {
+                            SectionMode::Open
+                        } else {
+                            SectionMode::Collapsed
+                        };
+                        palette_section(ui, &erc_title, erc_mode, |ui| {
+                            if simulation.erc.is_empty() {
+                                if !self.components.is_empty() {
+                                    ui.label(egui::RichText::new("No violations found.")
+                                        .size(11.0).color(Color32::from_rgb(120, 200, 140)));
+                                } else {
+                                    ui.label(egui::RichText::new("Place components to run ERC.")
+                                        .size(11.0).color(Color32::from_rgb(120, 130, 140)));
                                 }
-                                if let Some(current) = simulation.current {
-                                    metric_row(ui, "Current", format_current(current));
-                                }
-                                for detail in simulation.details.iter().take(6) {
-                                    ui.label(
-                                        egui::RichText::new(detail)
-                                            .size(11.0)
-                                            .color(Color32::from_rgb(150, 160, 170)),
-                                    );
-                                }
+                            } else {
+                                egui::ScrollArea::vertical()
+                                    .max_height(160.0)
+                                    .show(ui, |ui| {
+                                    for v in &simulation.erc {
+                                        let (icon, col) = match v.severity {
+                                            ErcSeverity::Error   => ("✗", Color32::from_rgb(255, 110, 95)),
+                                            ErcSeverity::Warning => ("⚠", Color32::from_rgb(255, 200, 80)),
+                                            ErcSeverity::Info    => ("i", Color32::from_rgb(130, 170, 210)),
+                                        };
+                                        let resp = ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(format!("{icon} {}", v.message))
+                                                    .size(10.5).color(col)
+                                            ).sense(Sense::click())
+                                        );
+                                        if resp.clicked() {
+                                            if let Some(id) = v.component_id {
+                                                self.selected = Some(Selection::Component(id));
+                                                // pan to component
+                                                if let Some(comp) = self.components.iter().find(|c| c.id == id) {
+                                                    let canvas_center = self.canvas_rect.center();
+                                                    self.pan = canvas_center.to_vec2()
+                                                        - comp.pos.to_vec2() * self.zoom;
+                                                }
+                                            }
+                                        }
+                                        resp.on_hover_text(&v.message);
+                                    }
+                                });
                             }
                         });
 
@@ -2750,9 +2857,22 @@ impl eframe::App for CircuitApp {
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.tool = Tool::Select;
-            self.draft_wire.clear();
-            self.wire_from_select = false;
+            // Hierarchical Esc: find dialog → multi-select → single select → wire draft → select tool
+            if self.show_find {
+                self.show_find = false;
+            } else if !self.draft_wire.is_empty() {
+                self.draft_wire.clear();
+                self.wire_from_select = false;
+            } else if !self.multi_selected.is_empty() {
+                self.multi_selected.clear();
+                self.selected = None;
+                self.rect_select_start = None;
+            } else if self.selected.is_some() {
+                self.selected = None;
+            } else {
+                self.tool = Tool::Select;
+                self.wire_from_select = false;
+            }
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::R)) {
@@ -2775,36 +2895,82 @@ impl eframe::App for CircuitApp {
             self.duplicate_selected();
         }
 
-        // Ctrl+C — copy selected component
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C))
-            && let Some(Selection::Component(id)) = self.selected
-            && let Some(c) = self.components.iter().find(|c| c.id == id)
-        {
-            self.clipboard = Some(c.clone());
-            self.status = format!("Copied {}.", c.label);
+        // Ctrl+C — copy selected component(s) + internal wires
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C)) {
+            self.clipboard.clear();
+            self.clipboard_wires.clear();
+            let ids: Vec<u64> = if !self.multi_selected.is_empty() {
+                self.multi_selected.iter().copied().collect()
+            } else if let Some(Selection::Component(id)) = self.selected {
+                vec![id]
+            } else {
+                Vec::new()
+            };
+            if !ids.is_empty() {
+                self.clipboard = self.components.iter()
+                    .filter(|c| ids.contains(&c.id))
+                    .cloned().collect();
+                // Copy wires whose BOTH endpoints lie within copied component pins
+                let pin_positions: HashSet<(i32,i32)> = self.clipboard.iter()
+                    .flat_map(|c| component_pin_defs(c))
+                    .map(|p| (p.pos.x.round() as i32, p.pos.y.round() as i32))
+                    .collect();
+                self.clipboard_wires = self.wires.iter()
+                    .filter(|w| {
+                        let key_first = w.points.first()
+                            .map(|p| (p.x.round() as i32, p.y.round() as i32));
+                        let key_last = w.points.last()
+                            .map(|p| (p.x.round() as i32, p.y.round() as i32));
+                        key_first.is_some_and(|k| pin_positions.contains(&k))
+                            && key_last.is_some_and(|k| pin_positions.contains(&k))
+                    })
+                    .cloned().collect();
+                self.status = format!(
+                    "Copied {} component(s) + {} wire(s).",
+                    self.clipboard.len(), self.clipboard_wires.len()
+                );
+            }
         }
 
-        // Ctrl+V — paste clipboard component (offset by one grid step)
+        // Ctrl+V — paste clipboard with offset
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::V)) {
-            if let Some(src) = self.clipboard.clone() {
-                self.record_history();
-                let new_id = self.next_id();
-                let new_label = self.next_label(src.kind);
-                let offset = Vec2::new(self.grid * 2.0, self.grid * 2.0);
-                let new_comp = Component {
-                    id: new_id,
-                    kind: src.kind,
-                    pos: src.pos + offset,
-                    rotation: src.rotation,
-                    label: new_label,
-                    value: src.value.clone(),
-                };
-                self.selected = Some(Selection::Component(new_id));
-                self.status = format!("Pasted {}.", new_comp.label);
-                self.components.push(new_comp);
-                self.mark_dirty();
+            if self.clipboard.is_empty() {
+                self.status = "Clipboard empty. Ctrl+C to copy first.".to_string();
             } else {
-                self.status = "Nothing in clipboard. Use Ctrl+C to copy first.".to_string();
+                self.record_history();
+                let offset = Vec2::new(self.grid * 3.0, self.grid * 3.0);
+                // Map old IDs → new IDs for wire reconnection
+                let mut id_map: HashMap<u64, u64> = HashMap::new();
+                let mut new_ids = Vec::new();
+                let srcs = self.clipboard.clone();
+                for src in &srcs {
+                    let new_id = self.next_id();
+                    id_map.insert(src.id, new_id);
+                    let new_label = self.next_label(src.kind);
+                    self.components.push(Component {
+                        id: new_id,
+                        kind: src.kind,
+                        pos: src.pos + offset,
+                        rotation: src.rotation,
+                        label: new_label,
+                        value: src.value.clone(),
+                    });
+                    new_ids.push(new_id);
+                }
+                // Paste internal wires with offset
+                for w in &self.clipboard_wires.clone() {
+                    let new_wire_id = self.next_id();
+                    let pts: Vec<Pos2> = w.points.iter()
+                        .map(|&p| p + offset).collect();
+                    self.wires.push(Wire { id: new_wire_id, points: pts });
+                }
+                self.multi_selected = new_ids.iter().copied().collect();
+                self.selected = None;
+                self.mark_dirty();
+                self.status = format!(
+                    "Pasted {} component(s) + {} wire(s).",
+                    new_ids.len(), self.clipboard_wires.len()
+                );
             }
         }
 
@@ -3394,7 +3560,8 @@ fn status_pill(ui: &mut egui::Ui, text: &str, tone: StatusTone) {
 }
 
 fn simulation_tone(simulation: &Simulation) -> StatusTone {
-    if simulation.shorted {
+    let has_erc_error = simulation.erc.iter().any(|e| e.severity == ErcSeverity::Error);
+    if simulation.shorted || has_erc_error {
         StatusTone::Error
     } else if simulation.closed {
         StatusTone::Live
@@ -3412,7 +3579,9 @@ fn simulation_text_color(simulation: &Simulation) -> Color32 {
 }
 
 fn simulation_warning_count(simulation: &Simulation) -> usize {
-    simulation.component_warnings.len() + usize::from(simulation.shorted)
+    simulation.erc.iter()
+        .filter(|e| matches!(e.severity, ErcSeverity::Error | ErcSeverity::Warning))
+        .count()
 }
 
 fn metric_row(ui: &mut egui::Ui, label: impl Into<String>, value: impl Into<String>) {
@@ -3705,6 +3874,7 @@ struct Simulation {
     energized_components: HashSet<u64>,
     energized_wires: HashSet<u64>,
     summary: String,
+    #[allow(dead_code)]
     details: Vec<String>,
     voltage: Option<f32>,
     resistance: Option<f32>,
@@ -3712,6 +3882,8 @@ struct Simulation {
     component_warnings: HashMap<u64, String>,
     /// Full DC operating-point result from MNA solver (None if unsolvable).
     dc: Option<mna::DcResult>,
+    /// ERC violations (computed alongside DC analysis)
+    erc: Vec<ErcViolation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4095,6 +4267,7 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         current,
         component_warnings,
         dc,
+        erc: Vec::new(), // populated after construction via run_erc()
     }
 }
 
@@ -4600,63 +4773,92 @@ fn draw_title_block(
     wires: &[Wire],
     simulation: &Simulation,
 ) {
-    let size = Vec2::new(250.0, 108.0);
+    let erc_errors = simulation.erc.iter().filter(|e| e.severity == ErcSeverity::Error).count();
+    let erc_warns  = simulation.erc.iter().filter(|e| e.severity == ErcSeverity::Warning).count();
+
+    let size = Vec2::new(272.0, 148.0);
     let rect = Rect::from_min_size(canvas.right_bottom() - size - Vec2::new(18.0, 18.0), size);
-    painter.rect_filled(rect, 3.0, Color32::from_rgba_unmultiplied(18, 21, 25, 232));
-    painter.rect_stroke(
-        rect,
-        3.0,
-        Stroke::new(1.0, Color32::from_rgb(72, 80, 88)),
-        StrokeKind::Outside,
+    painter.rect_filled(rect, 4.0, Color32::from_rgba_unmultiplied(14, 17, 22, 238));
+    painter.rect_stroke(rect, 4.0, Stroke::new(1.0, Color32::from_rgb(60, 70, 82)), StrokeKind::Outside);
+
+    let divider = |y: f32| painter.line_segment(
+        [Pos2::new(rect.left()+10.0, rect.top()+y), Pos2::new(rect.right()-10.0, rect.top()+y)],
+        Stroke::new(1.0, Color32::from_rgb(50, 58, 68)),
     );
+
+    let mono = |y: f32, txt: String, col: Color32| painter.text(
+        rect.left_top() + Vec2::new(12.0, y),
+        Align2::LEFT_TOP, txt, egui::FontId::monospace(10.5), col,
+    );
+
+    let dim = Color32::from_rgb(110, 120, 132);
+    let bright = Color32::from_rgb(200, 210, 222);
+
+    // Header
+    painter.text(
+        rect.left_top() + Vec2::new(12.0, 9.0),
+        Align2::LEFT_TOP,
+        "CLUSTER CIRCUIT",
+        egui::FontId::proportional(12.0),
+        Color32::from_rgb(220, 230, 240),
+    );
+    painter.text(
+        rect.right_top() + Vec2::new(-12.0, 9.0),
+        Align2::RIGHT_TOP,
+        "v0.3",
+        egui::FontId::monospace(10.0),
+        dim,
+    );
+    divider(28.0);
+
+    // Stats row
+    mono(36.0, format!("Parts {:>3}  Wires {:>3}",components.len(),wires.len()), bright);
+
+    // Simulation status
     let status_color = if simulation.shorted {
         Color32::from_rgb(255, 95, 80)
     } else if simulation.closed {
-        Color32::from_rgb(255, 185, 80)
+        Color32::from_rgb(100, 220, 140)
     } else {
-        Color32::from_rgb(150, 155, 165)
+        Color32::from_rgb(130, 140, 155)
     };
-    painter.text(
-        rect.left_top() + Vec2::new(12.0, 10.0),
-        Align2::LEFT_TOP,
-        "CLUSTER SCHEMATIC",
-        egui::FontId::proportional(13.0),
-        Color32::from_rgb(230, 234, 238),
-    );
-    painter.line_segment(
-        [
-            Pos2::new(rect.left() + 10.0, rect.top() + 32.0),
-            Pos2::new(rect.right() - 10.0, rect.top() + 32.0),
-        ],
-        Stroke::new(1.0, Color32::from_rgb(64, 70, 78)),
-    );
-    painter.text(
-        rect.left_top() + Vec2::new(12.0, 42.0),
-        Align2::LEFT_TOP,
-        format!(
-            "Parts  {:>2}    Wires  {:>2}",
-            components.len(),
-            wires.len()
-        ),
-        egui::FontId::monospace(11.0),
-        Color32::from_rgb(185, 195, 205),
-    );
-    painter.text(
-        rect.left_top() + Vec2::new(12.0, 62.0),
-        Align2::LEFT_TOP,
-        format!("Status {}", simulation.summary),
-        egui::FontId::monospace(11.0),
-        status_color,
-    );
-    if let Some(current) = simulation.current {
-        painter.text(
-            rect.left_top() + Vec2::new(12.0, 82.0),
-            Align2::LEFT_TOP,
-            format!("Loop   {}", format_current(current)),
-            egui::FontId::monospace(11.0),
-            Color32::from_rgb(185, 195, 205),
-        );
+    mono(53.0, format!("Status  {}", simulation.summary), status_color);
+
+    // DC values
+    let dc_col = Color32::from_rgb(100, 200, 160);
+    if let Some(dc) = &simulation.dc {
+        let mut nets: Vec<f64> = dc.net_voltages.values().copied().collect();
+        nets.sort_by(|a,b| b.partial_cmp(a).unwrap());
+        nets.dedup();
+        if let Some(&vmax) = nets.first() {
+            mono(70.0, format!("Vmax  {}", mna::format_voltage(vmax)), dc_col);
+        }
+        if let Some(i) = simulation.current {
+            mono(86.0, format!("Iloop {}", format_current(i)), dc_col);
+        }
+    } else {
+        if let Some(v) = simulation.voltage {
+            mono(70.0, format!("Vsrc  {:.2} V", v), dc_col);
+        }
+        if let Some(i) = simulation.current {
+            mono(86.0, format!("Iloop {}", format_current(i)), dc_col);
+        }
     }
+    divider(102.0);
+
+    // ERC summary
+    let (erc_str, erc_col) = if erc_errors > 0 {
+        (format!("ERC  ✗{erc_errors} error(s)  ⚠{erc_warns} warn(s)"), Color32::from_rgb(255,100,85))
+    } else if erc_warns > 0 {
+        (format!("ERC  ⚠{erc_warns} warning(s)"), Color32::from_rgb(255,200,80))
+    } else if components.is_empty() {
+        ("ERC  (no schematic)".to_string(), dim)
+    } else {
+        ("ERC  ✓ No violations".to_string(), Color32::from_rgb(100,200,140))
+    };
+    mono(109.0, erc_str, erc_col);
+    divider(127.0);
+    mono(133.0, "Cluster Workbench  —  cluster.io".to_string(), dim);
 }
 
 fn draw_empty_canvas_hint(painter: &egui::Painter, canvas: Rect) {
@@ -4699,10 +4901,8 @@ fn connected_pin_positions(components: &[Component], wires: &[Wire]) -> Vec<(i32
         for pin in component_pin_defs(component) {
             let key = (pin.pos.x.round() as i32, pin.pos.y.round() as i32);
             let is_conn = wires.iter().any(|w| {
-                // Wire endpoint lands on pin
                 w.points.first().is_some_and(|&p| p.distance(pin.pos) < 4.0)
                 || w.points.last().is_some_and(|&p| p.distance(pin.pos) < 4.0)
-                // Any segment passes through the pin
                 || w.points.windows(2).any(|seg| distance_to_segment(pin.pos, seg[0], seg[1]) < 3.0)
             });
             if is_conn {
@@ -4711,6 +4911,134 @@ fn connected_pin_positions(components: &[Component], wires: &[Wire]) -> Vec<(i32
         }
     }
     connected
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ERC — Electrical Rules Check
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+enum ErcSeverity { Error, Warning, Info }
+
+#[derive(Debug, Clone)]
+struct ErcViolation {
+    severity: ErcSeverity,
+    component_id: Option<u64>,
+    message: String,
+}
+
+fn run_erc(components: &[Component], wires: &[Wire], simulation: &Simulation) -> Vec<ErcViolation> {
+    let mut v: Vec<ErcViolation> = Vec::new();
+
+    let connected = connected_pin_positions(components, wires);
+    let connected_set: HashSet<(i32,i32)> = connected.iter().copied().collect();
+
+    // 1. Unconnected pins
+    for comp in components {
+        // Skip purely decorative / reference components
+        if matches!(comp.kind, ComponentKind::NetLabel | ComponentKind::Breadboard) {
+            continue;
+        }
+        for pin in component_pin_defs(comp) {
+            let key = (pin.pos.x.round() as i32, pin.pos.y.round() as i32);
+            if !connected_set.contains(&key) {
+                let sev = if matches!(pin.role, PinRole::Positive | PinRole::Ground) {
+                    ErcSeverity::Error
+                } else {
+                    ErcSeverity::Warning
+                };
+                v.push(ErcViolation {
+                    severity: sev,
+                    component_id: Some(comp.id),
+                    message: format!("{}: pin \"{}\" unconnected", comp.label, pin.label),
+                });
+            }
+        }
+    }
+
+    // 2. No ground reference
+    let has_ground = components.iter().any(|c| c.kind == ComponentKind::Ground)
+        || components.iter().any(|c| matches!(
+            c.kind, ComponentKind::VSource | ComponentKind::Battery | ComponentKind::ISource
+        ) && component_pin_defs(c).iter().any(|p| p.role == PinRole::Ground));
+    if !has_ground && !components.is_empty() {
+        v.push(ErcViolation {
+            severity: ErcSeverity::Error,
+            component_id: None,
+            message: "No ground (GND) reference in schematic.".to_string(),
+        });
+    }
+
+    // 3. No voltage/current source
+    let has_source = components.iter().any(|c| matches!(
+        c.kind, ComponentKind::VSource | ComponentKind::Battery | ComponentKind::ISource
+    ));
+    if !has_source && !components.is_empty() {
+        v.push(ErcViolation {
+            severity: ErcSeverity::Warning,
+            component_id: None,
+            message: "No voltage or current source in schematic.".to_string(),
+        });
+    }
+
+    // 4. Short circuit
+    if simulation.shorted {
+        v.push(ErcViolation {
+            severity: ErcSeverity::Error,
+            component_id: None,
+            message: "Short circuit detected: source + reaches GND without a load.".to_string(),
+        });
+    }
+
+    // 5. Component polarity warnings from simulation
+    for (id, warn) in &simulation.component_warnings {
+        if let Some(comp) = components.iter().find(|c| c.id == *id) {
+            v.push(ErcViolation {
+                severity: ErcSeverity::Error,
+                component_id: Some(*id),
+                message: format!("{}: {}", comp.label, warn),
+            });
+        }
+    }
+
+    // 6. Zero-value resistors
+    for comp in components {
+        if comp.kind == ComponentKind::Resistor {
+            if let Some(r) = parse_metric_value(&comp.value, "ohm") {
+                if r <= 0.0 {
+                    v.push(ErcViolation {
+                        severity: ErcSeverity::Warning,
+                        component_id: Some(comp.id),
+                        message: format!("{}: zero or negative resistance value \"{}\"", comp.label, comp.value),
+                    });
+                }
+            } else {
+                v.push(ErcViolation {
+                    severity: ErcSeverity::Warning,
+                    component_id: Some(comp.id),
+                    message: format!("{}: cannot parse resistance value \"{}\"", comp.label, comp.value),
+                });
+            }
+        }
+    }
+
+    // 7. Duplicate labels
+    let mut labels: HashMap<&str, Vec<u64>> = HashMap::new();
+    for comp in components {
+        labels.entry(comp.label.as_str()).or_default().push(comp.id);
+    }
+    for (label, ids) in &labels {
+        if ids.len() > 1 {
+            v.push(ErcViolation {
+                severity: ErcSeverity::Warning,
+                component_id: Some(ids[0]),
+                message: format!("Duplicate label \"{label}\" on {} components.", ids.len()),
+            });
+        }
+    }
+
+    v
 }
 
 fn draw_component(
@@ -8213,6 +8541,11 @@ fn component_is_module(component: &Component) -> bool {
             | ComponentKind::RaspberryPiPico
             | ComponentKind::Oled
             | ComponentKind::Sensor
+            | ComponentKind::Timer555
+            | ComponentKind::Display7Seg
+            | ComponentKind::MotorDriver
+            | ComponentKind::Optocoupler
+            | ComponentKind::GenericIc
     )
 }
 
