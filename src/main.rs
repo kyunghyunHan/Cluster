@@ -781,6 +781,33 @@ impl CircuitApp {
         self.status = "Loaded double-inverter LED demo.".to_string();
     }
 
+    /// ESP32 + Push Button → toggles LED. Click the button in Simulate mode to toggle.
+    fn load_button_toggle_led_demo(&mut self) {
+        self.reset_canvas();
+        let esp32   = self.place_component(ComponentKind::Esp32,      Pos2::new(420.0, 320.0));
+        let button  = self.place_component(ComponentKind::PushButton,  Pos2::new(180.0, 220.0));
+        let r_led   = self.place_component(ComponentKind::Resistor,    Pos2::new(660.0, 200.0));
+        let led     = self.place_component(ComponentKind::Led,         Pos2::new(780.0, 200.0));
+        let battery = self.place_component(ComponentKind::Battery,     Pos2::new(180.0, 440.0));
+        let gnd     = self.place_component(ComponentKind::Ground,      Pos2::new(880.0, 340.0));
+
+        // Power rails
+        self.add_wire_between(battery, "+", esp32, "VIN");
+        self.add_wire_between(battery, "-", gnd,   "GND");
+        self.add_wire_between(esp32,   "GND", gnd, "GND");
+        // Button: one leg to ESP32 GPIO (input), other leg to GND (active-low)
+        self.add_wire_between(esp32,  "GPIO23", button, "A");
+        self.add_wire_between(button, "B",      gnd,    "GND");
+        // LED circuit: ESP32 GPIO output → resistor → LED → GND
+        self.add_wire_between(esp32, "GPIO18", r_led, "A");
+        self.add_wire_between(r_led, "B",      led,   "A");
+        self.add_wire_between(led,   "B",      gnd,   "GND");
+
+        self.simulate = true;
+        self.status =
+            "Button-Toggle-LED demo loaded. Click the button ▶ to toggle the LED!".to_string();
+    }
+
     fn push_wire_point(&mut self, pos: Pos2) {
         if self.orthogonal_wires
             && let Some(&last) = self.draft_wire.last()
@@ -1822,6 +1849,9 @@ impl eframe::App for CircuitApp {
                         );
 
                         palette_section(ui, "Examples", SectionMode::Open, |ui| {
+                            if palette_action(ui, "🔘 Button → LED Toggle").clicked() {
+                                self.load_button_toggle_led_demo();
+                            }
                             if palette_action(ui, "LED Circuit").clicked() {
                                 self.load_led_demo();
                             }
@@ -2525,27 +2555,30 @@ impl eframe::App for CircuitApp {
                     Tool::Select => {
                         let ctrl = ctx.input(|i| i.modifiers.command);
                         if let Some(sel) = hit_test(world_raw, &self.components, &self.wires) {
-                            // Toggle switch on single click (immutable check first, then mutate)
+                            // Toggle switch/button on single click
                             if let Selection::Component(cid) = sel {
-                                let is_sw = self
-                                    .components
-                                    .iter()
+                                let comp_kind = self.components.iter()
                                     .find(|c| c.id == cid)
-                                    .is_some_and(|c| component_is_switch(c.kind));
-                                if is_sw {
-                                    self.record_history();
-                                    if let Some(comp) =
-                                        self.components.iter_mut().find(|c| c.id == cid)
-                                    {
-                                        let open = comp.value.to_lowercase().contains("open");
-                                        comp.value = if open {
-                                            "closed".to_string()
-                                        } else {
-                                            "open".to_string()
-                                        };
-                                        self.status = format!("{}: {}", comp.label, comp.value);
+                                    .map(|c| c.kind);
+                                if let Some(kind) = comp_kind {
+                                    if component_is_switch(kind) {
+                                        // PushButton: simulation click — no undo history entry
+                                        // Toggle switch/SlideSwitch: full edit with history
+                                        let is_momentary = kind == ComponentKind::PushButton;
+                                        if !is_momentary {
+                                            self.record_history();
+                                        }
+                                        if let Some(comp) = self.components.iter_mut().find(|c| c.id == cid) {
+                                            let open = comp.value.to_lowercase().contains("open");
+                                            comp.value = if open { "closed".to_string() } else { "open".to_string() };
+                                            let state = if open { "▶ ON" } else { "■ OFF" };
+                                            self.status = format!("{} {state} — click to toggle", comp.label);
+                                        }
+                                        // Always invalidate simulation cache after toggle
+                                        self.invalidate_analysis_cache();
+                                        ctx.request_repaint();
+                                        self.selected = Some(Selection::Component(cid));
                                     }
-                                    self.selected = Some(Selection::Component(cid));
                                 }
                             }
                             // Ctrl+click toggles multi-select; plain click sets primary selection
@@ -5483,7 +5516,23 @@ fn draw_component(
         ComponentKind::Inductor => draw_inductor(painter, rect, component.rotation, stroke),
         ComponentKind::Diode => draw_diode(painter, rect, component.rotation, stroke, false),
         ComponentKind::ZenerDiode => draw_zener(painter, rect, component.rotation, stroke),
-        ComponentKind::Led => draw_led(painter, rect, component.rotation, stroke),
+        ComponentKind::Led => {
+            if energized {
+                // Outer glow
+                painter.circle_filled(
+                    screen_center,
+                    rect.width().max(rect.height()) * 0.7,
+                    Color32::from_rgba_unmultiplied(255, 220, 60, 30),
+                );
+                // Inner bright core
+                painter.circle_filled(
+                    screen_center,
+                    rect.width().max(rect.height()) * 0.4,
+                    Color32::from_rgba_unmultiplied(255, 235, 100, 70),
+                );
+            }
+            draw_led(painter, rect, component.rotation, stroke);
+        }
         ComponentKind::NpnTransistor => {
             draw_npn(painter, rect, component.rotation, stroke, energized)
         }
@@ -5512,7 +5561,10 @@ fn draw_component(
         ComponentKind::Switch | ComponentKind::SlideSwitch => {
             draw_switch(painter, rect, component.rotation, stroke)
         }
-        ComponentKind::PushButton => draw_push_button(painter, rect, component.rotation, stroke),
+        ComponentKind::PushButton => {
+            let closed = !component.value.to_lowercase().contains("open");
+            draw_push_button(painter, rect, component.rotation, stroke, closed);
+        }
         ComponentKind::Ground => draw_ground(painter, rect, component.rotation, stroke),
         ComponentKind::VSource => draw_vsource(painter, rect, component.rotation, stroke),
         ComponentKind::ISource => draw_isource(painter, rect, component.rotation, stroke),
@@ -7662,35 +7714,23 @@ fn draw_switch(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Strok
     painter.line_segment([rotated[2], rotated[4]], stroke);
 }
 
-fn draw_push_button(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
+fn draw_push_button(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke, closed: bool) {
     let center = rect.center();
     let left = Pos2::new(rect.left(), center.y);
     let right = Pos2::new(rect.right(), center.y);
     let left_contact = Pos2::new(center.x - rect.width() * 0.24, center.y);
     let right_contact = Pos2::new(center.x + rect.width() * 0.24, center.y);
-    let bar_left = Pos2::new(
-        center.x - rect.width() * 0.18,
-        center.y - rect.height() * 0.18,
-    );
-    let bar_right = Pos2::new(
-        center.x + rect.width() * 0.18,
-        center.y - rect.height() * 0.18,
-    );
+    // Bar position: lower when closed (touching contacts), raised when open
+    let bar_y_offset = if closed { 0.0 } else { -rect.height() * 0.18 };
+    let bar_left = Pos2::new(center.x - rect.width() * 0.18, center.y + bar_y_offset);
+    let bar_right = Pos2::new(center.x + rect.width() * 0.18, center.y + bar_y_offset);
     let stem_top = Pos2::new(center.x, rect.top() + rect.height() * 0.08);
-    let stem_bottom = Pos2::new(center.x, center.y - rect.height() * 0.18);
+    let stem_bottom = Pos2::new(center.x, center.y + bar_y_offset);
     let points = [
-        left,
-        right,
-        left_contact,
-        right_contact,
-        bar_left,
-        bar_right,
-        stem_top,
-        stem_bottom,
+        left, right, left_contact, right_contact,
+        bar_left, bar_right, stem_top, stem_bottom,
     ];
-    let rotated: Vec<Pos2> = points
-        .iter()
-        .copied()
+    let rotated: Vec<Pos2> = points.iter().copied()
         .map(|p| rotate_point(p, center, rotation))
         .collect();
 
@@ -7698,7 +7738,16 @@ fn draw_push_button(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: 
     painter.line_segment([rotated[3], rotated[1]], stroke);
     painter.circle_filled(rotated[2], 3.2, stroke.color);
     painter.circle_filled(rotated[3], 3.2, stroke.color);
-    painter.line_segment([rotated[4], rotated[5]], stroke);
+    // Draw bar (filled rect when closed to show solid connection)
+    if closed {
+        let bar_rect = Rect::from_center_size(
+            Pos2::new((rotated[4].x + rotated[5].x) / 2.0, rotated[4].y),
+            Vec2::new((rotated[5].x - rotated[4].x).abs() + 3.0, 5.0),
+        );
+        painter.rect_filled(bar_rect, 0.0, stroke.color);
+    } else {
+        painter.line_segment([rotated[4], rotated[5]], stroke);
+    }
     painter.line_segment([rotated[6], rotated[7]], stroke);
 }
 
@@ -8738,42 +8787,52 @@ fn circuit_to_netlist_text(netlist: &CircuitNetlist) -> String {
 }
 
 fn generate_arduino_code(netlist: &CircuitNetlist) -> String {
-    let has_oled = netlist
-        .pins
-        .iter()
-        .any(|pin| pin.component_kind == ComponentKind::Oled);
+    let has_oled = netlist.pins.iter().any(|p| p.component_kind == ComponentKind::Oled);
+    let has_button = netlist.pins.iter().any(|p| p.component_kind == ComponentKind::PushButton);
+    let has_led = netlist.pins.iter().any(|p| p.component_kind == ComponentKind::Led);
+
     let mut i2c_sda = "21".to_string();
     let mut i2c_scl = "22".to_string();
+
+    // GPIO nets: map pin_name → (connected_to_button, connected_to_led)
+    let mut button_gpio: Option<String> = None;
+    let mut led_gpio: Option<String> = None;
+
     for net in &netlist.nets {
-        let pins = netlist
-            .pins
-            .iter()
-            .filter(|pin| pin.net_id == net.id)
-            .collect::<Vec<_>>();
-        if pins
-            .iter()
-            .any(|pin| pin.component_kind == ComponentKind::Oled && pin.pin_name == "SDA")
-            && let Some(controller) = pins.iter().find(|pin| pin_is_controller_sda(pin))
+        let pins: Vec<&NetlistPin> = netlist.pins.iter().filter(|p| p.net_id == net.id).collect();
+
+        if pins.iter().any(|p| p.component_kind == ComponentKind::Oled && p.pin_name == "SDA")
+            && let Some(ctrl) = pins.iter().find(|p| pin_is_controller_sda(p))
         {
-            i2c_sda = digits_from_pin_name(&controller.pin_name).unwrap_or_else(|| i2c_sda.clone());
+            i2c_sda = digits_from_pin_name(&ctrl.pin_name).unwrap_or_else(|| i2c_sda.clone());
         }
-        if pins
-            .iter()
-            .any(|pin| pin.component_kind == ComponentKind::Oled && pin.pin_name == "SCL")
-            && let Some(controller) = pins.iter().find(|pin| pin_is_controller_scl(pin))
+        if pins.iter().any(|p| p.component_kind == ComponentKind::Oled && p.pin_name == "SCL")
+            && let Some(ctrl) = pins.iter().find(|p| pin_is_controller_scl(p))
         {
-            i2c_scl = digits_from_pin_name(&controller.pin_name).unwrap_or_else(|| i2c_scl.clone());
+            i2c_scl = digits_from_pin_name(&ctrl.pin_name).unwrap_or_else(|| i2c_scl.clone());
+        }
+
+        // Detect which GPIO is connected to the button and which to the LED
+        let has_button_on_net = pins.iter().any(|p| p.component_kind == ComponentKind::PushButton);
+        let has_led_on_net = pins.iter().any(|p| p.component_kind == ComponentKind::Led);
+        if let Some(gpio_pin) = pins.iter().find(|p| pin_is_microcontroller_gpio(p)) {
+            if let Some(gpio_num) = digits_from_pin_name(&gpio_pin.pin_name) {
+                if has_button_on_net && button_gpio.is_none() {
+                    button_gpio = Some(gpio_num.clone());
+                }
+                if has_led_on_net && led_gpio.is_none() {
+                    led_gpio = Some(gpio_num);
+                }
+            }
         }
     }
 
-    let mut gpio_pins = netlist
+    let mut gpio_pins: Vec<(String, String)> = netlist
         .pins
         .iter()
-        .filter(|pin| pin_is_microcontroller_gpio(pin) && !pin_is_i2c_named(&pin.pin_name))
-        .filter_map(|pin| {
-            digits_from_pin_name(&pin.pin_name).map(|gpio| (pin.pin_name.clone(), gpio))
-        })
-        .collect::<Vec<_>>();
+        .filter(|p| pin_is_microcontroller_gpio(p) && !pin_is_i2c_named(&p.pin_name))
+        .filter_map(|p| digits_from_pin_name(&p.pin_name).map(|g| (p.pin_name.clone(), g)))
+        .collect();
     gpio_pins.sort();
     gpio_pins.dedup();
 
@@ -8788,40 +8847,62 @@ fn generate_arduino_code(netlist: &CircuitNetlist) -> String {
         code.push_str("Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);\n");
     }
     code.push('\n');
+
+    // Pin constants
     for (name, gpio) in &gpio_pins {
-        code.push_str(&format!(
-            "const int PIN_{} = {};\n",
-            sanitize_code_ident(name),
-            gpio
-        ));
+        code.push_str(&format!("const int PIN_{} = {};\n", sanitize_code_ident(name), gpio));
     }
+
+    // Button-toggle pattern: extra state variable
+    if has_button && has_led {
+        if let (Some(btn), Some(led)) = (&button_gpio, &led_gpio) {
+            code.push_str(&format!("\nconst int BUTTON_PIN = {btn};\n"));
+            code.push_str(&format!("const int LED_PIN    = {led};\n"));
+            code.push_str("\nbool ledState = false;\nbool lastBtnState = HIGH;\n");
+
+            code.push_str("\nvoid setup() {\n  Serial.begin(115200);\n");
+            code.push_str("  pinMode(BUTTON_PIN, INPUT_PULLUP);  // active-low button\n");
+            code.push_str("  pinMode(LED_PIN, OUTPUT);\n");
+            code.push_str("  digitalWrite(LED_PIN, LOW);\n");
+            code.push_str("}\n\nvoid loop() {\n");
+            code.push_str("  bool btnState = digitalRead(BUTTON_PIN);\n");
+            code.push_str("  // Detect falling edge (button press)\n");
+            code.push_str("  if (lastBtnState == HIGH && btnState == LOW) {\n");
+            code.push_str("    ledState = !ledState;\n");
+            code.push_str("    digitalWrite(LED_PIN, ledState ? HIGH : LOW);\n");
+            code.push_str("    Serial.print(\"LED: \");\n");
+            code.push_str("    Serial.println(ledState ? \"ON\" : \"OFF\");\n");
+            code.push_str("  }\n");
+            code.push_str("  lastBtnState = btnState;\n");
+            code.push_str("  delay(50);  // debounce\n");
+            code.push_str("}\n");
+            return code;
+        }
+    }
+
+    // OLED setup
     code.push_str("\nvoid setup() {\n  Serial.begin(115200);\n");
     if has_oled {
-        code.push_str(&format!("  Wire.begin({}, {});\n", i2c_sda, i2c_scl));
+        code.push_str(&format!("  Wire.begin({i2c_sda}, {i2c_scl});\n"));
         code.push_str("  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {\n");
-        code.push_str(
-            "    Serial.println(\"OLED init failed\");\n    while (true) delay(100);\n  }\n",
-        );
+        code.push_str("    Serial.println(\"OLED init failed\");\n    while (true) delay(100);\n  }\n");
         code.push_str("  display.clearDisplay();\n  display.setTextSize(1);\n  display.setTextColor(SSD1306_WHITE);\n  display.setCursor(0, 0);\n  display.println(\"Cluster ready\");\n  display.display();\n");
     }
     for (name, _) in &gpio_pins {
-        code.push_str(&format!(
-            "  pinMode(PIN_{}, OUTPUT);\n",
-            sanitize_code_ident(name)
-        ));
+        code.push_str(&format!("  pinMode(PIN_{}, OUTPUT);\n", sanitize_code_ident(name)));
     }
     code.push_str("}\n\nvoid loop() {\n");
     if gpio_pins.is_empty() {
         code.push_str("  delay(1000);\n");
     } else {
         for (name, _) in &gpio_pins {
-            let ident = sanitize_code_ident(name);
-            code.push_str(&format!("  digitalWrite(PIN_{ident}, HIGH);\n"));
+            let id = sanitize_code_ident(name);
+            code.push_str(&format!("  digitalWrite(PIN_{id}, HIGH);\n"));
         }
         code.push_str("  delay(500);\n");
         for (name, _) in &gpio_pins {
-            let ident = sanitize_code_ident(name);
-            code.push_str(&format!("  digitalWrite(PIN_{ident}, LOW);\n"));
+            let id = sanitize_code_ident(name);
+            code.push_str(&format!("  digitalWrite(PIN_{id}, LOW);\n"));
         }
         code.push_str("  delay(500);\n");
     }
