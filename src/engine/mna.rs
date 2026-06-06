@@ -6,14 +6,12 @@
 //! Nonlinear elements (diodes, transistors) use a single-iteration linearised
 //! companion model adequate for educational / first-pass analysis.
 
-use std::collections::{HashMap, HashSet};
 use egui::Pos2;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
-    Component, ComponentKind, Wire,
-    CircuitNodes, UnionFind,
-    component_pin_defs, parse_metric_value, PinRole,
-    point_touches_wire_segment, wire_contact_points,
+    CircuitNodes, Component, ComponentKind, PinRole, UnionFind, Wire, component_pin_defs,
+    parse_metric_value, point_touches_wire_segment, wire_contact_points,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -305,10 +303,10 @@ struct IsEntry {
 /// Requires an intermediate virtual node.
 struct DiodeEntry {
     id: u64,
-    anode: usize,    // MNA node for anode
-    cathode: usize,  // MNA node for cathode
-    vf: f64,         // forward voltage drop (V)
-    rb: f64,         // bulk series resistance (Ω)
+    anode: usize,   // MNA node for anode
+    cathode: usize, // MNA node for cathode
+    vf: f64,        // forward voltage drop (V)
+    rb: f64,        // bulk series resistance (Ω)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -428,23 +426,35 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         match comp.kind {
             // ── Resistive two-terminal ────────────────────────────────
             ComponentKind::Resistor => {
-                let r = parse_metric_value(&comp.value, "ohm")
-                    .unwrap_or(1_000.0) as f64;
+                let r = parse_metric_value(&comp.value, "ohm").unwrap_or(1_000.0) as f64;
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r,
+                    });
                 }
             }
             ComponentKind::Potentiometer => {
-                let r = parse_metric_value(&comp.value, "ohm")
-                    .unwrap_or(10_000.0) as f64
-                    * 0.5;
+                let r = parse_metric_value(&comp.value, "ohm").unwrap_or(10_000.0) as f64 * 0.5;
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r,
+                    });
                 }
             }
             ComponentKind::Fuse => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 0.05 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 0.05,
+                    });
                 }
             }
             ComponentKind::Lamp => {
@@ -452,35 +462,65 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
                 let rated_v = parse_metric_value(&comp.value, "v").unwrap_or(12.0) as f64;
                 let r = (rated_v * rated_v) / 40.0; // assume ~40 W filament
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r,
+                    });
                 }
             }
             ComponentKind::DcMotor => {
                 // Winding resistance + back-EMF not modelled; use 5 Ω stub
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 5.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 5.0,
+                    });
                 }
             }
             ComponentKind::Relay => {
                 // Coil modelled as 100 Ω
-                let coil_p = pins.iter().find(|p| p.label.contains("COIL+"))
+                let coil_p = pins
+                    .iter()
+                    .find(|p| p.label.contains("COIL+"))
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let coil_n = pins.iter().find(|p| p.label.contains("COIL-"))
+                let coil_n = pins
+                    .iter()
+                    .find(|p| p.label.contains("COIL-"))
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(a), Some(b)) = (coil_p, coil_n) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 100.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 100.0,
+                    });
                 }
             }
             ComponentKind::VoltageReg => {
                 // Very simplified: pass-through with 0.5 Ω drop (ignore regulation)
-                let in_n = pins.iter().find(|p| p.label == "IN")
+                let in_n = pins
+                    .iter()
+                    .find(|p| p.label == "IN")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let out_n = pins.iter().find(|p| p.label == "OUT")
+                let out_n = pins
+                    .iter()
+                    .find(|p| p.label == "OUT")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let gnd_n = pins.iter().find(|p| p.role == PinRole::Ground)
+                let gnd_n = pins
+                    .iter()
+                    .find(|p| p.role == PinRole::Ground)
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(a), Some(b)) = (in_n, out_n) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 0.5 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 0.5,
+                    });
                 }
                 // GND pin: stamp small resistance to GND
                 if let (Some(o), Some(g)) = (out_n, gnd_n) {
@@ -490,47 +530,87 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
             }
             // ── Transistors (linearised as resistors when in active region) ──
             ComponentKind::NpnTransistor | ComponentKind::PnpTransistor => {
-                let c_n = pins.iter().find(|p| p.label == "C")
+                let c_n = pins
+                    .iter()
+                    .find(|p| p.label == "C")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let e_n = pins.iter().find(|p| p.label == "E")
+                let e_n = pins
+                    .iter()
+                    .find(|p| p.label == "E")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(c), Some(e)) = (c_n, e_n) {
-                    res.push(ResEntry { id: comp.id, a: c, b: e, r: 50.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a: c,
+                        b: e,
+                        r: 50.0,
+                    });
                 }
             }
             ComponentKind::Nmosfet | ComponentKind::Pmosfet => {
-                let d_n = pins.iter().find(|p| p.label == "D")
+                let d_n = pins
+                    .iter()
+                    .find(|p| p.label == "D")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let s_n = pins.iter().find(|p| p.label == "S")
+                let s_n = pins
+                    .iter()
+                    .find(|p| p.label == "S")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(d), Some(s)) = (d_n, s_n) {
-                    res.push(ResEntry { id: comp.id, a: d, b: s, r: 20.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a: d,
+                        b: s,
+                        r: 20.0,
+                    });
                 }
             }
             // ── Voltage sources ───────────────────────────────────────
             ComponentKind::VSource | ComponentKind::Battery => {
-                let vv = parse_metric_value(&comp.value, "v")
-                    .unwrap_or(if comp.kind == ComponentKind::Battery { 9.0 } else { 5.0 })
-                    as f64;
-                let pos_n = pins.iter().find(|p| p.role == PinRole::Positive || p.label == "+")
+                let vv = parse_metric_value(&comp.value, "v").unwrap_or(
+                    if comp.kind == ComponentKind::Battery {
+                        9.0
+                    } else {
+                        5.0
+                    },
+                ) as f64;
+                let pos_n = pins
+                    .iter()
+                    .find(|p| p.role == PinRole::Positive || p.label == "+")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of))
                     .unwrap_or(0);
-                let neg_n = pins.iter().find(|p| p.role == PinRole::Ground || p.label == "-")
+                let neg_n = pins
+                    .iter()
+                    .find(|p| p.role == PinRole::Ground || p.label == "-")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of))
                     .unwrap_or(0);
                 if pos_n != neg_n {
-                    vs.push(VsEntry { id: comp.id, pos: pos_n, neg: neg_n, v: vv });
+                    vs.push(VsEntry {
+                        id: comp.id,
+                        pos: pos_n,
+                        neg: neg_n,
+                        v: vv,
+                    });
                 }
             }
             ComponentKind::ISource => {
                 let iv = parse_metric_value(&comp.value, "a").unwrap_or(0.01) as f64;
-                let pos_n = pins.iter().find(|p| p.role == PinRole::Positive)
+                let pos_n = pins
+                    .iter()
+                    .find(|p| p.role == PinRole::Positive)
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of))
                     .unwrap_or(0);
-                let neg_n = pins.iter().find(|p| p.role == PinRole::Ground)
+                let neg_n = pins
+                    .iter()
+                    .find(|p| p.role == PinRole::Ground)
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of))
                     .unwrap_or(0);
-                is_src.push(IsEntry { id: comp.id, pos: pos_n, neg: neg_n, i: iv });
+                is_src.push(IsEntry {
+                    id: comp.id,
+                    pos: pos_n,
+                    neg: neg_n,
+                    i: iv,
+                });
             }
             // ── Diodes (linearised Thevenin companion model) ─────────
             // Strategy: model each diode as an ideal voltage source Vf
@@ -540,62 +620,118 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
             ComponentKind::Diode => {
                 // Vf ≈ 0.65 V, Rb ≈ 8 Ω  (1N4148 at ~20 mA)
                 if let (Some(a), Some(k)) = (p0, p1) {
-                    diode_entries.push(DiodeEntry { id: comp.id, anode: a, cathode: k, vf: 0.65, rb: 8.0 });
+                    diode_entries.push(DiodeEntry {
+                        id: comp.id,
+                        anode: a,
+                        cathode: k,
+                        vf: 0.65,
+                        rb: 8.0,
+                    });
                 }
             }
             ComponentKind::Led => {
                 // Vf ≈ 2.0 V, Rb ≈ 20 Ω  (typical red LED)
                 if let (Some(a), Some(k)) = (p0, p1) {
-                    diode_entries.push(DiodeEntry { id: comp.id, anode: a, cathode: k, vf: 2.0, rb: 20.0 });
+                    diode_entries.push(DiodeEntry {
+                        id: comp.id,
+                        anode: a,
+                        cathode: k,
+                        vf: 2.0,
+                        rb: 20.0,
+                    });
                 }
             }
             ComponentKind::ZenerDiode => {
                 // Forward mode only (simplified): Vf = 0.65 V, Rb = 5 Ω
                 let _vz = parse_metric_value(&comp.value, "v").unwrap_or(5.1) as f64;
                 if let (Some(a), Some(k)) = (p0, p1) {
-                    diode_entries.push(DiodeEntry { id: comp.id, anode: a, cathode: k, vf: 0.65, rb: 5.0 });
+                    diode_entries.push(DiodeEntry {
+                        id: comp.id,
+                        anode: a,
+                        cathode: k,
+                        vf: 0.65,
+                        rb: 5.0,
+                    });
                 }
             }
             ComponentKind::Thermistor => {
-                let r = parse_metric_value(&comp.value, "ohm")
-                    .unwrap_or(10_000.0) as f64;
+                let r = parse_metric_value(&comp.value, "ohm").unwrap_or(10_000.0) as f64;
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r,
+                    });
                 }
             }
             ComponentKind::Varistor => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 100.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 100.0,
+                    });
                 }
             }
             ComponentKind::SchottkyDiode => {
                 // Vf ≈ 0.3 V, Rb ≈ 4 Ω
                 if let (Some(a), Some(k)) = (p0, p1) {
-                    diode_entries.push(DiodeEntry { id: comp.id, anode: a, cathode: k, vf: 0.30, rb: 4.0 });
+                    diode_entries.push(DiodeEntry {
+                        id: comp.id,
+                        anode: a,
+                        cathode: k,
+                        vf: 0.30,
+                        rb: 4.0,
+                    });
                 }
             }
             ComponentKind::TvsDiode => {
                 // Treated as open in forward operation; clamp in transient not modelled in DC
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 1000.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 1000.0,
+                    });
                 }
             }
             ComponentKind::Phototransistor => {
-                let c_n = pins.iter().find(|p| p.label == "C")
+                let c_n = pins
+                    .iter()
+                    .find(|p| p.label == "C")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let e_n = pins.iter().find(|p| p.label == "E")
+                let e_n = pins
+                    .iter()
+                    .find(|p| p.label == "E")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(c), Some(e)) = (c_n, e_n) {
-                    res.push(ResEntry { id: comp.id, a: c, b: e, r: 500.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a: c,
+                        b: e,
+                        r: 500.0,
+                    });
                 }
             }
             ComponentKind::Timer555 => {
-                let vcc_n = pins.iter().find(|p| p.label == "VCC")
+                let vcc_n = pins
+                    .iter()
+                    .find(|p| p.label == "VCC")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let gnd_n = pins.iter().find(|p| p.label == "GND" || p.role == PinRole::Ground)
+                let gnd_n = pins
+                    .iter()
+                    .find(|p| p.label == "GND" || p.role == PinRole::Ground)
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(v), Some(g)) = (vcc_n, gnd_n) {
-                    res.push(ResEntry { id: comp.id, a: v, b: g, r: 500.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a: v,
+                        b: g,
+                        r: 500.0,
+                    });
                 }
             }
             // ── Capacitor: open in DC; Inductor: short (handled above) ─
@@ -639,8 +775,18 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
     for (di, de) in diode_entries.iter().enumerate() {
         let mid = diode_start_node + di; // MNA node for anode side of Rb
         // anode → [Vf source] → mid → [Rb] → cathode
-        vs.push(VsEntry { id: de.id, pos: de.anode, neg: mid, v: de.vf });
-        res.push(ResEntry { id: de.id, a: mid, b: de.cathode, r: de.rb });
+        vs.push(VsEntry {
+            id: de.id,
+            pos: de.anode,
+            neg: mid,
+            v: de.vf,
+        });
+        res.push(ResEntry {
+            id: de.id,
+            a: mid,
+            b: de.cathode,
+            r: de.rb,
+        });
     }
     let total_nodes = num_nodes + diode_entries.len(); // total non-GND nodes incl. virtual
 

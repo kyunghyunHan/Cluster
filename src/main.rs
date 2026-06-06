@@ -1,10 +1,21 @@
-mod mna;
+mod engine;
+mod model;
+mod ui;
 
 use eframe::egui;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
-use serde::{Deserialize, Serialize};
+use engine::mna;
+use engine::netlist::build_circuit_netlist;
+use engine::simulation as simulation_engine;
+use engine::simulation::{Conductance, Simulation};
+use engine::validation::{
+    ErcSeverity, ErcViolation, pin_is_controller_scl, pin_is_controller_sda, pin_is_i2c_named,
+    pin_is_microcontroller_gpio, validate_beginner_rules,
+};
+use model::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use ui::validation_panel::{ValidationPanelAction, render_validation_panel};
 
 const SAVE_PATH: &str = "cluster_circuit.json";
 const AUTORECOVER_PATH: &str = "cluster_autorecover.json";
@@ -26,200 +37,10 @@ enum AlignDir {
     CenterV,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-enum ComponentKind {
-    Resistor,
-    Capacitor,
-    Inductor,
-    Diode,
-    Led,
-    ZenerDiode,
-    Switch,
-    PushButton,
-    SlideSwitch,
-    Ground,
-    VSource,
-    ISource,
-    Battery,
-    OpAmp,
-    Lamp,
-    Potentiometer,
-    NpnTransistor,
-    PnpTransistor,
-    Nmosfet,
-    Pmosfet,
-    VoltageReg,
-    Fuse,
-    LogicNot,
-    LogicAnd,
-    LogicOr,
-    LogicNand,
-    LogicNor,
-    LogicXor,
-    Esp32,
-    Esp32S3,
-    Esp32C3,
-    ArduinoUno,
-    RaspberryPiPico,
-    Breadboard,
-    Relay,
-    DcMotor,
-    Servo,
-    Oled,
-    Sensor,
-    // ── New commercial-grade components ──────────────────────────
-    /// Named net label — connects same-name wires across a page
-    NetLabel,
-    /// NE555 / LM555 timer IC
-    Timer555,
-    /// Crystal oscillator (2-pin)
-    Crystal,
-    /// Ideal isolation transformer (4-pin: primary + secondary)
-    Transformer,
-    /// 7-segment LED display (common cathode)
-    Display7Seg,
-    /// NTC thermistor
-    Thermistor,
-    /// Varistor / MOV surge suppressor
-    Varistor,
-    /// LM317 / adjustable voltage reference
-    VoltageRef,
-    /// Generic 4-pin H-bridge motor driver module
-    MotorDriver,
-    /// Schottky diode (lower Vf ~0.3 V)
-    SchottkyDiode,
-    /// TVS (transient-voltage-suppression) diode
-    TvsDiode,
-    /// Photo-transistor / phototransistor
-    Phototransistor,
-    /// Opto-isolator / opto-coupler
-    Optocoupler,
-    /// Generic IC / DIP package (user-defined pins)
-    GenericIc,
-}
-
-#[derive(Debug, Clone)]
-struct Component {
-    id: u64,
-    kind: ComponentKind,
-    pos: Pos2,
-    rotation: i32,
-    label: String,
-    value: String,
-}
-
-#[derive(Debug, Clone)]
-struct Wire {
-    id: u64,
-    points: Vec<Pos2>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ElectricalType {
-    Passive,
-    PowerIn,
-    Ground,
-    Digital,
-    I2c,
-    Control,
-    Output,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PinRole {
-    Passive,
-    Positive,
-    Ground,
-    Digital,
-    I2c,
-    Control,
-    Output,
-}
-
-#[derive(Debug, Clone)]
-struct CircuitPin {
-    label: &'static str,
-    role: PinRole,
-    pos: Pos2,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct PinRef {
-    component_id: u64,
-    pin_name: String,
-}
-
-#[derive(Debug, Clone)]
-struct NetlistPin {
-    component_id: u64,
-    component_label: String,
-    component_kind: ComponentKind,
-    component_value: String,
-    pin_name: String,
-    electrical_type: ElectricalType,
-    position: Pos2,
-    net_id: usize,
-    connected_by_wire: bool,
-}
-
-#[derive(Debug, Clone)]
-struct Net {
-    id: usize,
-    name: String,
-    connected_pins: Vec<PinRef>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct CircuitNetlist {
-    nets: Vec<Net>,
-    pins: Vec<NetlistPin>,
-    wire_nets: HashMap<u64, usize>,
-    floating_wires: Vec<u64>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Selection {
     Component(u64),
     Wire(u64),
-}
-
-#[derive(Debug, Clone)]
-enum DragState {
-    Component { id: u64, offset: Vec2 },
-    WirePoint { wire_id: u64, point_index: usize },
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct Counters {
-    resistor: usize,
-    capacitor: usize,
-    inductor: usize,
-    diode: usize,
-    led: usize,
-    zener: usize,
-    switch: usize,
-    ground: usize,
-    vsource: usize,
-    isource: usize,
-    battery: usize,
-    opamp: usize,
-    lamp: usize,
-    pot: usize,
-    npn: usize,
-    pnp: usize,
-    mosfet: usize,
-    vreg: usize,
-    fuse: usize,
-    logic_gate: usize,
-    esp32: usize,
-    arduino: usize,
-    pico: usize,
-    breadboard: usize,
-    relay: usize,
-    motor: usize,
-    servo: usize,
-    oled: usize,
-    sensor: usize,
 }
 
 struct CircuitApp {
@@ -281,61 +102,6 @@ struct CircuitApp {
     find_query: String,
     find_results: Vec<u64>, // component IDs matching query
     find_result_idx: usize,
-}
-
-#[derive(Debug, Clone)]
-struct CircuitSnapshot {
-    components: Vec<Component>,
-    wires: Vec<Wire>,
-    next_id: u64,
-    counters: Counters,
-    pages: Vec<(String, Vec<Component>, Vec<Wire>, u64, Counters)>,
-    current_page: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SavedCircuit {
-    schema_version: u32,
-    next_id: u64,
-    counters: Counters,
-    components: Vec<SavedComponent>,
-    wires: Vec<SavedWire>,
-    #[serde(default)]
-    pages: Vec<SavedPage>,
-    #[serde(default)]
-    current_page: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SavedPage {
-    name: String,
-    next_id: u64,
-    counters: Counters,
-    components: Vec<SavedComponent>,
-    wires: Vec<SavedWire>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SavedComponent {
-    id: u64,
-    kind: ComponentKind,
-    x: f32,
-    y: f32,
-    rotation: i32,
-    label: String,
-    value: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SavedWire {
-    id: u64,
-    points: Vec<SavedPoint>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SavedPoint {
-    x: f32,
-    y: f32,
 }
 
 impl CircuitApp {
@@ -1152,7 +918,9 @@ impl CircuitApp {
     fn export_netlist_text(&mut self) {
         let netlist = self.current_netlist();
         match fs::write("cluster_netlist.txt", circuit_to_netlist_text(&netlist)) {
-            Ok(()) => self.status = format!("Saved cluster_netlist.txt ({} nets).", netlist.nets.len()),
+            Ok(()) => {
+                self.status = format!("Saved cluster_netlist.txt ({} nets).", netlist.nets.len())
+            }
             Err(err) => self.status = format!("Netlist export failed: {err}"),
         }
     }
@@ -1452,7 +1220,7 @@ impl CircuitApp {
         {
             return simulation.clone();
         }
-        let mut simulation = analyze_circuit(&self.components, &self.wires);
+        let mut simulation = simulation_engine::analyze_circuit(&self.components, &self.wires);
         let netlist = self.current_netlist();
         // Run ERC after topology analysis so it can use simulation results
         simulation.erc = run_erc_with_netlist(&self.components, &self.wires, &simulation, &netlist);
@@ -2155,80 +1923,35 @@ impl eframe::App for CircuitApp {
                             SectionMode::Collapsed
                         };
                         palette_section(ui, &erc_title, erc_mode, |ui| {
-                            if simulation.erc.is_empty() {
-                                if !self.components.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new("No violations found.")
-                                            .size(11.0)
-                                            .color(Color32::from_rgb(120, 200, 140)),
-                                    );
-                                } else {
-                                    ui.label(
-                                        egui::RichText::new("Place components to run ERC.")
-                                            .size(11.0)
-                                            .color(Color32::from_rgb(120, 130, 140)),
-                                    );
-                                }
-                            } else {
-                                egui::ScrollArea::vertical()
-                                    .max_height(160.0)
-                                    .show(ui, |ui| {
-                                        for v in &simulation.erc {
-                                            let (icon, col) = match v.severity {
-                                                ErcSeverity::Error => {
-                                                    ("✗", Color32::from_rgb(255, 110, 95))
-                                                }
-                                                ErcSeverity::Warning => {
-                                                    ("⚠", Color32::from_rgb(255, 200, 80))
-                                                }
-                                                ErcSeverity::Info => {
-                                                    ("i", Color32::from_rgb(130, 170, 210))
-                                                }
-                                            };
-                                            let resp = ui.add(
-                                                egui::Label::new(
-                                                    egui::RichText::new(format!(
-                                                        "{icon} {}",
-                                                        v.message
-                                                    ))
-                                                    .size(10.5)
-                                                    .color(col),
-                                                )
-                                                .sense(Sense::click()),
-                                            );
-                                            if resp.clicked() {
-                                                if let Some(id) = v.component_id {
-                                                    self.selected = Some(Selection::Component(id));
-                                                    self.highlighted_net_wires.clear();
-                                                    self.hovered_net_wire = None;
-                                                    // pan to component
-                                                    if let Some(comp) =
-                                                        self.components.iter().find(|c| c.id == id)
-                                                    {
-                                                        let canvas_center =
-                                                            self.canvas_rect.center();
-                                                        self.pan = canvas_center.to_vec2()
-                                                            - comp.pos.to_vec2() * self.zoom;
-                                                    }
-                                                } else if let Some(id) = v.wire_id {
-                                                    self.selected = Some(Selection::Wire(id));
-                                                    self.hovered_net_wire = Some(id);
-                                                    self.highlighted_net_wires =
-                                                        self.same_net_wires(id);
-                                                    if let Some(wire) =
-                                                        self.wires.iter().find(|w| w.id == id)
-                                                    {
-                                                        let canvas_center =
-                                                            self.canvas_rect.center();
-                                                        self.pan = canvas_center.to_vec2()
-                                                            - wire_midpoint(wire).to_vec2()
-                                                                * self.zoom;
-                                                    }
-                                                }
-                                            }
-                                            resp.on_hover_text(&v.message);
+                            if let Some(action) = render_validation_panel(
+                                ui,
+                                &simulation.erc,
+                                !self.components.is_empty(),
+                            ) {
+                                match action {
+                                    ValidationPanelAction::SelectComponent(id) => {
+                                        self.selected = Some(Selection::Component(id));
+                                        self.highlighted_net_wires.clear();
+                                        self.hovered_net_wire = None;
+                                        if let Some(comp) =
+                                            self.components.iter().find(|c| c.id == id)
+                                        {
+                                            let canvas_center = self.canvas_rect.center();
+                                            self.pan = canvas_center.to_vec2()
+                                                - comp.pos.to_vec2() * self.zoom;
                                         }
-                                    });
+                                    }
+                                    ValidationPanelAction::SelectWire(id) => {
+                                        self.selected = Some(Selection::Wire(id));
+                                        self.hovered_net_wire = Some(id);
+                                        self.highlighted_net_wires = self.same_net_wires(id);
+                                        if let Some(wire) = self.wires.iter().find(|w| w.id == id) {
+                                            let canvas_center = self.canvas_rect.center();
+                                            self.pan = canvas_center.to_vec2()
+                                                - wire_midpoint(wire).to_vec2() * self.zoom;
+                                        }
+                                    }
+                                }
                             }
                         });
 
@@ -4059,32 +3782,6 @@ fn wire_midpoint(wire: &Wire) -> Pos2 {
         .unwrap_or(Pos2::ZERO)
 }
 
-#[derive(Default, Clone)]
-struct Simulation {
-    closed: bool,
-    shorted: bool,
-    energized_components: HashSet<u64>,
-    energized_wires: HashSet<u64>,
-    summary: String,
-    #[allow(dead_code)]
-    details: Vec<String>,
-    voltage: Option<f32>,
-    resistance: Option<f32>,
-    current: Option<f32>,
-    component_warnings: HashMap<u64, String>,
-    /// Full DC operating-point result from MNA solver (None if unsolvable).
-    dc: Option<mna::DcResult>,
-    /// ERC violations (computed alongside DC analysis)
-    erc: Vec<ErcViolation>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Conductance {
-    Open,
-    Conductor,
-    Load,
-}
-
 fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
     let mut nodes = CircuitNodes::default();
     let mut graph: Vec<HashSet<usize>> = Vec::new();
@@ -4584,175 +4281,8 @@ fn wire_contact_points(components: &[Component], wires: &[Wire]) -> Vec<Pos2> {
     points
 }
 
-fn point_touches_wire_segment(point: Pos2, a: Pos2, b: Pos2) -> bool {
+pub(crate) fn point_touches_wire_segment(point: Pos2, a: Pos2, b: Pos2) -> bool {
     distance_to_segment(point, a, b) <= 3.0
-}
-
-fn electrical_type_for_role(role: PinRole) -> ElectricalType {
-    match role {
-        PinRole::Passive => ElectricalType::Passive,
-        PinRole::Positive => ElectricalType::PowerIn,
-        PinRole::Ground => ElectricalType::Ground,
-        PinRole::Digital => ElectricalType::Digital,
-        PinRole::I2c => ElectricalType::I2c,
-        PinRole::Control => ElectricalType::Control,
-        PinRole::Output => ElectricalType::Output,
-    }
-}
-
-fn build_circuit_netlist(components: &[Component], wires: &[Wire]) -> CircuitNetlist {
-    let mut nodes = CircuitNodes::default();
-    let mut nets = UnionFind::default();
-
-    for wire in wires {
-        for point in &wire.points {
-            let node = nodes.node_for(*point);
-            nets.ensure(node);
-        }
-        for segment in wire.points.windows(2) {
-            let a = nodes.node_for(segment[0]);
-            let b = nodes.node_for(segment[1]);
-            nets.ensure(a);
-            nets.ensure(b);
-            nets.union(a, b);
-        }
-    }
-
-    for component in components {
-        for pin in component_pin_defs(component) {
-            let node = nodes.node_for(pin.pos);
-            nets.ensure(node);
-        }
-    }
-
-    for contact in wire_contact_points(components, wires) {
-        let contact_node = nodes.node_for(contact);
-        nets.ensure(contact_node);
-        for wire in wires {
-            for segment in wire.points.windows(2) {
-                if point_touches_wire_segment(contact, segment[0], segment[1]) {
-                    let a = nodes.node_for(segment[0]);
-                    let b = nodes.node_for(segment[1]);
-                    nets.ensure(a);
-                    nets.ensure(b);
-                    nets.union(contact_node, a);
-                    nets.union(contact_node, b);
-                }
-            }
-        }
-    }
-
-    let mut root_has_wire = HashSet::new();
-    let mut wire_root_sets: HashMap<u64, HashSet<usize>> = HashMap::new();
-    for wire in wires {
-        for point in &wire.points {
-            let node = nodes.node_for(*point);
-            let root = nets.find(node);
-            root_has_wire.insert(root);
-            wire_root_sets.entry(wire.id).or_default().insert(root);
-        }
-        for segment in wire.points.windows(2) {
-            let a = nets.find(nodes.node_for(segment[0]));
-            let b = nets.find(nodes.node_for(segment[1]));
-            root_has_wire.insert(a);
-            root_has_wire.insert(b);
-            wire_root_sets.entry(wire.id).or_default().insert(a);
-            wire_root_sets.entry(wire.id).or_default().insert(b);
-        }
-    }
-
-    let mut root_pins: HashMap<usize, Vec<PinRef>> = HashMap::new();
-    let mut pin_rows = Vec::new();
-    let mut root_name_hints: HashMap<usize, String> = HashMap::new();
-    for component in components {
-        for pin in component_pin_defs(component) {
-            let root = nets.find(nodes.node_for(pin.pos));
-            root_pins.entry(root).or_default().push(PinRef {
-                component_id: component.id,
-                pin_name: pin.label.to_string(),
-            });
-            if component.kind == ComponentKind::Ground || pin.role == PinRole::Ground {
-                root_name_hints.entry(root).or_insert_with(|| "GND".to_string());
-            }
-            if component.kind == ComponentKind::NetLabel {
-                let name = component.value.trim();
-                if !name.is_empty() {
-                    root_name_hints.entry(root).or_insert_with(|| name.to_string());
-                }
-            }
-            pin_rows.push((root, component, pin));
-        }
-    }
-
-    let mut roots = (0..nodes.positions.len())
-        .map(|idx| nets.find(idx))
-        .collect::<Vec<_>>();
-    roots.sort_unstable();
-    roots.dedup();
-
-    let mut root_to_id = HashMap::new();
-    for root in roots {
-        let next_id = root_to_id.len();
-        root_to_id.insert(root, next_id);
-    }
-
-    let mut generated = 1usize;
-    let mut net_rows = root_to_id
-        .iter()
-        .map(|(&root, &id)| {
-            let name = root_name_hints.get(&root).cloned().unwrap_or_else(|| {
-                let name = format!("NET_{generated:03}");
-                generated += 1;
-                name
-            });
-            Net {
-                id,
-                name,
-                connected_pins: root_pins.remove(&root).unwrap_or_default(),
-            }
-        })
-        .collect::<Vec<_>>();
-    net_rows.sort_by_key(|net| net.id);
-
-    let pins = pin_rows
-        .into_iter()
-        .filter_map(|(root, component, pin)| {
-            Some(NetlistPin {
-                component_id: component.id,
-                component_label: component.label.clone(),
-                component_kind: component.kind,
-                component_value: component.value.clone(),
-                pin_name: pin.label.to_string(),
-                electrical_type: electrical_type_for_role(pin.role),
-                position: pin.pos,
-                net_id: *root_to_id.get(&root)?,
-                connected_by_wire: root_has_wire.contains(&root),
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let mut wire_nets = HashMap::new();
-    let mut floating_wires = Vec::new();
-    for wire in wires {
-        let roots = wire_root_sets.remove(&wire.id).unwrap_or_default();
-        let root = roots.iter().next().copied();
-        if let Some(root) = root.and_then(|root| root_to_id.get(&root).copied()) {
-            wire_nets.insert(wire.id, root);
-            if net_rows
-                .get(root)
-                .is_some_and(|net| net.connected_pins.is_empty())
-            {
-                floating_wires.push(wire.id);
-            }
-        }
-    }
-
-    CircuitNetlist {
-        nets: net_rows,
-        pins,
-        wire_nets,
-        floating_wires,
-    }
 }
 
 fn reachable_nodes(graph: &[HashSet<usize>], starts: &[usize]) -> HashSet<usize> {
@@ -5049,7 +4579,7 @@ fn estimate_loop_resistance(
     (resistance > 0.0).then_some(resistance)
 }
 
-fn parse_metric_value(value: &str, unit_hint: &str) -> Option<f32> {
+pub(crate) fn parse_metric_value(value: &str, unit_hint: &str) -> Option<f32> {
     let normalized = value
         .trim()
         .to_lowercase()
@@ -5552,22 +5082,6 @@ fn connected_pin_positions(components: &[Component], wires: &[Wire]) -> Vec<(i32
 //  ERC — Electrical Rules Check
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-enum ErcSeverity {
-    Error,
-    Warning,
-    Info,
-}
-
-#[derive(Debug, Clone)]
-struct ErcViolation {
-    severity: ErcSeverity,
-    component_id: Option<u64>,
-    wire_id: Option<u64>,
-    message: String,
-}
-
 #[cfg(test)]
 fn run_erc(components: &[Component], wires: &[Wire], simulation: &Simulation) -> Vec<ErcViolation> {
     let netlist = build_circuit_netlist(components, wires);
@@ -5880,165 +5394,6 @@ fn first_wire_touching_either_set(
                 })
                 .map(|&(&id, _)| id)
         })
-}
-
-fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolation> {
-    let mut violations = Vec::new();
-
-    for led in netlist
-        .pins
-        .iter()
-        .filter(|pin| pin.component_kind == ComponentKind::Led && pin.pin_name == "A")
-    {
-        let led_nets = netlist
-            .pins
-            .iter()
-            .filter(|pin| pin.component_id == led.component_id)
-            .map(|pin| pin.net_id)
-            .collect::<HashSet<_>>();
-        let has_resistor = netlist.pins.iter().any(|pin| {
-            pin.component_kind == ComponentKind::Resistor && led_nets.contains(&pin.net_id)
-        });
-        if !has_resistor {
-            violations.push(ErcViolation {
-                severity: ErcSeverity::Warning,
-                component_id: Some(led.component_id),
-                wire_id: None,
-                message: format!(
-                    "LED {} has no current limiting resistor on either terminal.",
-                    led.component_label
-                ),
-            });
-        }
-    }
-
-    for net in &netlist.nets {
-        let pins = netlist
-            .pins
-            .iter()
-            .filter(|pin| pin.net_id == net.id)
-            .collect::<Vec<_>>();
-        let has_5v = pins.iter().any(|pin| pin_is_5v_source(pin));
-        let has_3v3 = pins.iter().any(|pin| pin_name_is_3v3(&pin.pin_name));
-        if has_5v && has_3v3 {
-            let target = pins
-                .iter()
-                .find(|pin| pin_name_is_3v3(&pin.pin_name))
-                .copied();
-            violations.push(ErcViolation {
-                severity: ErcSeverity::Error,
-                component_id: target.map(|pin| pin.component_id),
-                wire_id: None,
-                message: format!("{} connects 5V to a 3.3V rail/pin.", net.name),
-            });
-        }
-
-        for gpio in pins
-            .iter()
-            .filter(|pin| pin_is_microcontroller_gpio(pin) && !pin_is_i2c_named(&pin.pin_name))
-        {
-            if pins.iter().any(|pin| pin.component_kind == ComponentKind::DcMotor) {
-                violations.push(ErcViolation {
-                    severity: ErcSeverity::Error,
-                    component_id: Some(gpio.component_id),
-                    wire_id: None,
-                    message: format!(
-                        "{} {} is connected directly to a motor. Use a transistor, relay, or driver.",
-                        gpio.component_label, gpio.pin_name
-                    ),
-                });
-            }
-        }
-
-        let oled_sda = pins.iter().any(|pin| {
-            pin.component_kind == ComponentKind::Oled && pin.pin_name.eq_ignore_ascii_case("SDA")
-        });
-        let oled_scl = pins.iter().any(|pin| {
-            pin.component_kind == ComponentKind::Oled && pin.pin_name.eq_ignore_ascii_case("SCL")
-        });
-        if oled_sda
-            && pins
-                .iter()
-                .any(|pin| pin_is_controller_scl(pin) && !pin_is_controller_sda(pin))
-        {
-            violations.push(ErcViolation {
-                severity: ErcSeverity::Error,
-                component_id: pins
-                    .iter()
-                    .find(|pin| pin.component_kind == ComponentKind::Oled)
-                    .map(|pin| pin.component_id),
-                wire_id: None,
-                message: "OLED SDA is connected to a controller SCL pin.".to_string(),
-            });
-        }
-        if oled_scl
-            && pins
-                .iter()
-                .any(|pin| pin_is_controller_sda(pin) && !pin_is_controller_scl(pin))
-        {
-            violations.push(ErcViolation {
-                severity: ErcSeverity::Error,
-                component_id: pins
-                    .iter()
-                    .find(|pin| pin.component_kind == ComponentKind::Oled)
-                    .map(|pin| pin.component_id),
-                wire_id: None,
-                message: "OLED SCL is connected to a controller SDA pin.".to_string(),
-            });
-        }
-    }
-
-    violations
-}
-
-fn pin_is_5v_source(pin: &NetlistPin) -> bool {
-    pin.pin_name.eq_ignore_ascii_case("5V")
-        || (matches!(
-            pin.component_kind,
-            ComponentKind::VSource | ComponentKind::Battery
-        ) && parse_metric_value(&pin.component_value, "v").is_some_and(|v| v > 3.6))
-}
-
-fn pin_name_is_3v3(name: &str) -> bool {
-    let compact = name.to_ascii_uppercase().replace(['.', ' '], "");
-    compact.contains("3V3") || compact.contains("3.3V")
-}
-
-fn pin_is_microcontroller_gpio(pin: &NetlistPin) -> bool {
-    matches!(
-        pin.component_kind,
-        ComponentKind::Esp32
-            | ComponentKind::Esp32S3
-            | ComponentKind::Esp32C3
-            | ComponentKind::ArduinoUno
-            | ComponentKind::RaspberryPiPico
-    ) && (pin.pin_name.to_ascii_uppercase().contains("GPIO")
-        || pin.pin_name.to_ascii_uppercase().starts_with("GP")
-        || pin.pin_name.to_ascii_uppercase().starts_with('D'))
-}
-
-fn pin_is_i2c_named(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("sda") || lower.contains("scl")
-}
-
-fn pin_is_controller_sda(pin: &NetlistPin) -> bool {
-    pin_is_microcontroller(pin) && pin.pin_name.to_ascii_lowercase().contains("sda")
-}
-
-fn pin_is_controller_scl(pin: &NetlistPin) -> bool {
-    pin_is_microcontroller(pin) && pin.pin_name.to_ascii_lowercase().contains("scl")
-}
-
-fn pin_is_microcontroller(pin: &NetlistPin) -> bool {
-    matches!(
-        pin.component_kind,
-        ComponentKind::Esp32
-            | ComponentKind::Esp32S3
-            | ComponentKind::Esp32C3
-            | ComponentKind::ArduinoUno
-            | ComponentKind::RaspberryPiPico
-    )
 }
 
 fn draw_component(
@@ -6524,7 +5879,7 @@ fn component_pins(component: &Component) -> Vec<Pos2> {
         .collect()
 }
 
-fn component_pin_defs(component: &Component) -> Vec<CircuitPin> {
+pub(crate) fn component_pin_defs(component: &Component) -> Vec<CircuitPin> {
     let rect = Rect::from_center_size(component.pos, component_size(component));
     let center = rect.center();
     let base = match component.kind {
@@ -9356,16 +8711,14 @@ fn generate_arduino_code(netlist: &CircuitNetlist) -> String {
             .any(|pin| pin.component_kind == ComponentKind::Oled && pin.pin_name == "SDA")
             && let Some(controller) = pins.iter().find(|pin| pin_is_controller_sda(pin))
         {
-            i2c_sda =
-                digits_from_pin_name(&controller.pin_name).unwrap_or_else(|| i2c_sda.clone());
+            i2c_sda = digits_from_pin_name(&controller.pin_name).unwrap_or_else(|| i2c_sda.clone());
         }
         if pins
             .iter()
             .any(|pin| pin.component_kind == ComponentKind::Oled && pin.pin_name == "SCL")
             && let Some(controller) = pins.iter().find(|pin| pin_is_controller_scl(pin))
         {
-            i2c_scl =
-                digits_from_pin_name(&controller.pin_name).unwrap_or_else(|| i2c_scl.clone());
+            i2c_scl = digits_from_pin_name(&controller.pin_name).unwrap_or_else(|| i2c_scl.clone());
         }
     }
 
@@ -9373,7 +8726,9 @@ fn generate_arduino_code(netlist: &CircuitNetlist) -> String {
         .pins
         .iter()
         .filter(|pin| pin_is_microcontroller_gpio(pin) && !pin_is_i2c_named(&pin.pin_name))
-        .filter_map(|pin| digits_from_pin_name(&pin.pin_name).map(|gpio| (pin.pin_name.clone(), gpio)))
+        .filter_map(|pin| {
+            digits_from_pin_name(&pin.pin_name).map(|gpio| (pin.pin_name.clone(), gpio))
+        })
         .collect::<Vec<_>>();
     gpio_pins.sort();
     gpio_pins.dedup();
@@ -9390,17 +8745,26 @@ fn generate_arduino_code(netlist: &CircuitNetlist) -> String {
     }
     code.push('\n');
     for (name, gpio) in &gpio_pins {
-        code.push_str(&format!("const int PIN_{} = {};\n", sanitize_code_ident(name), gpio));
+        code.push_str(&format!(
+            "const int PIN_{} = {};\n",
+            sanitize_code_ident(name),
+            gpio
+        ));
     }
     code.push_str("\nvoid setup() {\n  Serial.begin(115200);\n");
     if has_oled {
         code.push_str(&format!("  Wire.begin({}, {});\n", i2c_sda, i2c_scl));
         code.push_str("  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {\n");
-        code.push_str("    Serial.println(\"OLED init failed\");\n    while (true) delay(100);\n  }\n");
+        code.push_str(
+            "    Serial.println(\"OLED init failed\");\n    while (true) delay(100);\n  }\n",
+        );
         code.push_str("  display.clearDisplay();\n  display.setTextSize(1);\n  display.setTextColor(SSD1306_WHITE);\n  display.setCursor(0, 0);\n  display.println(\"Cluster ready\");\n  display.display();\n");
     }
     for (name, _) in &gpio_pins {
-        code.push_str(&format!("  pinMode(PIN_{}, OUTPUT);\n", sanitize_code_ident(name)));
+        code.push_str(&format!(
+            "  pinMode(PIN_{}, OUTPUT);\n",
+            sanitize_code_ident(name)
+        ));
     }
     code.push_str("}\n\nvoid loop() {\n");
     if gpio_pins.is_empty() {
