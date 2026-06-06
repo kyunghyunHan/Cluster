@@ -13,6 +13,7 @@ use crate::{
     Component, ComponentKind, Wire,
     CircuitNodes, UnionFind,
     component_pin_defs, parse_metric_value, PinRole,
+    point_touches_wire_segment, wire_contact_points,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -347,6 +348,19 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
             nm.uf.ensure(ia);
             nm.uf.ensure(ib);
             nm.join(ia, ib);
+        }
+    }
+    for contact in wire_contact_points(components, wires) {
+        let contact_node = nm.reg(contact);
+        for wire in wires {
+            for segment in wire.points.windows(2) {
+                if point_touches_wire_segment(contact, segment[0], segment[1]) {
+                    let a = nm.reg(segment[0]);
+                    let b = nm.reg(segment[1]);
+                    nm.join(contact_node, a);
+                    nm.join(contact_node, b);
+                }
+            }
         }
     }
 
