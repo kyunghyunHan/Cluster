@@ -2063,11 +2063,22 @@ impl eframe::App for CircuitApp {
                                         if resp.clicked() {
                                             if let Some(id) = v.component_id {
                                                 self.selected = Some(Selection::Component(id));
+                                                self.highlighted_net_wires.clear();
+                                                self.hovered_net_wire = None;
                                                 // pan to component
                                                 if let Some(comp) = self.components.iter().find(|c| c.id == id) {
                                                     let canvas_center = self.canvas_rect.center();
                                                     self.pan = canvas_center.to_vec2()
                                                         - comp.pos.to_vec2() * self.zoom;
+                                                }
+                                            } else if let Some(id) = v.wire_id {
+                                                self.selected = Some(Selection::Wire(id));
+                                                self.hovered_net_wire = Some(id);
+                                                self.highlighted_net_wires = self.same_net_wires(id);
+                                                if let Some(wire) = self.wires.iter().find(|w| w.id == id) {
+                                                    let canvas_center = self.canvas_rect.center();
+                                                    self.pan = canvas_center.to_vec2()
+                                                        - wire_midpoint(wire).to_vec2() * self.zoom;
                                                 }
                                             }
                                         }
@@ -3867,6 +3878,12 @@ fn wire_length(wire: &Wire) -> f32 {
         .sum()
 }
 
+fn wire_midpoint(wire: &Wire) -> Pos2 {
+    midpoint_of_polyline(&wire.points)
+        .or_else(|| wire.points.first().copied())
+        .unwrap_or(Pos2::ZERO)
+}
+
 #[derive(Default, Clone)]
 struct Simulation {
     closed: bool,
@@ -4925,6 +4942,7 @@ enum ErcSeverity { Error, Warning, Info }
 struct ErcViolation {
     severity: ErcSeverity,
     component_id: Option<u64>,
+    wire_id: Option<u64>,
     message: String,
 }
 
@@ -4951,6 +4969,7 @@ fn run_erc(components: &[Component], wires: &[Wire], simulation: &Simulation) ->
                 v.push(ErcViolation {
                     severity: sev,
                     component_id: Some(comp.id),
+                    wire_id: None,
                     message: format!("{}: pin \"{}\" unconnected", comp.label, pin.label),
                 });
             }
@@ -4966,6 +4985,7 @@ fn run_erc(components: &[Component], wires: &[Wire], simulation: &Simulation) ->
         v.push(ErcViolation {
             severity: ErcSeverity::Error,
             component_id: None,
+            wire_id: None,
             message: "No ground (GND) reference in schematic.".to_string(),
         });
     }
@@ -4978,17 +4998,31 @@ fn run_erc(components: &[Component], wires: &[Wire], simulation: &Simulation) ->
         v.push(ErcViolation {
             severity: ErcSeverity::Warning,
             component_id: None,
+            wire_id: None,
             message: "No voltage or current source in schematic.".to_string(),
         });
     }
 
-    // 4. Short circuit
-    if simulation.shorted {
+    // 4. Net-level power conflicts and short circuit
+    let net_report = analyze_wire_nets_for_erc(components, wires);
+    for conflict in &net_report.power_conflicts {
         v.push(ErcViolation {
             severity: ErcSeverity::Error,
             component_id: None,
-            message: "Short circuit detected: source + reaches GND without a load.".to_string(),
+            wire_id: conflict.wire_id,
+            message: conflict.message.clone(),
         });
+    }
+    if simulation.shorted {
+        let already_reported = !net_report.power_conflicts.is_empty();
+        if !already_reported {
+            v.push(ErcViolation {
+                severity: ErcSeverity::Error,
+                component_id: None,
+                wire_id: net_report.first_short_wire,
+                message: "Short circuit detected: source + reaches GND without a load.".to_string(),
+            });
+        }
     }
 
     // 5. Component polarity warnings from simulation
@@ -4997,6 +5031,7 @@ fn run_erc(components: &[Component], wires: &[Wire], simulation: &Simulation) ->
             v.push(ErcViolation {
                 severity: ErcSeverity::Error,
                 component_id: Some(*id),
+                wire_id: None,
                 message: format!("{}: {}", comp.label, warn),
             });
         }
@@ -5010,6 +5045,7 @@ fn run_erc(components: &[Component], wires: &[Wire], simulation: &Simulation) ->
                     v.push(ErcViolation {
                         severity: ErcSeverity::Warning,
                         component_id: Some(comp.id),
+                        wire_id: None,
                         message: format!("{}: zero or negative resistance value \"{}\"", comp.label, comp.value),
                     });
                 }
@@ -5017,6 +5053,7 @@ fn run_erc(components: &[Component], wires: &[Wire], simulation: &Simulation) ->
                 v.push(ErcViolation {
                     severity: ErcSeverity::Warning,
                     component_id: Some(comp.id),
+                    wire_id: None,
                     message: format!("{}: cannot parse resistance value \"{}\"", comp.label, comp.value),
                 });
             }
@@ -5033,12 +5070,143 @@ fn run_erc(components: &[Component], wires: &[Wire], simulation: &Simulation) ->
             v.push(ErcViolation {
                 severity: ErcSeverity::Warning,
                 component_id: Some(ids[0]),
+                wire_id: None,
                 message: format!("Duplicate label \"{label}\" on {} components.", ids.len()),
             });
         }
     }
 
+    // 8. Broken wires
+    for wire in wires {
+        if wire.points.len() < 2 || wire_length(wire) <= 0.5 {
+            v.push(ErcViolation {
+                severity: ErcSeverity::Warning,
+                component_id: None,
+                wire_id: Some(wire.id),
+                message: format!("Wire {} has no usable length.", wire.id),
+            });
+        }
+    }
+
     v
+}
+
+#[derive(Default)]
+struct ErcNetReport {
+    first_short_wire: Option<u64>,
+    power_conflicts: Vec<ErcNetConflict>,
+}
+
+struct ErcNetConflict {
+    wire_id: Option<u64>,
+    message: String,
+}
+
+fn analyze_wire_nets_for_erc(components: &[Component], wires: &[Wire]) -> ErcNetReport {
+    let mut nodes = CircuitNodes::default();
+    let mut graph: Vec<HashSet<usize>> = Vec::new();
+    let mut wire_nodes: HashMap<u64, Vec<usize>> = HashMap::new();
+
+    for wire in wires {
+        let mut used_nodes = Vec::new();
+        for point in &wire.points {
+            used_nodes.push(nodes.node_for(*point));
+        }
+        for segment in wire.points.windows(2) {
+            let a = nodes.node_for(segment[0]);
+            let b = nodes.node_for(segment[1]);
+            connect(&mut graph, a, b);
+            used_nodes.push(a);
+            used_nodes.push(b);
+        }
+        used_nodes.sort_unstable();
+        used_nodes.dedup();
+        wire_nodes.insert(wire.id, used_nodes);
+    }
+
+    let mut positive_nodes = Vec::new();
+    let mut ground_nodes = Vec::new();
+    for component in components {
+        for pin in component_pin_defs(component) {
+            let node = nodes.node_for(pin.pos);
+            match pin.role {
+                PinRole::Positive => positive_nodes.push((node, component.label.clone(), pin.label)),
+                PinRole::Ground => ground_nodes.push((node, component.label.clone(), pin.label)),
+                _ => {}
+            }
+        }
+        if component.kind == ComponentKind::Ground {
+            for pin in component_pin_defs(component) {
+                let node = nodes.node_for(pin.pos);
+                ground_nodes.push((node, component.label.clone(), pin.label));
+            }
+        }
+    }
+
+    let positive_reach: Vec<HashSet<usize>> = positive_nodes
+        .iter()
+        .map(|(node, _, _)| reachable_nodes(&graph, &[*node]))
+        .collect();
+    let ground_reach: Vec<HashSet<usize>> = ground_nodes
+        .iter()
+        .map(|(node, _, _)| reachable_nodes(&graph, &[*node]))
+        .collect();
+
+    let mut report = ErcNetReport::default();
+    let mut seen_conflicts = HashSet::new();
+    for (pos_idx, pos_seen) in positive_reach.iter().enumerate() {
+        for (gnd_idx, gnd_seen) in ground_reach.iter().enumerate() {
+            if !pos_seen.contains(&ground_nodes[gnd_idx].0)
+                && !gnd_seen.contains(&positive_nodes[pos_idx].0)
+            {
+                continue;
+            }
+            let wire_id = first_wire_touching_either_set(&wire_nodes, pos_seen, gnd_seen);
+            report.first_short_wire = report.first_short_wire.or(wire_id);
+            let key = (
+                positive_nodes[pos_idx].1.clone(),
+                positive_nodes[pos_idx].2,
+                ground_nodes[gnd_idx].1.clone(),
+                ground_nodes[gnd_idx].2,
+                wire_id,
+            );
+            if seen_conflicts.insert(key) {
+                report.power_conflicts.push(ErcNetConflict {
+                    wire_id,
+                    message: format!(
+                        "Power net conflict: {} {} is tied to {} {}.",
+                        positive_nodes[pos_idx].1,
+                        positive_nodes[pos_idx].2,
+                        ground_nodes[gnd_idx].1,
+                        ground_nodes[gnd_idx].2
+                    ),
+                });
+            }
+        }
+    }
+
+    report
+}
+
+fn first_wire_touching_either_set(
+    wire_nodes: &HashMap<u64, Vec<usize>>,
+    a: &HashSet<usize>,
+    b: &HashSet<usize>,
+) -> Option<u64> {
+    let mut ordered_wires = wire_nodes.iter().collect::<Vec<_>>();
+    ordered_wires.sort_by_key(|&(&id, _)| id);
+    ordered_wires
+        .iter()
+        .find(|(_, nodes)| {
+            nodes.iter().any(|node| a.contains(node)) && nodes.iter().any(|node| b.contains(node))
+        })
+        .map(|&(&id, _)| id)
+        .or_else(|| {
+            ordered_wires
+                .iter()
+                .find(|(_, nodes)| nodes.iter().any(|node| a.contains(node) || b.contains(node)))
+                .map(|&(&id, _)| id)
+        })
 }
 
 fn draw_component(
@@ -8761,6 +8929,33 @@ mod tests {
                 .is_some_and(|warning| warning.contains("Polarity warning")),
             "Reversed LED should report a polarity warning: {:?}",
             sim.component_warnings.get(&led)
+        );
+    }
+
+    #[test]
+    fn erc_short_circuit_points_to_problem_wire() {
+        let mut app = CircuitApp::new();
+        let battery = app.place_component(ComponentKind::Battery, Pos2::new(180.0, 300.0));
+        let ground = app.place_component(ComponentKind::Ground, Pos2::new(420.0, 300.0));
+
+        app.add_wire_between(battery, "+", ground, "GND");
+        app.add_wire_between(battery, "-", ground, "GND");
+        let wire_ids = app.wires.iter().map(|wire| wire.id).collect::<HashSet<_>>();
+
+        let mut sim = analyze_circuit(&app.components, &app.wires);
+        sim.erc = run_erc(&app.components, &app.wires, &sim);
+
+        assert!(sim.shorted);
+        assert!(
+            sim.erc.iter().any(|violation| {
+                violation.severity == ErcSeverity::Error
+                    && violation
+                        .wire_id
+                        .is_some_and(|wire_id| wire_ids.contains(&wire_id))
+                    && violation.message.contains("Power net conflict")
+            }),
+            "ERC should point to the wire tying source + to GND: {:?}",
+            sim.erc
         );
     }
 
