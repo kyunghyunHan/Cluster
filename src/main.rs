@@ -1,5 +1,7 @@
 mod engine;
+mod export;
 mod model;
+mod storage;
 mod ui;
 
 use eframe::egui;
@@ -15,6 +17,7 @@ use engine::validation::{
 use model::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use storage::save::write_with_backup;
 use ui::validation_panel::{ValidationPanelAction, render_validation_panel};
 
 const SAVE_PATH: &str = "cluster_circuit.json";
@@ -546,8 +549,8 @@ impl CircuitApp {
                 let a = wire.points[si];
                 let b = wire.points[si + 1];
                 if distance_to_segment(point, a, b) < 2.5
-                    && point.distance(a) > 3.0
-                    && point.distance(b) > 3.0
+                    && point.distance(a) > 5.0
+                    && point.distance(b) > 5.0
                 {
                     split_target = Some((wi, si));
                     break 'outer;
@@ -606,7 +609,7 @@ impl CircuitApp {
                 // if any endpoint of `other` lies on a segment of `wire` (T-junction)
                 let connected = wire_eps
                     .iter()
-                    .any(|&ep| other_eps.iter().any(|&oep| ep.distance(oep) < 4.0))
+                    .any(|&ep| other_eps.iter().any(|&oep| ep.distance(oep) < 8.0))
                     || other_eps.iter().any(|&oep| {
                         wire.points
                             .windows(2)
@@ -1157,9 +1160,8 @@ impl CircuitApp {
 
     fn write_circuit_json(&self, path: &str) -> Result<(), String> {
         let saved = SavedCircuit::from_app(self);
-        serde_json::to_string_pretty(&saved)
-            .map_err(|err| err.to_string())
-            .and_then(|json| fs::write(path, json).map_err(|err| err.to_string()))
+        let json = serde_json::to_string_pretty(&saved).map_err(|e| e.to_string())?;
+        write_with_backup(path, &json)
     }
 
     fn backup_dirty_work(&mut self, reason: &str) {
@@ -2356,8 +2358,33 @@ impl eframe::App for CircuitApp {
                         world_pos = snapped;
                         self.snap_target = Some(snapped);
                     }
-                    // Connection-point indicator (green ring + dot)
-                    if is_connection_point(world_pos, &self.components, &self.wires) {
+                    // Check if we're snapping to a specific pin
+                    let snap_pin = nearest_pin_at(world_pos, &self.components, 10.0);
+                    if let Some((pin_label, comp_label)) = &snap_pin {
+                        // Bright highlighted pin snap indicator
+                        let sp = view.to_screen(world_pos);
+                        painter.circle_stroke(
+                            sp,
+                            view.scale_f(10.0),
+                            Stroke::new(2.5, Color32::from_rgb(50, 255, 120)),
+                        );
+                        painter.circle_filled(
+                            sp,
+                            view.scale_f(4.0),
+                            Color32::from_rgb(50, 255, 120),
+                        );
+                        // Pin label tooltip
+                        let label_text = format!("{comp_label}.{pin_label}");
+                        let label_pos = sp + egui::Vec2::new(12.0, -10.0);
+                        painter.text(
+                            label_pos,
+                            Align2::LEFT_TOP,
+                            &label_text,
+                            egui::FontId::proportional(11.0),
+                            Color32::from_rgb(80, 255, 140),
+                        );
+                    } else if is_connection_point(world_pos, &self.components, &self.wires) {
+                        // Wire endpoint snap indicator
                         let sp = view.to_screen(world_pos);
                         painter.circle_stroke(
                             sp,
@@ -3224,7 +3251,7 @@ fn straighten_neighbor_segments(wire: &mut Wire, point_index: usize) {
 fn is_connection_point(pos: Pos2, components: &[Component], wires: &[Wire]) -> bool {
     for component in components {
         for pin in component_pin_defs(component) {
-            if pin.pos.distance(pos) < 3.0 {
+            if pin.pos.distance(pos) < 6.0 {
                 return true;
             }
         }
@@ -3232,13 +3259,13 @@ fn is_connection_point(pos: Pos2, components: &[Component], wires: &[Wire]) -> b
     for wire in wires {
         // Endpoints
         for &ep in wire.points.first().iter().chain(wire.points.last().iter()) {
-            if ep.distance(pos) < 3.0 {
+            if ep.distance(pos) < 6.0 {
                 return true;
             }
         }
         // Mid-segment: a point on a segment is also a valid connection target
         for seg in wire.points.windows(2) {
-            if distance_to_segment(pos, seg[0], seg[1]) < 2.5 {
+            if distance_to_segment(pos, seg[0], seg[1]) < 4.0 {
                 return true;
             }
         }
@@ -3246,11 +3273,27 @@ fn is_connection_point(pos: Pos2, components: &[Component], wires: &[Wire]) -> b
     false
 }
 
+/// Returns (pin_label, component_label) when pos is within `radius` of a pin.
+fn nearest_pin_at(pos: Pos2, components: &[Component], radius: f32) -> Option<(String, String)> {
+    let mut best_dist = radius;
+    let mut result = None;
+    for comp in components {
+        for pin in component_pin_defs(comp) {
+            let d = pin.pos.distance(pos);
+            if d < best_dist {
+                best_dist = d;
+                result = Some((pin.label.to_string(), comp.label.clone()));
+            }
+        }
+    }
+    result
+}
+
 fn snap_to_nearest_connection(pos: Pos2, components: &[Component], wires: &[Wire]) -> Option<Pos2> {
     let mut best: Option<Pos2> = None;
     // Pins get priority (smaller threshold)
-    let mut best_dist_pin = 20.0_f32;
-    let mut best_dist_wire = 14.0_f32;
+    let mut best_dist_pin = 30.0_f32;
+    let mut best_dist_wire = 20.0_f32;
 
     // Component pins — highest priority
     for component in components {
@@ -3667,7 +3710,7 @@ fn moved_pin_for_point(point: Pos2, old_pins: &[Pos2], new_pins: &[Pos2]) -> Opt
     old_pins
         .iter()
         .zip(new_pins)
-        .find(|(old_pin, _)| point.distance(**old_pin) <= 12.0)
+        .find(|(old_pin, _)| point.distance(**old_pin) <= 20.0)
         .map(|(_, &new_pin)| new_pin)
 }
 
@@ -4236,7 +4279,7 @@ impl CircuitNodes {
     fn find_existing(&self, pos: Pos2) -> Option<usize> {
         self.positions
             .iter()
-            .position(|existing| existing.distance(pos) <= 4.0)
+            .position(|existing| existing.distance(pos) <= 8.0)
     }
 }
 
@@ -4282,7 +4325,7 @@ fn wire_contact_points(components: &[Component], wires: &[Wire]) -> Vec<Pos2> {
 }
 
 pub(crate) fn point_touches_wire_segment(point: Pos2, a: Pos2, b: Pos2) -> bool {
-    distance_to_segment(point, a, b) <= 3.0
+    distance_to_segment(point, a, b) <= 5.0
 }
 
 fn reachable_nodes(graph: &[HashSet<usize>], starts: &[usize]) -> HashSet<usize> {
@@ -4766,57 +4809,58 @@ fn component_bounds(component: &Component) -> Rect {
 }
 
 fn component_size(component: &Component) -> Vec2 {
+    // All widths are multiples of 80 (half = 40) so left/right pins land on the 20 px grid
+    // when the component centre is placed on the grid.
     let (w, h) = match component.kind {
         ComponentKind::Resistor
         | ComponentKind::Inductor
         | ComponentKind::Diode
         | ComponentKind::ZenerDiode
-        | ComponentKind::Fuse => (72.0, 28.0),
-        ComponentKind::Potentiometer => (72.0, 40.0),
+        | ComponentKind::Fuse
+        | ComponentKind::Thermistor
+        | ComponentKind::Varistor
+        | ComponentKind::SchottkyDiode
+        | ComponentKind::TvsDiode => (80.0, 28.0),
+        ComponentKind::Potentiometer => (80.0, 44.0),
         ComponentKind::Capacitor
+        | ComponentKind::Crystal => (80.0, 32.0),
+        ComponentKind::Battery
         | ComponentKind::Switch
         | ComponentKind::PushButton
-        | ComponentKind::SlideSwitch
-        | ComponentKind::Battery => (64.0, 32.0),
+        | ComponentKind::SlideSwitch => (80.0, 40.0),
         ComponentKind::Ground => (40.0, 40.0),
         ComponentKind::VSource
         | ComponentKind::ISource
         | ComponentKind::Lamp
-        | ComponentKind::Led => (56.0, 56.0),
-        ComponentKind::NpnTransistor | ComponentKind::PnpTransistor => (64.0, 64.0),
-        ComponentKind::Nmosfet | ComponentKind::Pmosfet => (64.0, 64.0),
-        ComponentKind::VoltageReg => (72.0, 48.0),
-        ComponentKind::LogicNot => (56.0, 40.0),
+        | ComponentKind::Led => (80.0, 60.0),
+        ComponentKind::NpnTransistor | ComponentKind::PnpTransistor => (80.0, 68.0),
+        ComponentKind::Nmosfet | ComponentKind::Pmosfet => (80.0, 68.0),
+        ComponentKind::VoltageReg | ComponentKind::VoltageRef => (80.0, 52.0),
+        ComponentKind::LogicNot => (80.0, 44.0),
         ComponentKind::LogicAnd
         | ComponentKind::LogicOr
         | ComponentKind::LogicNand
         | ComponentKind::LogicNor
-        | ComponentKind::LogicXor => (64.0, 48.0),
-        ComponentKind::OpAmp => (82.0, 68.0),
+        | ComponentKind::LogicXor => (80.0, 52.0),
+        ComponentKind::OpAmp => (80.0, 68.0),
         ComponentKind::Esp32 | ComponentKind::Esp32S3 => (140.0, 160.0),
-        ComponentKind::Esp32C3 => (118.0, 138.0),
-        ComponentKind::ArduinoUno => (150.0, 190.0),
-        ComponentKind::RaspberryPiPico => (110.0, 180.0),
+        ComponentKind::Esp32C3 => (120.0, 140.0),
+        ComponentKind::ArduinoUno => (160.0, 200.0),
+        ComponentKind::RaspberryPiPico => (120.0, 180.0),
         ComponentKind::Breadboard => (280.0, 160.0),
-        ComponentKind::Relay => (92.0, 70.0),
+        ComponentKind::Relay => (80.0, 72.0),
         ComponentKind::DcMotor => (80.0, 64.0),
-        ComponentKind::Servo => (96.0, 72.0),
-        ComponentKind::Oled => (100.0, 120.0),
-        ComponentKind::Sensor => (96.0, 100.0),
-        ComponentKind::NetLabel => (72.0, 28.0),
-        ComponentKind::Timer555 => (96.0, 100.0),
-        ComponentKind::Crystal => (64.0, 32.0),
-        ComponentKind::Transformer => (88.0, 64.0),
-        ComponentKind::Display7Seg => (80.0, 96.0),
-        ComponentKind::Thermistor
-        | ComponentKind::Varistor
-        | ComponentKind::SchottkyDiode
-        | ComponentKind::TvsDiode => (72.0, 28.0),
-        ComponentKind::VoltageRef => (72.0, 48.0),
-        ComponentKind::MotorDriver => (110.0, 120.0),
-        ComponentKind::Phototransistor => (64.0, 64.0),
+        ComponentKind::Servo => (80.0, 72.0),
+        ComponentKind::Oled => (120.0, 120.0),
+        ComponentKind::Sensor => (120.0, 100.0),
+        ComponentKind::NetLabel => (80.0, 32.0),
+        ComponentKind::Timer555 => (80.0, 100.0),
+        ComponentKind::Transformer => (80.0, 64.0),
+        ComponentKind::Display7Seg => (80.0, 100.0),
+        ComponentKind::MotorDriver => (120.0, 120.0),
+        ComponentKind::Phototransistor => (80.0, 68.0),
         ComponentKind::Optocoupler => (80.0, 64.0),
-        ComponentKind::GenericIc => (96.0, 80.0),
+        ComponentKind::GenericIc => (80.0, 80.0),
     };
     Vec2::new(w, h)
 }

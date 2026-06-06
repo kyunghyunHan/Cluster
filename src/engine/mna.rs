@@ -997,3 +997,182 @@ pub fn voltage_color(v: f64, vmax: f64) -> egui::Color32 {
         )
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  DC solver tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::Pos2;
+
+    fn comp(id: u64, kind: ComponentKind, pos: Pos2, label: &str, value: &str) -> Component {
+        Component { id, kind, pos, rotation: 0, label: label.to_string(), value: value.to_string() }
+    }
+
+    // Helper: multi-point wire.
+    fn lseg(id: u64, points: Vec<Pos2>) -> Wire {
+        Wire { id, points }
+    }
+
+    // Build an L-shaped wire from point a to b via a corner at (b.x, a.y).
+    fn l_wire(id: u64, a: Pos2, b: Pos2) -> Wire {
+        let corner = Pos2::new(b.x, a.y);
+        Wire { id, points: vec![a, corner, b] }
+    }
+
+    // ── Single resistor across a battery ─────────────────────────────────
+    // Circuit: BAT(9V) +→ R(1kΩ) → GND
+    // Layout uses L-shaped wires to avoid collinear T-junction false positives.
+    // Expected: I ≈ 9 mA
+    #[test]
+    fn single_resistor_load() {
+        // Battery at (0, 0):  + at (32,0),  - at (-32,0)
+        // Resistor at (200, 0): A at (164,0), B at (236,0)
+        // Ground at (0, 120):  pin at (0, 100)
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
+        let r = comp(2, ComponentKind::Resistor, Pos2::new(200.0, 0.0), "R1", "1k");
+        let gnd = comp(3, ComponentKind::Ground, Pos2::new(0.0, 120.0), "GND1", "0V");
+
+        let bat_pins = component_pin_defs(&bat);
+        let r_pins = component_pin_defs(&r);
+        let gnd_pins = component_pin_defs(&gnd);
+
+        let bat_p = bat_pins.iter().find(|p| p.role == PinRole::Positive).unwrap().pos; // (32, 0)
+        let bat_n = bat_pins.iter().find(|p| p.role == PinRole::Ground).unwrap().pos;   // (-32, 0)
+        let r_a = r_pins.iter().find(|p| p.label == "A").unwrap().pos;                  // (164, 0)
+        let r_b = r_pins.iter().find(|p| p.label == "B").unwrap().pos;                  // (236, 0)
+        let gnd_p = gnd_pins[0].pos;                                                      // (0, 100)
+
+        // Use L-shaped wires so no endpoint lies collinear on another segment.
+        // W10: bat+ (32,0) → up to (32,-40) → right to (164,-40) → down to r_a (164,0)
+        // W11: r_b (236,0) → down to (236,60) → left to (-32,60) → up to bat- (-32,0)
+        // W12: bat- (-32,0) → diagonal to gnd (0,100)   [not collinear with W10/W11]
+        let wires = vec![
+            lseg(10, vec![bat_p, Pos2::new(bat_p.x, -40.0), Pos2::new(r_a.x, -40.0), r_a]),
+            lseg(11, vec![r_b,  Pos2::new(r_b.x,  60.0), Pos2::new(bat_n.x, 60.0), bat_n]),
+            lseg(12, vec![bat_n, gnd_p]),
+        ];
+
+        let result = solve_dc(&[bat, r, gnd], &wires);
+        assert!(result.is_some(), "Should converge for simple resistive circuit");
+        let dc = result.unwrap();
+
+        // Battery branch current ≈ 9 mA (9V / 1kΩ).
+        let bat_i = dc.branch_current.get(&1).copied().unwrap_or(0.0);
+        assert!(
+            (bat_i.abs() - 0.009).abs() < 0.001,
+            "Expected ~9 mA, got {bat_i:.4} A"
+        );
+    }
+
+    // ── No GND → solver returns None ─────────────────────────────────────
+
+    #[test]
+    fn no_gnd_returns_none() {
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
+        let r = comp(2, ComponentKind::Resistor, Pos2::new(100.0, 0.0), "R1", "1k");
+        // No ground and no wires → battery negative isn't marked GND either.
+        let result = solve_dc(&[bat, r], &[]);
+        assert!(result.is_none(), "Circuit without GND must not converge");
+    }
+
+    // ── Open switch → no current path ────────────────────────────────────
+
+    #[test]
+    fn open_switch_blocks_current() {
+        // If solve_dc returns Some, the resistor current must be ≈ 0.
+        // If it returns None (singular), that's also acceptable.
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
+        let sw = comp(2, ComponentKind::Switch, Pos2::new(0.0, -120.0), "SW1", "open");
+        let r = comp(3, ComponentKind::Resistor, Pos2::new(200.0, -120.0), "R1", "1k");
+        let gnd = comp(4, ComponentKind::Ground, Pos2::new(0.0, 120.0), "GND1", "0V");
+
+        let bat_pins = component_pin_defs(&bat);
+        let sw_pins = component_pin_defs(&sw);
+        let r_pins = component_pin_defs(&r);
+        let gnd_pins = component_pin_defs(&gnd);
+
+        let bat_p = bat_pins.iter().find(|p| p.role == PinRole::Positive).unwrap().pos;
+        let bat_n = bat_pins.iter().find(|p| p.role == PinRole::Ground).unwrap().pos;
+
+        let wires = vec![
+            l_wire(10, bat_p, sw_pins[0].pos),
+            l_wire(11, sw_pins[1].pos, r_pins[1].pos),
+            l_wire(12, r_pins[0].pos, bat_n),
+            lseg(13, vec![bat_n, gnd_pins[0].pos]),
+        ];
+
+        let result = solve_dc(&[bat, sw, r, gnd], &wires);
+        if let Some(dc) = result {
+            let r_i = dc.branch_current.get(&3).copied().unwrap_or(0.0);
+            assert!(r_i.abs() < 1e-6, "Open switch should block current, got {r_i}");
+        }
+        // None (singular matrix) is also acceptable for an open circuit.
+    }
+
+    // ── Voltage divider ──────────────────────────────────────────────────
+    // 9V battery, R1=2kΩ, R2=1kΩ in series → V(mid) ≈ 3 V
+
+    #[test]
+    fn voltage_divider_mid_point() {
+        // Positions chosen so no wire segment is collinear with another wire's endpoints.
+        // Battery at (0, 0):   + at (32,0),   - at (-32,0)
+        // R1 at (100, -80):    A at (64,-80),  B at (136,-80)  [2kΩ]
+        // R2 at (220, -80):    A at (184,-80), B at (256,-80)  [1kΩ]
+        // Ground at (0, 120):  pin at (0,100)
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
+        let r1  = comp(2, ComponentKind::Resistor, Pos2::new(100.0, -80.0), "R1", "2k");
+        let r2  = comp(3, ComponentKind::Resistor, Pos2::new(220.0, -80.0), "R2", "1k");
+        let gnd = comp(4, ComponentKind::Ground, Pos2::new(0.0, 120.0), "GND1", "0V");
+
+        let bat_pins = component_pin_defs(&bat);
+        let r1_pins  = component_pin_defs(&r1);
+        let r2_pins  = component_pin_defs(&r2);
+        let gnd_pins = component_pin_defs(&gnd);
+
+        let bat_p = bat_pins.iter().find(|p| p.role == PinRole::Positive).unwrap().pos; // (32,0)
+        let bat_n = bat_pins.iter().find(|p| p.role == PinRole::Ground).unwrap().pos;   // (-32,0)
+        let r1_a  = r1_pins.iter().find(|p| p.label == "A").unwrap().pos;               // (64,-80)
+        let r1_b  = r1_pins.iter().find(|p| p.label == "B").unwrap().pos;               // (136,-80)
+        let r2_a  = r2_pins.iter().find(|p| p.label == "A").unwrap().pos;               // (184,-80)
+        let r2_b  = r2_pins.iter().find(|p| p.label == "B").unwrap().pos;               // (256,-80)
+        let gnd_p = gnd_pins[0].pos;                                                      // (0,100)
+
+        let wires = vec![
+            // bat+ → r1_a via L-shape going above y=0
+            lseg(10, vec![bat_p, Pos2::new(bat_p.x, -120.0), Pos2::new(r1_a.x, -120.0), r1_a]),
+            // r1_b → r2_a straight (same y, no other contacts at y=-80 in this range)
+            lseg(11, vec![r1_b, r2_a]),
+            // r2_b → bat_n via L-shape going below
+            lseg(12, vec![r2_b, Pos2::new(r2_b.x, 60.0), Pos2::new(bat_n.x, 60.0), bat_n]),
+            // bat- → GND
+            lseg(13, vec![bat_n, gnd_p]),
+        ];
+
+        let result = solve_dc(&[bat, r1, r2, gnd], &wires);
+        assert!(result.is_some(), "Voltage divider should converge");
+        let dc = result.unwrap();
+
+        // V(R2) = 9V * R2/(R1+R2) = 9 * 1/3 = 3V
+        let r2_v = dc.component_voltage.get(&3).copied().unwrap_or(-99.0);
+        assert!(
+            (r2_v - 3.0).abs() < 0.2,
+            "Expected R2 voltage ≈ 3V, got {r2_v:.3}V"
+        );
+    }
+
+    // ── SI value parser ───────────────────────────────────────────────────
+
+    #[test]
+    fn parse_si_value_handles_common_cases() {
+        assert!((parse_si_value("10k").unwrap() - 10_000.0).abs() < 0.1);
+        assert!((parse_si_value("100nF").unwrap() - 100e-9).abs() < 1e-12);
+        assert!((parse_si_value("3.3V").unwrap() - 3.3).abs() < 0.001);
+        assert!((parse_si_value("1Meg").unwrap() - 1_000_000.0).abs() < 1.0);
+        assert!((parse_si_value("10mA").unwrap() - 0.01).abs() < 0.0001);
+        assert!(parse_si_value("").is_none());
+        assert!(parse_si_value("abc").is_none());
+    }
+}
