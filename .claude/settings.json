@@ -4,7 +4,12 @@
       "Bash(cargo check *)",
       "Bash(grep -n \"Sensor,\\\\$\\\\|=> \\\\\"I2C sensor\\\\\"\\\\|sensor: usize,\" /Users/hangyeonghyeon/Desktop/Rust/gui/Cluster/src/main.rs)",
       "Bash(awk '/pub\\\\\\(crate\\\\\\) fn component_pin_defs/,/^fn [a-z]/' /Users/hangyeonghyeon/Desktop/Rust/gui/Cluster/src/main.rs)",
-      "Bash(awk 'NR>=5884 && NR<=5920' /Users/hangyeonghyeon/Desktop/Rust/gui/Cluster/src/main.rs)"
+      "Bash(awk 'NR>=5884 && NR<=5920' /Users/hangyeonghyeon/Desktop/Rust/gui/Cluster/src/main.rs)",
+      "Bash(sed -i '' 's/self\\\\.status = \"Loaded LED current-limiting demo\\\\.\".to_string\\(\\);/self.status = \"Loaded LED current-limiting demo.\".to_string\\(\\);\\\\n        self.pending_fit = true;/' /Users/hangyeonghyeon/Desktop/Rust/gui/Cluster/src/main.rs)",
+      "Bash(sed -i '' 's/self\\\\.status = \"Loaded ESP32 + OLED I2C demo\\\\.\".to_string\\(\\);/self.status = \"Loaded ESP32 + OLED I2C demo.\".to_string\\(\\);\\\\n        self.pending_fit = true;/' /Users/hangyeonghyeon/Desktop/Rust/gui/Cluster/src/main.rs)",
+      "Bash(sed -i '' 's/self\\\\.status = \"Loaded relay-controlled motor demo\\\\.\".to_string\\(\\);/self.status = \"Loaded relay-controlled motor demo.\".to_string\\(\\);\\\\n        self.pending_fit = true;/' /Users/hangyeonghyeon/Desktop/Rust/gui/Cluster/src/main.rs)",
+      "Bash(sed -i '' 's/self\\\\.status = \"Loaded NPN transistor switch demo\\\\.\".to_string\\(\\);/self.status = \"Loaded NPN transistor switch demo.\".to_string\\(\\);\\\\n        self.pending_fit = true;/' /Users/hangyeonghyeon/Desktop/Rust/gui/Cluster/src/main.rs)",
+      "Bash(sed -i '' 's/self\\\\.status = \"Loaded voltage divider demo\\\\. Middle node = Vout\\\\.\".to_string\\(\\);/self.status = \"Loaded voltage divider demo. Middle node = Vout.\".to_string\\(\\);\\\\n        self.pending_fit = true;/' /Users/hangyeonghyeon/Desktop/Rust/gui/Cluster/src/main.rs)"
     ]
   }
 }

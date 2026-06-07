@@ -105,6 +105,16 @@ struct CircuitApp {
     find_query: String,
     find_results: Vec<u64>, // component IDs matching query
     find_result_idx: usize,
+    // ── Deferred canvas fit (set after demo load, applied once canvas rect is known) ──
+    pending_fit: bool,
+    // ── PushButton hold state: component ID currently held pressed ───────
+    held_button_id: Option<u64>,
+    // ── DC simulation overlay on canvas ─────────────────────────────────
+    show_dc_overlay: bool,
+    // ── Inline value editing: (component_id, edited_text) ───────────────
+    inline_edit: Option<(u64, String)>,
+    // ── Keyboard shortcuts help dialog ──────────────────────────────────
+    show_help: bool,
 }
 
 impl CircuitApp {
@@ -158,6 +168,11 @@ impl CircuitApp {
             find_query: String::new(),
             find_results: Vec::new(),
             find_result_idx: 0,
+            pending_fit: false,
+            held_button_id: None,
+            show_dc_overlay: true,
+            inline_edit: None,
+            show_help: false,
         }
     }
 
@@ -636,11 +651,15 @@ impl CircuitApp {
         self.components.clear();
         self.wires.clear();
         self.selected = None;
+        self.multi_selected.clear();
         self.drag = None;
         self.draft_wire.clear();
         self.counters = Counters::default();
         self.next_id = 1;
         self.tool = Tool::Select;
+        self.held_button_id = None;
+        self.zoom = 1.0;
+        self.pan = Vec2::ZERO;
         self.mark_dirty();
     }
 
@@ -695,6 +714,7 @@ impl CircuitApp {
         self.add_wire_between(led, "B", ground, "GND");
         self.add_wire_between(battery, "-", ground, "GND");
         self.status = "Loaded LED current-limiting demo.".to_string();
+        self.pending_fit = true;
     }
 
     fn load_esp32_oled_demo(&mut self) {
@@ -710,6 +730,7 @@ impl CircuitApp {
         self.add_wire_between(esp32, "GPIO21", oled, "SDA");
         self.add_wire_between(esp32, "GPIO22", oled, "SCL");
         self.status = "Loaded ESP32 + OLED I2C demo.".to_string();
+        self.pending_fit = true;
     }
 
     fn load_motor_relay_demo(&mut self) {
@@ -728,6 +749,7 @@ impl CircuitApp {
         self.add_wire_between(motor, "-", relay, "COM");
         self.add_wire_between(relay, "NO", ground, "GND");
         self.status = "Loaded relay-controlled motor demo.".to_string();
+        self.pending_fit = true;
     }
 
     fn load_transistor_switch_demo(&mut self) {
@@ -747,6 +769,7 @@ impl CircuitApp {
         self.add_wire_between(rb, "B", npn, "B");
         self.add_wire_between(battery, "-", ground, "GND");
         self.status = "Loaded NPN transistor switch demo.".to_string();
+        self.pending_fit = true;
     }
 
     fn load_voltage_divider_demo(&mut self) {
@@ -761,6 +784,7 @@ impl CircuitApp {
         self.add_wire_between(r2, "B", ground, "GND");
         self.add_wire_between(battery, "-", ground, "GND");
         self.status = "Loaded voltage divider demo. Middle node = Vout.".to_string();
+        self.pending_fit = true;
     }
 
     fn load_logic_demo(&mut self) {
@@ -779,6 +803,7 @@ impl CircuitApp {
         self.add_wire_between(led, "B", ground, "GND");
         self.add_wire_between(vsrc, "-", ground, "GND");
         self.status = "Loaded double-inverter LED demo.".to_string();
+        self.pending_fit = true;
     }
 
     /// ESP32 + Push Button → toggles LED. Click the button in Simulate mode to toggle.
@@ -804,8 +829,9 @@ impl CircuitApp {
         self.add_wire_between(led,   "B",      gnd,   "GND");
 
         self.simulate = true;
+        self.pending_fit = true;
         self.status =
-            "Button-Toggle-LED demo loaded. Click the button ▶ to toggle the LED!".to_string();
+            "Button-Toggle-LED demo loaded. Hold the button to close the circuit!".to_string();
     }
 
     fn push_wire_point(&mut self, pos: Pos2) {
@@ -1159,6 +1185,11 @@ impl CircuitApp {
     }
 
     fn zoom_to_fit(&mut self) {
+        self.zoom_to_fit_silent();
+        self.status = "Zoomed to fit.".to_string();
+    }
+
+    fn zoom_to_fit_silent(&mut self) {
         let Some(bounds) = circuit_bounds(&self.components, &self.wires) else {
             return;
         };
@@ -1174,7 +1205,6 @@ impl CircuitApp {
         let world_center = bounds.center();
         let canvas_center = canvas.center();
         self.pan = (canvas_center - origin) - (world_center - origin) * self.zoom;
-        self.status = "Zoomed to fit.".to_string();
     }
 
     fn load_circuit_json(&mut self) {
@@ -1233,6 +1263,8 @@ impl CircuitApp {
                 } else {
                     format!("Loaded {path} with {} repair(s).", load_notes.len())
                 };
+                // Auto-center after load
+                self.pending_fit = true;
             }
             Err(err) => {
                 self.status = format!("Load {path} failed: {err}");
@@ -1537,6 +1569,21 @@ fn repair_saved_page(
 impl eframe::App for CircuitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_app_style(ctx);
+
+        // PushButton hold: release when primary mouse button is lifted
+        if let Some(btn_id) = self.held_button_id {
+            let still_down = ctx.input(|i| i.pointer.primary_down());
+            if !still_down {
+                if let Some(comp) = self.components.iter_mut().find(|c| c.id == btn_id) {
+                    comp.value = "open".to_string();
+                    self.status = format!("{} released — circuit open.", comp.label);
+                }
+                self.held_button_id = None;
+                self.invalidate_analysis_cache();
+                ctx.request_repaint();
+            }
+        }
+
         let simulation = self.current_simulation();
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
@@ -1622,10 +1669,11 @@ impl eframe::App for CircuitApp {
                 ui.separator();
                 toolbar_menu(ui, "View", |ui| {
                     ui.checkbox(&mut self.snap, "Snap to grid");
-                    ui.checkbox(&mut self.orthogonal_wires, "90 degree wires");
+                    ui.checkbox(&mut self.orthogonal_wires, "90° wires");
                     ui.checkbox(&mut self.show_pins, "Show pins");
-                    ui.checkbox(&mut self.simulate, "Live check");
-                    ui.checkbox(&mut self.show_voltage_labels, "Voltage labels (DC)");
+                    ui.checkbox(&mut self.simulate, "Live simulation");
+                    ui.checkbox(&mut self.show_voltage_labels, "Voltage labels on wires");
+                    ui.checkbox(&mut self.show_dc_overlay, "V/I badges on components");
                     ui.add_sized(
                         Vec2::new(180.0, 18.0),
                         egui::Slider::new(&mut self.grid, 10.0..=40.0).text("Grid"),
@@ -2217,7 +2265,23 @@ impl eframe::App for CircuitApp {
             let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
             let rect = response.rect;
             self.canvas_rect = rect;
-            let flow_phase = ctx.input(|i| i.time) as f32 * 90.0;
+
+            // Deferred zoom-to-fit: apply now that canvas rect is real
+            if self.pending_fit && rect.width() > 1.0 && rect.is_finite() {
+                self.zoom_to_fit_silent();
+                self.pending_fit = false;
+                // Schedule one more repaint so the new view renders
+                ctx.request_repaint();
+            }
+
+            // Flow speed: faster when more current (DC-aware), fallback 110 px/s
+            let flow_speed: f32 = simulation.dc.as_ref()
+                .map(|dc| {
+                    let max_i = dc.branch_current.values().map(|v| v.abs()).fold(0.0_f64, f64::max);
+                    (max_i as f32 * 8000.0).clamp(60.0, 220.0)
+                })
+                .unwrap_or(110.0);
+            let flow_phase = ctx.input(|i| i.time) as f32 * flow_speed;
             let show_flow = self.simulate && simulation.closed && !simulation.shorted;
             if show_flow {
                 ctx.request_repaint();
@@ -2286,6 +2350,9 @@ impl eframe::App for CircuitApp {
                 draw_empty_canvas_hint(&painter, rect);
             }
 
+            let dc_imax = simulation.dc.as_ref().map(|dc| {
+                dc.branch_current.values().map(|v| v.abs()).fold(0.0_f64, f64::max)
+            }).unwrap_or(1.0);
             for wire in &self.wires {
                 let energized = simulation.energized_wires.contains(&wire.id);
                 let net_highlighted = self.highlighted_net_wires.contains(&wire.id)
@@ -2305,6 +2372,7 @@ impl eframe::App for CircuitApp {
                     net_highlighted,
                     dc_v,
                     dc_vmax,
+                    dc_imax,
                     self.show_voltage_labels && simulation.dc.is_some(),
                     view,
                 );
@@ -2315,14 +2383,20 @@ impl eframe::App for CircuitApp {
             let connected_pins = self.current_connected_pins();
 
             for component in &self.components {
+                let cid = component.id;
+                let dc_v = simulation.dc.as_ref().and_then(|dc| dc.component_voltage.get(&cid).copied());
+                let dc_i = simulation.dc.as_ref().and_then(|dc| dc.branch_current.get(&cid).copied());
                 draw_component(
                     &painter,
                     component,
-                    self.selected == Some(Selection::Component(component.id)),
+                    self.selected == Some(Selection::Component(cid)),
                     self.show_pins,
-                    simulation.energized_components.contains(&component.id),
+                    simulation.energized_components.contains(&cid),
                     &connected_pins,
                     view,
+                    dc_v,
+                    dc_i,
+                    self.show_dc_overlay && self.simulate,
                 );
             }
 
@@ -2366,6 +2440,21 @@ impl eframe::App for CircuitApp {
             }
 
             draw_junctions(&painter, &self.wires, view);
+
+            // ── Node voltage circles at wire junctions ─────────────────
+            if self.show_dc_overlay && self.simulate {
+                if let Some(dc) = &simulation.dc {
+                    draw_node_voltage_indicators(
+                        &painter, &self.wires, dc, view, dc.vmax,
+                    );
+                }
+            }
+
+            // ── Simulation summary overlay (top-right of canvas) ───────
+            if self.simulate && !self.components.is_empty() {
+                draw_sim_summary(&painter, rect, &simulation);
+            }
+
             draw_title_block(&painter, rect, &self.components, &self.wires, &simulation);
 
             // ── Hover / cursor helpers ───────────────────────────────────
@@ -2479,8 +2568,15 @@ impl eframe::App for CircuitApp {
                         hit_test_component(world_hover, &self.components)
                     {
                         if let Some(comp) = self.components.iter().find(|c| c.id == hov_id) {
-                            let tip_text =
-                                format!("{} — {}", component_kind_label(comp.kind), comp.value);
+                            let tip_text = if comp.kind == ComponentKind::PushButton && self.simulate {
+                                let state = if comp.value.to_lowercase().contains("open") { "OPEN" } else { "CLOSED" };
+                                format!("🔘 {} — {} — Click & Hold to press", comp.label, state)
+                            } else if comp.kind == ComponentKind::Switch || comp.kind == ComponentKind::SlideSwitch {
+                                let state = if comp.value.to_lowercase().contains("open") { "OPEN" } else { "CLOSED" };
+                                format!("🔲 {} — {} — Click to toggle", comp.label, state)
+                            } else {
+                                format!("{} — {}", component_kind_label(comp.kind), comp.value)
+                            };
                             let tip_pos = raw_hover + egui::Vec2::new(14.0, -8.0);
                             let bg = Rect::from_min_size(
                                 tip_pos - egui::Vec2::new(4.0, 4.0),
@@ -2562,21 +2658,28 @@ impl eframe::App for CircuitApp {
                                     .map(|c| c.kind);
                                 if let Some(kind) = comp_kind {
                                     if component_is_switch(kind) {
-                                        // PushButton: simulation click — no undo history entry
-                                        // Toggle switch/SlideSwitch: full edit with history
-                                        let is_momentary = kind == ComponentKind::PushButton;
-                                        if !is_momentary {
+                                        if kind == ComponentKind::PushButton {
+                                            // Momentary: close on press, reopen on release
+                                            // (release is handled in update() via held_button_id)
+                                            if let Some(comp) = self.components.iter_mut().find(|c| c.id == cid) {
+                                                comp.value = "closed".to_string();
+                                                self.status = format!("{} ▶ PRESSED — release to open", comp.label);
+                                            }
+                                            self.held_button_id = Some(cid);
+                                            self.invalidate_analysis_cache();
+                                            ctx.request_repaint();
+                                        } else {
+                                            // Toggle switch / slide switch: full edit with history
                                             self.record_history();
+                                            if let Some(comp) = self.components.iter_mut().find(|c| c.id == cid) {
+                                                let open = comp.value.to_lowercase().contains("open");
+                                                comp.value = if open { "closed".to_string() } else { "open".to_string() };
+                                                let state = if open { "▶ CLOSED" } else { "■ OPEN" };
+                                                self.status = format!("{} {state}", comp.label);
+                                            }
+                                            self.invalidate_analysis_cache();
+                                            ctx.request_repaint();
                                         }
-                                        if let Some(comp) = self.components.iter_mut().find(|c| c.id == cid) {
-                                            let open = comp.value.to_lowercase().contains("open");
-                                            comp.value = if open { "closed".to_string() } else { "open".to_string() };
-                                            let state = if open { "▶ ON" } else { "■ OFF" };
-                                            self.status = format!("{} {state} — click to toggle", comp.label);
-                                        }
-                                        // Always invalidate simulation cache after toggle
-                                        self.invalidate_analysis_cache();
-                                        ctx.request_repaint();
                                         self.selected = Some(Selection::Component(cid));
                                     }
                                 }
@@ -2638,6 +2741,73 @@ impl eframe::App for CircuitApp {
                 if self.wire_from_select {
                     self.tool = Tool::Select;
                     self.wire_from_select = false;
+                }
+            }
+
+            // Double-click component in Select mode → open inline value editor
+            if response.double_clicked() && self.tool == Tool::Select && self.inline_edit.is_none() {
+                if let Some(raw_pos) = pointer_in_rect {
+                    let world = view.to_world(raw_pos);
+                    if let Some(Selection::Component(cid)) = hit_test_component(world, &self.components) {
+                        if let Some(comp) = self.components.iter().find(|c| c.id == cid) {
+                            self.inline_edit = Some((cid, comp.value.clone()));
+                        }
+                    }
+                }
+            }
+
+            // Render inline edit popup
+            if let Some((edit_id, ref mut edit_text)) = self.inline_edit {
+                if let Some(comp) = self.components.iter().find(|c| c.id == edit_id) {
+                    let sp = view.to_screen(comp.pos);
+                    let popup_rect = Rect::from_center_size(
+                        sp + Vec2::new(0.0, -component_size(comp).y * view.zoom * 0.7),
+                        Vec2::new(120.0, 26.0),
+                    );
+                    painter.rect_filled(popup_rect, 4.0, Color32::from_rgb(22, 27, 34));
+                    painter.rect_stroke(
+                        popup_rect, 4.0,
+                        Stroke::new(1.5, Color32::from_rgb(80, 180, 120)),
+                        StrokeKind::Outside,
+                    );
+                    let text_pos = popup_rect.min + Vec2::new(6.0, 5.0);
+                    painter.text(
+                        text_pos,
+                        Align2::LEFT_TOP,
+                        format!("{}: {}_", comp.label, edit_text),
+                        egui::FontId::monospace(12.0),
+                        Color32::from_rgb(160, 240, 180),
+                    );
+                }
+                // Keyboard input for inline edit
+                ctx.input(|i| {
+                    for event in &i.events {
+                        match event {
+                            egui::Event::Text(ch) => edit_text.push_str(ch),
+                            egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => {
+                                edit_text.pop();
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+                let commit = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+                let cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+                if commit {
+                    let new_val = edit_text.clone();
+                    let label = self.components.iter()
+                        .find(|c| c.id == edit_id)
+                        .map(|c| c.label.clone())
+                        .unwrap_or_default();
+                    self.record_history();
+                    if let Some(comp) = self.components.iter_mut().find(|c| c.id == edit_id) {
+                        comp.value = new_val;
+                    }
+                    self.status = format!("{} value updated.", label);
+                    self.invalidate_analysis_cache();
+                    self.inline_edit = None;
+                } else if cancel {
+                    self.inline_edit = None;
                 }
             }
 
@@ -3005,6 +3175,24 @@ impl eframe::App for CircuitApp {
             self.zoom_to_fit();
         }
 
+        // ? — Toggle shortcuts help
+        if ctx.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::Questionmark)) {
+            self.show_help = !self.show_help;
+        }
+
+        // Space — toggle simulation on/off (when not dragging/panning)
+        if ctx.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::Space))
+            && self.drag.is_none()
+            && self.tool != Tool::Wire
+        {
+            self.simulate = !self.simulate;
+            self.status = if self.simulate {
+                "Simulation ON.".to_string()
+            } else {
+                "Simulation OFF.".to_string()
+            };
+        }
+
         // Quick-place shortcuts
         let place_shortcuts: &[(egui::Key, ComponentKind, &str)] = &[
             (egui::Key::Q, ComponentKind::Resistor, "Resistor"),
@@ -3036,6 +3224,71 @@ impl eframe::App for CircuitApp {
         }
 
         // ── Find dialog (floating overlay) ──────────────────────────────────
+        // ── Keyboard shortcuts help dialog ───────────────────────────────────
+        if self.show_help {
+            let mut open = self.show_help;
+            egui::Window::new("⌨  Keyboard Shortcuts")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .default_pos(egui::Pos2::new(200.0, 120.0))
+                .default_width(380.0)
+                .show(ctx, |ui| {
+                    let row = |ui: &mut egui::Ui, key: &str, desc: &str| {
+                        ui.horizontal(|ui| {
+                            ui.add_sized(Vec2::new(110.0, 18.0),
+                                egui::Label::new(egui::RichText::new(key)
+                                    .monospace().size(11.5)
+                                    .color(Color32::from_rgb(220, 200, 100))));
+                            ui.label(egui::RichText::new(desc).size(11.5)
+                                .color(Color32::from_rgb(200, 208, 218)));
+                        });
+                    };
+                    ui.columns(2, |cols| {
+                        let ui = &mut cols[0];
+                        ui.label(egui::RichText::new("Tools").strong().color(Color32::from_rgb(120,200,160)));
+                        row(ui, "W",          "Wire tool");
+                        row(ui, "Esc",        "Select / cancel");
+                        row(ui, "R",          "Rotate component");
+                        row(ui, "Delete",     "Delete selected");
+                        row(ui, "Ctrl+Z",     "Undo");
+                        row(ui, "Ctrl+Y",     "Redo");
+                        row(ui, "Ctrl+C",     "Copy");
+                        row(ui, "Ctrl+V",     "Paste");
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("View").strong().color(Color32::from_rgb(120,200,160)));
+                        row(ui, "F",          "Zoom to fit");
+                        row(ui, "Home",       "Reset view");
+                        row(ui, "Space+drag", "Pan");
+                        row(ui, "Scroll",     "Zoom");
+
+                        let ui = &mut cols[1];
+                        ui.label(egui::RichText::new("File").strong().color(Color32::from_rgb(120,200,160)));
+                        row(ui, "Ctrl+S",     "Save");
+                        row(ui, "Ctrl+O",     "Load");
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Quick Place").strong().color(Color32::from_rgb(120,200,160)));
+                        row(ui, "Q",          "Resistor");
+                        row(ui, "A",          "Capacitor");
+                        row(ui, "E",          "LED");
+                        row(ui, "D",          "Diode");
+                        row(ui, "G",          "Ground");
+                        row(ui, "B",          "Battery");
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Simulation").strong().color(Color32::from_rgb(120,200,160)));
+                        row(ui, "Space",      "Toggle sim on/off");
+                        row(ui, "Click btn",  "Hold to press button");
+                        row(ui, "Dbl-click",  "Edit component value");
+                        row(ui, "?",          "This help");
+                    });
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.label(egui::RichText::new("Press ? or close to dismiss")
+                        .size(10.5).color(Color32::from_rgb(120,130,140)).italics());
+                });
+            self.show_help = open;
+        }
+
         if self.show_find {
             egui::Window::new("Find Component")
                 .collapsible(false)
@@ -4966,6 +5219,131 @@ fn draw_grid(painter: &egui::Painter, rect: Rect, grid: f32, view: CanvasView) {
     }
 }
 
+/// Draw small voltage circles at wire junction/endpoint positions when DC is available.
+fn draw_node_voltage_indicators(
+    painter: &egui::Painter,
+    wires: &[Wire],
+    dc: &mna::DcResult,
+    view: CanvasView,
+    vmax: f64,
+) {
+    // Collect unique wire endpoints (junction points get drawn once)
+    let mut seen: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+    for wire in wires {
+        for &pt in &wire.points {
+            let key = (pt.x.round() as i32, pt.y.round() as i32);
+            if !seen.insert(key) {
+                continue; // already drawn
+            }
+            // Find the voltage at this wire point
+            if let Some((&_wid, &_net)) = dc.wire_voltage.iter().next() {
+                // Use wire_voltage for any wire that contains this point
+                let v_opt = wires.iter().find_map(|w| {
+                    if w.points.iter().any(|p| {
+                        (p.x.round() as i32, p.y.round() as i32) == key
+                    }) {
+                        dc.wire_voltage.get(&w.id).copied()
+                    } else {
+                        None
+                    }
+                });
+                if let Some(v) = v_opt {
+                    let sp = view.to_screen(pt);
+                    let col = mna::voltage_color(v, vmax);
+                    // Only draw if it's actually a junction (multiple wires meet)
+                    let junction_count = wires.iter().filter(|w| {
+                        w.points.first().map(|p| {
+                            (p.x.round() as i32, p.y.round() as i32) == key
+                        }).unwrap_or(false)
+                        || w.points.last().map(|p| {
+                            (p.x.round() as i32, p.y.round() as i32) == key
+                        }).unwrap_or(false)
+                    }).count();
+                    if junction_count >= 2 {
+                        painter.circle_filled(sp, 5.5, col);
+                        painter.circle_stroke(sp, 5.5, Stroke::new(1.0, Color32::from_rgb(20, 24, 30)));
+                        // Show voltage label at junctions (only when zoom is high enough)
+                        if view.zoom >= 0.8 {
+                            painter.text(
+                                sp + Vec2::new(7.0, -7.0),
+                                Align2::LEFT_BOTTOM,
+                                mna::format_voltage(v),
+                                egui::FontId::proportional(9.0),
+                                Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 210),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Draw a compact simulation summary box in the top-right corner of the canvas.
+fn draw_sim_summary(painter: &egui::Painter, canvas: Rect, simulation: &crate::engine::simulation::Simulation) {
+    let lines: Vec<String> = {
+        let mut v = Vec::new();
+        if simulation.shorted {
+            v.push("⚡ SHORT CIRCUIT".to_string());
+        } else if simulation.closed {
+            if let Some(dc) = &simulation.dc {
+                let total_p: f64 = dc.component_power.values().sum();
+                if total_p > 1e-12 {
+                    v.push(format!("P total: {}", mna::format_power(total_p)));
+                }
+                if let Some(&vmax) = dc.net_voltages.values()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                {
+                    v.push(format!("V max: {}", mna::format_voltage(vmax)));
+                }
+                v.push(format!("Nodes: {}", dc.net_voltages.len()));
+            }
+            if v.is_empty() {
+                v.push("Sim: closed".to_string());
+            }
+        } else {
+            v.push("Sim: open circuit".to_string());
+        }
+        v
+    };
+
+    if lines.is_empty() { return; }
+
+    let font = egui::FontId::proportional(10.5);
+    let line_h = 14.0;
+    let padding = Vec2::new(8.0, 5.0);
+    let w = lines.iter().map(|l| l.len() as f32 * 5.8).fold(0.0_f32, f32::max) + padding.x * 2.0;
+    let h = lines.len() as f32 * line_h + padding.y * 2.0;
+    let top_right = canvas.right_top() + Vec2::new(-w - 8.0, 8.0);
+    let bg = Rect::from_min_size(top_right, Vec2::new(w, h));
+
+    painter.rect_filled(bg, 4.0, Color32::from_rgba_unmultiplied(15, 20, 28, 215));
+    painter.rect_stroke(bg, 4.0,
+        Stroke::new(1.0, if simulation.shorted {
+            Color32::from_rgb(220, 60, 60)
+        } else if simulation.closed {
+            Color32::from_rgb(60, 180, 100)
+        } else {
+            Color32::from_rgb(80, 90, 100)
+        }),
+        StrokeKind::Outside,
+    );
+
+    for (i, line) in lines.iter().enumerate() {
+        let pos = bg.min + Vec2::new(padding.x, padding.y + i as f32 * line_h);
+        painter.text(
+            pos, Align2::LEFT_TOP, line, font.clone(),
+            if simulation.shorted {
+                Color32::from_rgb(255, 100, 100)
+            } else if simulation.closed {
+                Color32::from_rgb(130, 230, 160)
+            } else {
+                Color32::from_rgb(140, 150, 165)
+            },
+        );
+    }
+}
+
 fn draw_title_block(
     painter: &egui::Painter,
     canvas: Rect,
@@ -5481,6 +5859,9 @@ fn draw_component(
     energized: bool,
     connected_pins: &[(i32, i32)],
     view: CanvasView,
+    dc_voltage: Option<f64>,
+    dc_current: Option<f64>,
+    show_dc_overlay: bool,
 ) {
     let stroke = if selected {
         Stroke::new(2.2, Color32::from_rgb(90, 235, 170))
@@ -5785,6 +6166,54 @@ fn draw_component(
             Color32::from_rgb(160, 170, 180),
         );
     }
+
+    // ── DC Simulation overlay badge ──────────────────────────────────────
+    if show_dc_overlay {
+        let mut lines: Vec<String> = Vec::new();
+        if let Some(v) = dc_voltage {
+            if v.abs() > 1e-9 {
+                lines.push(mna::format_voltage(v));
+            }
+        }
+        if let Some(i) = dc_current {
+            if i.abs() > 1e-12 {
+                lines.push(mna::format_current(i));
+            }
+        }
+        if !lines.is_empty() {
+            let text = lines.join(" / ");
+            let badge_pos = bounds.left_top() + Vec2::new(-4.0, -4.0);
+            let font = egui::FontId::proportional(9.5);
+            // Dark background pill
+            let text_w = text.len() as f32 * 5.4 + 6.0;
+            let bg = Rect::from_min_size(
+                badge_pos - Vec2::new(text_w, 14.0),
+                Vec2::new(text_w, 13.0),
+            );
+            painter.rect_filled(bg, 3.0, Color32::from_rgba_unmultiplied(15, 18, 24, 210));
+            painter.rect_stroke(
+                bg,
+                3.0,
+                Stroke::new(0.8, if energized {
+                    Color32::from_rgb(200, 140, 30)
+                } else {
+                    Color32::from_rgb(60, 70, 85)
+                }),
+                StrokeKind::Outside,
+            );
+            painter.text(
+                bg.center(),
+                Align2::CENTER_CENTER,
+                &text,
+                font,
+                if energized {
+                    Color32::from_rgb(255, 220, 100)
+                } else {
+                    Color32::from_rgb(140, 200, 255)
+                },
+            );
+        }
+    }
 }
 
 fn draw_wire(
@@ -5797,16 +6226,24 @@ fn draw_wire(
     net_highlighted: bool,
     dc_voltage: Option<f64>,
     dc_vmax: f64,
+    dc_current_max: f64,
     show_voltage_labels: bool,
     view: CanvasView,
 ) {
+    // Wire thickness proportional to current magnitude (1.5 .. 5.0 px range)
+    let wire_current = dc_voltage.map(|v| {
+        if dc_vmax > 1e-9 { (v.abs() / dc_vmax).clamp(0.0, 1.0) } else { 0.0 }
+    }).unwrap_or(0.0);
+    let base_w = if energized { 2.8 + wire_current as f32 * 2.0 } else { 2.0 };
+    let _ = dc_current_max;
+
     let stroke = if selected {
         Stroke::new(3.5, Color32::from_rgb(90, 235, 170))
     } else if let Some(v) = dc_voltage {
         let col = mna::voltage_color(v, dc_vmax);
-        Stroke::new(3.0, col)
+        Stroke::new(base_w, col)
     } else if energized {
-        Stroke::new(3.2, Color32::from_rgb(255, 170, 55))
+        Stroke::new(base_w, Color32::from_rgb(255, 170, 55))
     } else if net_highlighted {
         Stroke::new(2.8, Color32::from_rgb(140, 210, 255))
     } else {
@@ -5869,18 +6306,37 @@ fn draw_flow_markers(painter: &egui::Painter, points: &[Pos2], flow_phase: f32) 
         return;
     }
 
-    let spacing = 28.0;
-    let radius = 3.6;
+    let spacing = 30.0;
+    let arrow_size = 7.0;
     let mut distance = flow_phase % spacing;
+
     while distance < total {
-        if let Some(point) = point_on_polyline(points, distance) {
-            painter.circle_filled(point, radius, Color32::from_rgb(255, 235, 150));
-            painter.circle_stroke(
-                point,
-                radius + 1.2,
-                Stroke::new(1.0, Color32::from_rgb(120, 70, 15)),
-            );
-        }
+        let Some(pos) = point_on_polyline(points, distance) else {
+            distance += spacing;
+            continue;
+        };
+        // Direction of the wire at this point (tangent)
+        let look_ahead = point_on_polyline(points, (distance + 3.0).min(total - 0.1));
+        let dir = match look_ahead {
+            Some(next) if pos.distance(next) > 0.01 => (next - pos).normalized(),
+            _ => Vec2::new(1.0, 0.0),
+        };
+        let perp = Vec2::new(-dir.y, dir.x);
+
+        // Arrow head (filled triangle pointing in flow direction)
+        let tip   = pos + dir * arrow_size;
+        let left  = pos - dir * arrow_size * 0.3 + perp * arrow_size * 0.45;
+        let right = pos - dir * arrow_size * 0.3 - perp * arrow_size * 0.45;
+
+        painter.add(egui::Shape::convex_polygon(
+            vec![tip, left, right],
+            Color32::from_rgb(255, 230, 80),
+            Stroke::new(1.0, Color32::from_rgb(180, 100, 10)),
+        ));
+
+        // Bright dot at tail for glow effect
+        painter.circle_filled(pos - dir * arrow_size * 0.3, 2.2, Color32::from_rgb(255, 200, 60));
+
         distance += spacing;
     }
 }
