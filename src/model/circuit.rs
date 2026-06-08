@@ -34,6 +34,7 @@ pub(crate) struct Counters {
     pub(crate) servo: usize,
     pub(crate) oled: usize,
     pub(crate) sensor: usize,
+    pub(crate) meter: usize,
 }
 
 #[derive(Debug, Clone)]

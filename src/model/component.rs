@@ -56,6 +56,8 @@ pub(crate) enum ComponentKind {
     Phototransistor,
     Optocoupler,
     GenericIc,
+    Voltmeter,
+    Ammeter,
 }
 
 #[derive(Debug, Clone)]

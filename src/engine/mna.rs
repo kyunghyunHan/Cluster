@@ -764,7 +764,9 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
             | ComponentKind::VoltageRef
             | ComponentKind::MotorDriver
             | ComponentKind::Optocoupler
-            | ComponentKind::GenericIc => {}
+            | ComponentKind::GenericIc
+            | ComponentKind::Voltmeter
+            | ComponentKind::Ammeter => {}
         }
     }
 

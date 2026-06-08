@@ -159,6 +159,8 @@ fn is_module(kind: ComponentKind) -> bool {
             | ComponentKind::Timer555
             | ComponentKind::Oled
             | ComponentKind::GenericIc
+            | ComponentKind::Voltmeter
+            | ComponentKind::Ammeter
     )
 }
 
@@ -217,6 +219,8 @@ fn component_kind_label(kind: ComponentKind) -> &'static str {
         ComponentKind::Phototransistor => "QP",
         ComponentKind::Optocoupler => "OC",
         ComponentKind::GenericIc => "IC",
+        ComponentKind::Voltmeter => "VM",
+        ComponentKind::Ammeter => "AM",
     }
 }
 

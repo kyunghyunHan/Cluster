@@ -107,14 +107,16 @@ struct CircuitApp {
     find_result_idx: usize,
     // ── Deferred canvas fit (set after demo load, applied once canvas rect is known) ──
     pending_fit: bool,
-    // ── PushButton hold state: component ID currently held pressed ───────
-    held_button_id: Option<u64>,
     // ── DC simulation overlay on canvas ─────────────────────────────────
     show_dc_overlay: bool,
     // ── Inline value editing: (component_id, edited_text) ───────────────
     inline_edit: Option<(u64, String)>,
     // ── Keyboard shortcuts help dialog ──────────────────────────────────
     show_help: bool,
+    // ── Oscilloscope / waveform viewer ──────────────────────────────────
+    show_oscilloscope: bool,
+    // ── AC analysis frequency ────────────────────────────────────────────
+    ac_freq_hz: f32,
 }
 
 impl CircuitApp {
@@ -169,10 +171,11 @@ impl CircuitApp {
             find_results: Vec::new(),
             find_result_idx: 0,
             pending_fit: false,
-            held_button_id: None,
             show_dc_overlay: true,
             inline_edit: None,
             show_help: false,
+            show_oscilloscope: false,
+            ac_freq_hz: 1000.0,
         }
     }
 
@@ -453,6 +456,14 @@ impl CircuitApp {
                 self.counters.logic_gate += 1;
                 format!("IC{}", self.counters.logic_gate)
             }
+            ComponentKind::Voltmeter => {
+                self.counters.meter += 1;
+                format!("VM{}", self.counters.meter)
+            }
+            ComponentKind::Ammeter => {
+                self.counters.meter += 1;
+                format!("AM{}", self.counters.meter)
+            }
         }
     }
 
@@ -511,6 +522,8 @@ impl CircuitApp {
             ComponentKind::Phototransistor => "NPN opto".to_string(),
             ComponentKind::Optocoupler => "PC817".to_string(),
             ComponentKind::GenericIc => "IC".to_string(),
+            ComponentKind::Voltmeter => "DC".to_string(),
+            ComponentKind::Ammeter => "DC".to_string(),
         }
     }
 
@@ -657,7 +670,6 @@ impl CircuitApp {
         self.counters = Counters::default();
         self.next_id = 1;
         self.tool = Tool::Select;
-        self.held_button_id = None;
         self.zoom = 1.0;
         self.pan = Vec2::ZERO;
         self.mark_dirty();
@@ -831,7 +843,7 @@ impl CircuitApp {
         self.simulate = true;
         self.pending_fit = true;
         self.status =
-            "Button-Toggle-LED demo loaded. Hold the button to close the circuit!".to_string();
+            "Button-Toggle-LED demo loaded. Click the button to toggle the LED path.".to_string();
     }
 
     fn push_wire_point(&mut self, pos: Pos2) {
@@ -1570,20 +1582,6 @@ impl eframe::App for CircuitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_app_style(ctx);
 
-        // PushButton hold: release when primary mouse button is lifted
-        if let Some(btn_id) = self.held_button_id {
-            let still_down = ctx.input(|i| i.pointer.primary_down());
-            if !still_down {
-                if let Some(comp) = self.components.iter_mut().find(|c| c.id == btn_id) {
-                    comp.value = "open".to_string();
-                    self.status = format!("{} released — circuit open.", comp.label);
-                }
-                self.held_button_id = None;
-                self.invalidate_analysis_cache();
-                ctx.request_repaint();
-            }
-        }
-
         let simulation = self.current_simulation();
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
@@ -1674,9 +1672,16 @@ impl eframe::App for CircuitApp {
                     ui.checkbox(&mut self.simulate, "Live simulation");
                     ui.checkbox(&mut self.show_voltage_labels, "Voltage labels on wires");
                     ui.checkbox(&mut self.show_dc_overlay, "V/I badges on components");
+                    ui.checkbox(&mut self.show_oscilloscope, "Oscilloscope panel");
                     ui.add_sized(
                         Vec2::new(180.0, 18.0),
                         egui::Slider::new(&mut self.grid, 10.0..=40.0).text("Grid"),
+                    );
+                    ui.add_sized(
+                        Vec2::new(180.0, 18.0),
+                        egui::Slider::new(&mut self.ac_freq_hz, 1.0..=1_000_000.0)
+                            .text("AC freq (Hz)")
+                            .logarithmic(true),
                     );
                 });
                 toolbar_menu(ui, "Actions", |ui| {
@@ -1892,6 +1897,18 @@ impl eframe::App for CircuitApp {
                                 ("Phototransistor", ComponentKind::Phototransistor),
                                 ("Optocoupler", ComponentKind::Optocoupler),
                                 ("Generic IC", ComponentKind::GenericIc),
+                            ],
+                            &filter,
+                        );
+
+                        part_section(
+                            ui,
+                            self,
+                            "Measurement Tools",
+                            SectionMode::Collapsed,
+                            &[
+                                ("Voltmeter", ComponentKind::Voltmeter),
+                                ("Ammeter", ComponentKind::Ammeter),
                             ],
                             &filter,
                         );
@@ -2120,6 +2137,29 @@ impl eframe::App for CircuitApp {
                                 }
                             }
 
+                            // ── AC impedance for reactive components ──────
+                            {
+                                let f = self.ac_freq_hz as f64;
+                                let omega = 2.0 * std::f64::consts::PI * f;
+                                let ac_z = match component.kind {
+                                    ComponentKind::Capacitor => {
+                                        let c = mna::parse_si_value(&component.value).unwrap_or(1e-6);
+                                        if c > 0.0 { Some(1.0 / (omega * c)) } else { None }
+                                    }
+                                    ComponentKind::Inductor => {
+                                        let l = mna::parse_si_value(&component.value).unwrap_or(1e-3);
+                                        Some(omega * l)
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(z) = ac_z {
+                                    ui.add_space(8.0);
+                                    section_title(ui, "AC Impedance");
+                                    let z_str = format_resistance(z as f32);
+                                    dc_metric_row(ui, &format!("Z @ {:.0}Hz", f), &z_str);
+                                }
+                            }
+
                             if component_is_module(component) {
                                 ui.add_space(8.0);
                                 section_title(ui, "Pins");
@@ -2282,7 +2322,8 @@ impl eframe::App for CircuitApp {
                 })
                 .unwrap_or(110.0);
             let flow_phase = ctx.input(|i| i.time) as f32 * flow_speed;
-            let show_flow = self.simulate && simulation.closed && !simulation.shorted;
+            let show_flow =
+                self.simulate && !simulation.shorted && !simulation.energized_wires.is_empty();
             if show_flow {
                 ctx.request_repaint();
             }
@@ -2570,7 +2611,7 @@ impl eframe::App for CircuitApp {
                         if let Some(comp) = self.components.iter().find(|c| c.id == hov_id) {
                             let tip_text = if comp.kind == ComponentKind::PushButton && self.simulate {
                                 let state = if comp.value.to_lowercase().contains("open") { "OPEN" } else { "CLOSED" };
-                                format!("🔘 {} — {} — Click & Hold to press", comp.label, state)
+                                format!("🔘 {} — {} — Click to toggle", comp.label, state)
                             } else if comp.kind == ComponentKind::Switch || comp.kind == ComponentKind::SlideSwitch {
                                 let state = if comp.value.to_lowercase().contains("open") { "OPEN" } else { "CLOSED" };
                                 format!("🔲 {} — {} — Click to toggle", comp.label, state)
@@ -2659,13 +2700,14 @@ impl eframe::App for CircuitApp {
                                 if let Some(kind) = comp_kind {
                                     if component_is_switch(kind) {
                                         if kind == ComponentKind::PushButton {
-                                            // Momentary: close on press, reopen on release
-                                            // (release is handled in update() via held_button_id)
+                                            // Toggle on each click (open ↔ closed)
+                                            self.record_history();
                                             if let Some(comp) = self.components.iter_mut().find(|c| c.id == cid) {
-                                                comp.value = "closed".to_string();
-                                                self.status = format!("{} ▶ PRESSED — release to open", comp.label);
+                                                let open = comp.value.to_lowercase().contains("open");
+                                                comp.value = if open { "closed".to_string() } else { "open".to_string() };
+                                                let state = if open { "▶ CLOSED (ON)" } else { "■ OPEN (OFF)" };
+                                                self.status = format!("{} {}", comp.label, state);
                                             }
-                                            self.held_button_id = Some(cid);
                                             self.invalidate_analysis_cache();
                                             ctx.request_repaint();
                                         } else {
@@ -2869,6 +2911,8 @@ impl eframe::App for CircuitApp {
             {
                 let world = view.to_world(pos);
                 let mut data_changed = false;
+                let force_connection_snap =
+                    ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
                 match drag {
                     DragState::Component { id, offset } => {
                         let snapped = snap_pos(world, rect, self.grid, self.snap);
@@ -2878,7 +2922,7 @@ impl eframe::App for CircuitApp {
                             let old_pos =
                                 self.components.iter().find(|c| c.id == id).map(|c| c.pos);
                             if let Some(old_pos) = old_pos {
-                                let delta = snapped - offset - old_pos;
+                                let mut delta = snapped - offset - old_pos;
                                 let ids = self.multi_selected.clone();
                                 let old_pins = self
                                     .components
@@ -2886,6 +2930,17 @@ impl eframe::App for CircuitApp {
                                     .filter(|component| ids.contains(&component.id))
                                     .flat_map(component_pins)
                                     .collect::<Vec<_>>();
+                                if force_connection_snap
+                                    && let Some(adjust) = snap_delta_for_moved_components(
+                                        &self.components,
+                                        &self.wires,
+                                        &ids,
+                                        delta,
+                                        &old_pins,
+                                    )
+                                {
+                                    delta += adjust;
+                                }
                                 for comp in self.components.iter_mut() {
                                     if ids.contains(&comp.id) {
                                         comp.pos += delta;
@@ -2899,24 +2954,64 @@ impl eframe::App for CircuitApp {
                                     .flat_map(component_pins)
                                     .collect::<Vec<_>>();
                                 move_attached_wire_endpoints(&mut self.wires, &old_pins, &new_pins);
+                                for wire in self.wires.iter_mut() {
+                                    if wire.points.len() > 2 {
+                                        let first = wire.points[0];
+                                        let last = *wire.points.last().unwrap();
+                                        if old_pins.iter().any(|p| first.distance(*p) <= 20.0)
+                                            || old_pins.iter().any(|p| last.distance(*p) <= 20.0)
+                                        {
+                                            tidy_wire_points(wire);
+                                        }
+                                    }
+                                }
                             }
                         } else if let Some(index) = self.components.iter().position(|c| c.id == id)
                         {
                             let old_pins = component_pins(&self.components[index]);
-                            let new_pos = snapped - offset;
+                            let mut new_pos = snapped - offset;
+                            if force_connection_snap {
+                                let ids = HashSet::from([id]);
+                                if let Some(adjust) = snap_delta_for_moved_components(
+                                    &self.components,
+                                    &self.wires,
+                                    &ids,
+                                    new_pos - self.components[index].pos,
+                                    &old_pins,
+                                ) {
+                                    new_pos += adjust;
+                                }
+                            }
                             if self.components[index].pos.distance(new_pos) > 0.1 {
                                 self.components[index].pos = new_pos;
                                 data_changed = true;
                             }
                             let new_pins = component_pins(&self.components[index]);
                             move_attached_wire_endpoints(&mut self.wires, &old_pins, &new_pins);
+                            for wire in self.wires.iter_mut() {
+                                if wire.points.len() > 2 {
+                                    let first = wire.points[0];
+                                    let last = *wire.points.last().unwrap();
+                                    if old_pins.iter().any(|p| first.distance(*p) <= 20.0)
+                                        || old_pins.iter().any(|p| last.distance(*p) <= 20.0)
+                                    {
+                                        tidy_wire_points(wire);
+                                    }
+                                }
+                            }
                         }
                     }
                     DragState::WirePoint {
                         wire_id,
                         point_index,
                     } => {
-                        let snapped = snap_pos(world, rect, self.grid, self.snap);
+                        let mut snapped = snap_pos(world, rect, self.grid, self.snap);
+                        if force_connection_snap
+                            && let Some(connection) =
+                                snap_to_nearest_connection(snapped, &self.components, &self.wires)
+                        {
+                            snapped = connection;
+                        }
                         move_wire_control_point(&mut self.wires, wire_id, point_index, snapped);
                         data_changed = true;
                     }
@@ -3277,7 +3372,7 @@ impl eframe::App for CircuitApp {
                         ui.add_space(4.0);
                         ui.label(egui::RichText::new("Simulation").strong().color(Color32::from_rgb(120,200,160)));
                         row(ui, "Space",      "Toggle sim on/off");
-                        row(ui, "Click btn",  "Hold to press button");
+                        row(ui, "Click btn",  "Toggle button on/off");
                         row(ui, "Dbl-click",  "Edit component value");
                         row(ui, "?",          "This help");
                     });
@@ -3287,6 +3382,116 @@ impl eframe::App for CircuitApp {
                         .size(10.5).color(Color32::from_rgb(120,130,140)).italics());
                 });
             self.show_help = open;
+        }
+
+        // ── Oscilloscope / waveform viewer panel ────────────────────────────
+        if self.show_oscilloscope {
+            let mut open = self.show_oscilloscope;
+            let dc_result = simulation.dc.clone();
+            egui::Window::new("Oscilloscope / DC Analysis")
+                .open(&mut open)
+                .collapsible(true)
+                .resizable(true)
+                .default_pos(egui::Pos2::new(60.0, 120.0))
+                .default_size(Vec2::new(420.0, 320.0))
+                .show(ctx, |ui| {
+                    if let Some(dc) = &dc_result {
+                        // Net voltage bar chart
+                        ui.label(egui::RichText::new("Node Voltages")
+                            .strong().color(Color32::from_rgb(120, 200, 160)));
+                        ui.separator();
+
+                        let mut node_voltages: Vec<(String, f64)> = dc.net_voltages
+                            .iter()
+                            .map(|(k, &v)| (format!("N{}", k), v))
+                            .collect();
+                        node_voltages.sort_by(|a, b| a.0.cmp(&b.0));
+
+                        if node_voltages.is_empty() {
+                            ui.label(egui::RichText::new("No simulation data — enable Live Simulation")
+                                .color(Color32::from_rgb(160, 160, 160)).italics());
+                        } else {
+                            let max_v = node_voltages.iter().map(|(_, v)| v.abs()).fold(0.001_f64, f64::max);
+                            let bar_width = (ui.available_width() - 160.0).max(40.0);
+                            for (label, voltage) in &node_voltages {
+                                ui.horizontal(|ui| {
+                                    ui.add_sized(Vec2::new(80.0, 16.0),
+                                        egui::Label::new(egui::RichText::new(label)
+                                            .monospace().size(11.0)
+                                            .color(Color32::from_rgb(200, 210, 220))));
+                                    let norm = ((voltage / max_v).abs() as f32).min(1.0);
+                                    let fill = if *voltage >= 0.0 {
+                                        Color32::from_rgb(60, 180, 120)
+                                    } else {
+                                        Color32::from_rgb(220, 80, 80)
+                                    };
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        Vec2::new(bar_width, 14.0), egui::Sense::hover());
+                                    let bar_rect = egui::Rect::from_min_size(
+                                        rect.min, Vec2::new(bar_width * norm, 14.0));
+                                    ui.painter().rect_filled(rect, 2.0,
+                                        Color32::from_rgba_unmultiplied(40, 50, 60, 200));
+                                    ui.painter().rect_filled(bar_rect, 2.0, fill);
+                                    ui.add_sized(Vec2::new(70.0, 16.0),
+                                        egui::Label::new(egui::RichText::new(
+                                            mna::format_voltage(*voltage))
+                                            .monospace().size(11.0)
+                                            .color(Color32::from_rgb(240, 230, 120))));
+                                });
+                            }
+                        }
+
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Component Currents")
+                            .strong().color(Color32::from_rgb(120, 180, 255)));
+                        ui.separator();
+
+                        // Use component_voltage map keys to show voltages; branch_current for currents
+                        let mut comp_currents: Vec<(u64, f64)> = dc.branch_current
+                            .iter()
+                            .map(|(&k, &v)| (k, v))
+                            .collect();
+                        comp_currents.sort_by_key(|(k, _)| *k);
+
+                        if comp_currents.is_empty() {
+                            ui.label(egui::RichText::new("No current data")
+                                .color(Color32::from_rgb(160, 160, 160)).italics());
+                        } else {
+                            let max_i = comp_currents.iter().map(|(_, v)| v.abs()).fold(0.001_f64, f64::max);
+                            let bar_width = (ui.available_width() - 160.0).max(40.0);
+                            for (comp_id, current) in &comp_currents {
+                                let label = format!("ID {}", comp_id);
+                                ui.horizontal(|ui| {
+                                    ui.add_sized(Vec2::new(80.0, 16.0),
+                                        egui::Label::new(egui::RichText::new(&label)
+                                            .monospace().size(11.0)
+                                            .color(Color32::from_rgb(200, 210, 220))));
+                                    let norm = ((current / max_i).abs() as f32).min(1.0);
+                                    let fill = Color32::from_rgb(80, 160, 255);
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        Vec2::new(bar_width, 14.0), egui::Sense::hover());
+                                    let bar_rect = egui::Rect::from_min_size(
+                                        rect.min, Vec2::new(bar_width * norm, 14.0));
+                                    ui.painter().rect_filled(rect, 2.0,
+                                        Color32::from_rgba_unmultiplied(40, 50, 60, 200));
+                                    ui.painter().rect_filled(bar_rect, 2.0, fill);
+                                    ui.add_sized(Vec2::new(70.0, 16.0),
+                                        egui::Label::new(egui::RichText::new(
+                                            mna::format_current(*current))
+                                            .monospace().size(11.0)
+                                            .color(Color32::from_rgb(240, 230, 120))));
+                                });
+                            }
+                        }
+                    } else {
+                        ui.add_space(16.0);
+                        ui.centered_and_justified(|ui| {
+                            ui.label(egui::RichText::new("Enable Live Simulation to see data")
+                                .size(14.0).color(Color32::from_rgb(140, 150, 160)).italics());
+                        });
+                    }
+                });
+            self.show_oscilloscope = open;
         }
 
         if self.show_find {
@@ -3616,6 +3821,76 @@ fn snap_to_nearest_connection(pos: Pos2, components: &[Component], wires: &[Wire
     }
 
     best
+}
+
+fn snap_delta_for_moved_components(
+    components: &[Component],
+    wires: &[Wire],
+    moved_ids: &HashSet<u64>,
+    delta: Vec2,
+    old_pins: &[Pos2],
+) -> Option<Vec2> {
+    let mut best_adjust = None;
+    let mut best_dist = 28.0_f32;
+
+    let moving_pins = components
+        .iter()
+        .filter(|component| moved_ids.contains(&component.id))
+        .flat_map(|component| {
+            let mut moved = component.clone();
+            moved.pos += delta;
+            component_pin_defs(&moved).into_iter().map(|pin| pin.pos)
+        })
+        .collect::<Vec<_>>();
+
+    if moving_pins.is_empty() {
+        return None;
+    }
+
+    for moving_pin in &moving_pins {
+        for component in components {
+            if moved_ids.contains(&component.id) {
+                continue;
+            }
+            for target_pin in component_pin_defs(component) {
+                let d = moving_pin.distance(target_pin.pos);
+                if d < best_dist {
+                    best_dist = d;
+                    best_adjust = Some(target_pin.pos - *moving_pin);
+                }
+            }
+        }
+
+        for wire in wires {
+            for &target in &wire.points {
+                if old_pins.iter().any(|old_pin| old_pin.distance(target) <= 1.0) {
+                    continue;
+                }
+                let d = moving_pin.distance(target);
+                if d < best_dist {
+                    best_dist = d;
+                    best_adjust = Some(target - *moving_pin);
+                }
+            }
+
+            for segment in wire.points.windows(2) {
+                if old_pins
+                    .iter()
+                    .any(|old_pin| point_touches_wire_segment(*old_pin, segment[0], segment[1]))
+                {
+                    continue;
+                }
+                let target = closest_point_on_segment(*moving_pin, segment[0], segment[1]);
+                let d = moving_pin.distance(target);
+                if d < best_dist {
+                    best_dist = d;
+                    best_adjust = Some(target - *moving_pin);
+                }
+            }
+        }
+    }
+
+    best_adjust
 }
 
 fn is_on_wire_segment(pos: Pos2, wires: &[Wire]) -> bool {
@@ -4263,6 +4538,8 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         }
     }
 
+    let external_graph = graph.clone();
+
     // Pass 3: powered modules — only connect if polarity is correct
     for component in components {
         if !component_is_powered_module(component) {
@@ -4448,7 +4725,7 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         )
         .collect();
 
-    let energized_wires: HashSet<u64> = wire_edges
+    let mut energized_wires: HashSet<u64> = wire_edges
         .into_iter()
         .filter(|(_, a, b)| loop_nodes.contains(a) && loop_nodes.contains(b))
         .map(|(id, _, _)| id)
@@ -4461,6 +4738,26 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         .is_some();
     // Short if + reaches return via bare wires, OR if the closed loop has no resistive/module load.
     let shorted = direct_wire_short || energized_loads.is_empty();
+
+    prune_uncontrolled_digital_output_paths(
+        components,
+        wires,
+        &nodes,
+        &external_graph,
+        &return_nodes,
+        &mut energized_components,
+        &mut energized_wires,
+    );
+    mark_powered_digital_output_paths(
+        components,
+        wires,
+        &nodes,
+        &external_graph,
+        &wire_graph,
+        &return_nodes,
+        &mut energized_components,
+        &mut energized_wires,
+    );
 
     // OLED / Sensor: always require I2C (SDA+SCL) to be wired to a controller.
     // The guard was previously `if !ctrl_sda.is_empty() || !ctrl_scl.is_empty()`,
@@ -4637,6 +4934,200 @@ fn reachable_nodes(graph: &[HashSet<usize>], starts: &[usize]) -> HashSet<usize>
 
 fn nodes_connected(graph: &[HashSet<usize>], a: usize, b: usize) -> bool {
     reachable_nodes(graph, &[a]).contains(&b)
+}
+
+fn prune_uncontrolled_digital_output_paths(
+    components: &[Component],
+    wires: &[Wire],
+    nodes: &CircuitNodes,
+    external_graph: &[HashSet<usize>],
+    return_nodes: &[usize],
+    energized_components: &mut HashSet<u64>,
+    energized_wires: &mut HashSet<u64>,
+) {
+    if return_nodes.is_empty() {
+        return;
+    }
+
+    for module in components.iter().filter(|component| component_is_powered_module(component)) {
+        for pin in component_pin_defs(module)
+            .iter()
+            .filter(|pin| matches!(pin.role, PinRole::Digital | PinRole::Output))
+        {
+            let Some(digital_node) = nodes.find_existing(pin.pos) else {
+                continue;
+            };
+            let path_nodes = reachable_nodes(external_graph, &[digital_node]);
+            if !return_nodes.iter().any(|return_node| path_nodes.contains(return_node)) {
+                continue;
+            }
+
+            for component in components {
+                if component.id == module.id
+                    || matches!(
+                        component.kind,
+                        ComponentKind::VSource
+                            | ComponentKind::Battery
+                            | ComponentKind::ISource
+                            | ComponentKind::Ground
+                    )
+                    || component_is_powered_module(component)
+                {
+                    continue;
+                }
+                let comp_nodes = component_pin_defs(component)
+                    .iter()
+                    .filter_map(|pin| nodes.find_existing(pin.pos))
+                    .collect::<Vec<_>>();
+                if comp_nodes.len() >= 2 && comp_nodes.iter().all(|node| path_nodes.contains(node)) {
+                    energized_components.remove(&component.id);
+                }
+            }
+
+            for wire in wires {
+                if wire.points.windows(2).any(|segment| {
+                    let a = nodes.find_existing(segment[0]);
+                    let b = nodes.find_existing(segment[1]);
+                    a.is_some_and(|node| path_nodes.contains(&node))
+                        && b.is_some_and(|node| path_nodes.contains(&node))
+                }) {
+                    energized_wires.remove(&wire.id);
+                }
+            }
+        }
+    }
+}
+
+fn mark_powered_digital_output_paths(
+    components: &[Component],
+    wires: &[Wire],
+    nodes: &CircuitNodes,
+    external_graph: &[HashSet<usize>],
+    wire_graph: &[HashSet<usize>],
+    return_nodes: &[usize],
+    energized_components: &mut HashSet<u64>,
+    energized_wires: &mut HashSet<u64>,
+) {
+    if return_nodes.is_empty() {
+        return;
+    }
+
+    let powered_module_ids = components
+        .iter()
+        .filter(|component| {
+            component_is_powered_module(component) && energized_components.contains(&component.id)
+        })
+        .map(|component| component.id)
+        .collect::<Vec<_>>();
+
+    for module_id in powered_module_ids {
+        let Some(module) = components.iter().find(|component| component.id == module_id) else {
+            continue;
+        };
+        let pins = component_pin_defs(module);
+        let digital_pins = pins
+            .iter()
+            .filter(|pin| matches!(pin.role, PinRole::Digital | PinRole::Output))
+            .filter_map(|pin| nodes.find_existing(pin.pos))
+            .collect::<Vec<_>>();
+
+        if digital_pins.is_empty()
+            || !module_has_closed_digital_input(
+                components,
+                nodes,
+                wire_graph,
+                return_nodes,
+                &digital_pins,
+            )
+        {
+            continue;
+        }
+
+        for output_node in &digital_pins {
+            let path_nodes = reachable_nodes(external_graph, &[*output_node]);
+            if !return_nodes.iter().any(|return_node| path_nodes.contains(return_node)) {
+                continue;
+            }
+
+            for component in components {
+                if component.id == module.id
+                    || matches!(
+                        component.kind,
+                        ComponentKind::VSource
+                            | ComponentKind::Battery
+                            | ComponentKind::ISource
+                            | ComponentKind::Ground
+                    )
+                    || component_is_powered_module(component)
+                {
+                    continue;
+                }
+                let conductance = component_conductance(component);
+                if conductance == Conductance::Open {
+                    continue;
+                }
+                let comp_pins = component_pin_defs(component);
+                let comp_nodes = comp_pins
+                    .iter()
+                    .filter_map(|pin| nodes.find_existing(pin.pos))
+                    .collect::<Vec<_>>();
+                if comp_nodes.len() >= 2 && comp_nodes.iter().all(|node| path_nodes.contains(node)) {
+                    energized_components.insert(component.id);
+                }
+            }
+
+            for wire in wires {
+                if wire.points.windows(2).any(|segment| {
+                    let a = nodes.find_existing(segment[0]);
+                    let b = nodes.find_existing(segment[1]);
+                    a.is_some_and(|node| path_nodes.contains(&node))
+                        && b.is_some_and(|node| path_nodes.contains(&node))
+                }) {
+                    energized_wires.insert(wire.id);
+                }
+            }
+        }
+    }
+}
+
+fn module_has_closed_digital_input(
+    components: &[Component],
+    nodes: &CircuitNodes,
+    wire_graph: &[HashSet<usize>],
+    return_nodes: &[usize],
+    digital_pins: &[usize],
+) -> bool {
+    for switch in components.iter().filter(|component| {
+        component_is_switch(component.kind) && component_conductance(component) != Conductance::Open
+    }) {
+        let switch_pins = component_pin_defs(switch);
+        if switch_pins.len() < 2 {
+            continue;
+        }
+        let Some(a) = nodes.find_existing(switch_pins[0].pos) else {
+            continue;
+        };
+        let Some(b) = nodes.find_existing(switch_pins[1].pos) else {
+            continue;
+        };
+
+        let a_at_return = return_nodes
+            .iter()
+            .any(|return_node| nodes_connected(wire_graph, a, *return_node));
+        let b_at_return = return_nodes
+            .iter()
+            .any(|return_node| nodes_connected(wire_graph, b, *return_node));
+
+        for digital_node in digital_pins {
+            let digital_at_a = nodes_connected(wire_graph, *digital_node, a);
+            let digital_at_b = nodes_connected(wire_graph, *digital_node, b);
+            if (digital_at_a && b_at_return) || (digital_at_b && a_at_return) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn controlled_reachability_graph(
@@ -5020,6 +5511,8 @@ fn component_conductance(component: &Component) -> Conductance {
         | ComponentKind::GenericIc => Conductance::Open,
         ComponentKind::Timer555 => Conductance::Load,
         ComponentKind::Transformer => Conductance::Conductor,
+        ComponentKind::Voltmeter => Conductance::Open,
+        ComponentKind::Ammeter => Conductance::Conductor,
     }
 }
 
@@ -5147,75 +5640,58 @@ fn component_size(component: &Component) -> Vec2 {
         ComponentKind::Phototransistor => (80.0, 68.0),
         ComponentKind::Optocoupler => (80.0, 64.0),
         ComponentKind::GenericIc => (80.0, 80.0),
+        ComponentKind::Voltmeter | ComponentKind::Ammeter => (80.0, 60.0),
     };
     Vec2::new(w, h)
 }
 
 fn draw_grid(painter: &egui::Painter, rect: Rect, grid: f32, view: CanvasView) {
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(18, 22, 28));
+    painter.rect_filled(rect, 0.0, Color32::from_rgb(11, 14, 19));
 
-    let screen_grid = (grid * view.zoom).max(4.0);
+    let screen_grid = (grid * view.zoom).max(3.0);
 
-    // Compute first grid line in screen space that is inside rect
-    let start_x = {
-        let origin_x = view.to_screen(Pos2::new(rect.left(), 0.0)).x;
-        let offset = (rect.left() - origin_x).rem_euclid(screen_grid);
-        rect.left() + offset
-    };
-    let start_y = {
-        let origin_y = view.to_screen(Pos2::new(0.0, rect.top())).y;
-        let offset = (rect.top() - origin_y).rem_euclid(screen_grid);
-        rect.top() + offset
-    };
+    let origin = view.to_screen(Pos2::ZERO);
+    let start_x = rect.left() + (origin.x - rect.left()).rem_euclid(screen_grid);
+    let start_y = rect.top()  + (origin.y - rect.top()).rem_euclid(screen_grid);
 
-    if screen_grid >= 6.0 {
-        let line_color = Color32::from_rgb(44, 52, 62);
-        let stroke = Stroke::new(1.0, line_color);
+    // Minor dots
+    if screen_grid >= 5.0 {
+        let minor_col = Color32::from_rgb(36, 46, 58);
+        let dot_r = if screen_grid > 14.0 { 1.3_f32 } else { 0.9 };
         let mut x = start_x;
-        while x <= rect.right() {
-            painter.line_segment(
-                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-                stroke,
-            );
+        while x <= rect.right() + 1.0 {
+            let mut y = start_y;
+            while y <= rect.bottom() + 1.0 {
+                painter.circle_filled(Pos2::new(x, y), dot_r, minor_col);
+                y += screen_grid;
+            }
             x += screen_grid;
         }
-        let mut y = start_y;
-        while y <= rect.bottom() {
-            painter.line_segment(
-                [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-                stroke,
-            );
-            y += screen_grid;
-        }
     }
 
-    let major_screen = screen_grid * 5.0;
-    let major_stroke = Stroke::new(1.0, Color32::from_rgb(67, 78, 92));
-    let start_mx = {
-        let origin_x = view.to_screen(Pos2::new(rect.left(), 0.0)).x;
-        let offset = (rect.left() - origin_x).rem_euclid(major_screen);
-        rect.left() + offset
-    };
-    let start_my = {
-        let origin_y = view.to_screen(Pos2::new(0.0, rect.top())).y;
-        let offset = (rect.top() - origin_y).rem_euclid(major_screen);
-        rect.top() + offset
-    };
+    // Major dots (every 5 minor)
+    let major_grid = screen_grid * 5.0;
+    let start_mx = rect.left() + (origin.x - rect.left()).rem_euclid(major_grid);
+    let start_my = rect.top()  + (origin.y - rect.top()).rem_euclid(major_grid);
+    let major_col = Color32::from_rgb(56, 72, 92);
     let mut x = start_mx;
-    while x <= rect.right() {
-        painter.line_segment(
-            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            major_stroke,
-        );
-        x += major_screen;
+    while x <= rect.right() + 1.0 {
+        let mut y = start_my;
+        while y <= rect.bottom() + 1.0 {
+            painter.circle_filled(Pos2::new(x, y), 2.0, major_col);
+            y += major_grid;
+        }
+        x += major_grid;
     }
-    let mut y = start_my;
-    while y <= rect.bottom() {
-        painter.line_segment(
-            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-            major_stroke,
-        );
-        y += major_screen;
+
+    // Axis cross-hair at world origin (faint)
+    let org = view.to_screen(Pos2::ZERO);
+    if rect.contains(org) {
+        let axis_col = Color32::from_rgba_unmultiplied(80, 120, 160, 40);
+        painter.line_segment([Pos2::new(org.x, rect.top()), Pos2::new(org.x, rect.bottom())],
+            Stroke::new(1.0, axis_col));
+        painter.line_segment([Pos2::new(rect.left(), org.y), Pos2::new(rect.right(), org.y)],
+            Stroke::new(1.0, axis_col));
     }
 }
 
@@ -5899,17 +6375,16 @@ fn draw_component(
         ComponentKind::ZenerDiode => draw_zener(painter, rect, component.rotation, stroke),
         ComponentKind::Led => {
             if energized {
-                // Outer glow
+                let (outer, inner) = led_glow_colors(&component.value);
                 painter.circle_filled(
                     screen_center,
                     rect.width().max(rect.height()) * 0.7,
-                    Color32::from_rgba_unmultiplied(255, 220, 60, 30),
+                    outer,
                 );
-                // Inner bright core
                 painter.circle_filled(
                     screen_center,
                     rect.width().max(rect.height()) * 0.4,
-                    Color32::from_rgba_unmultiplied(255, 235, 100, 70),
+                    inner,
                 );
             }
             draw_led(painter, rect, component.rotation, stroke);
@@ -5940,7 +6415,8 @@ fn draw_component(
         ComponentKind::LogicNor => draw_logic_or(painter, rect, component.rotation, stroke, true),
         ComponentKind::LogicXor => draw_logic_xor(painter, rect, component.rotation, stroke, false),
         ComponentKind::Switch | ComponentKind::SlideSwitch => {
-            draw_switch(painter, rect, component.rotation, stroke)
+            let closed = !component.value.to_lowercase().contains("open");
+            draw_switch(painter, rect, component.rotation, stroke, closed)
         }
         ComponentKind::PushButton => {
             let closed = !component.value.to_lowercase().contains("open");
@@ -6111,6 +6587,38 @@ fn draw_component(
         }
         ComponentKind::GenericIc => {
             draw_ic_box(painter, rect, component.rotation, stroke, energized, "IC")
+        }
+        ComponentKind::Voltmeter => {
+            draw_meter(painter, rect, component.rotation, stroke, "V", energized);
+            if show_dc_overlay {
+                if let Some(v) = dc_voltage {
+                    let center = view.to_screen(component.pos);
+                    let r = (rect.width().min(rect.height()) * 0.44 + 12.0) * view.zoom;
+                    painter.text(
+                        center + Vec2::new(0.0, r),
+                        Align2::CENTER_TOP,
+                        mna::format_voltage(v),
+                        egui::FontId::proportional(10.5),
+                        Color32::from_rgb(100, 240, 170),
+                    );
+                }
+            }
+        }
+        ComponentKind::Ammeter => {
+            draw_meter(painter, rect, component.rotation, stroke, "A", energized);
+            if show_dc_overlay {
+                if let Some(i) = dc_current {
+                    let center = view.to_screen(component.pos);
+                    let r = (rect.width().min(rect.height()) * 0.44 + 12.0) * view.zoom;
+                    painter.text(
+                        center + Vec2::new(0.0, r),
+                        Align2::CENTER_TOP,
+                        mna::format_current(i),
+                        egui::FontId::proportional(10.5),
+                        Color32::from_rgb(100, 210, 255),
+                    );
+                }
+            }
         }
     }
 
@@ -6285,6 +6793,7 @@ fn draw_wire(
     }
 
     if show_flow {
+        draw_flow_pulses(painter, &screen_points, flow_phase, stroke.width);
         draw_flow_markers(painter, &screen_points, flow_phase);
     }
 }
@@ -6306,9 +6815,12 @@ fn draw_flow_markers(painter: &egui::Painter, points: &[Pos2], flow_phase: f32) 
         return;
     }
 
-    let spacing = 30.0;
-    let arrow_size = 7.0;
-    let mut distance = flow_phase % spacing;
+    let spacing = 42.0;
+    let arrow_size = 8.5;
+    let mut distance = flow_phase.rem_euclid(spacing);
+    if total < spacing {
+        distance = flow_phase.rem_euclid(total.max(1.0));
+    }
 
     while distance < total {
         let Some(pos) = point_on_polyline(points, distance) else {
@@ -6328,16 +6840,105 @@ fn draw_flow_markers(painter: &egui::Painter, points: &[Pos2], flow_phase: f32) 
         let left  = pos - dir * arrow_size * 0.3 + perp * arrow_size * 0.45;
         let right = pos - dir * arrow_size * 0.3 - perp * arrow_size * 0.45;
 
+        painter.circle_filled(
+            pos - dir * arrow_size * 0.2,
+            arrow_size * 0.72,
+            Color32::from_rgba_unmultiplied(255, 205, 50, 48),
+        );
         painter.add(egui::Shape::convex_polygon(
             vec![tip, left, right],
-            Color32::from_rgb(255, 230, 80),
-            Stroke::new(1.0, Color32::from_rgb(180, 100, 10)),
+            Color32::from_rgb(255, 245, 120),
+            Stroke::new(1.4, Color32::from_rgb(90, 55, 0)),
         ));
 
         // Bright dot at tail for glow effect
-        painter.circle_filled(pos - dir * arrow_size * 0.3, 2.2, Color32::from_rgb(255, 200, 60));
+        painter.circle_filled(
+            pos - dir * arrow_size * 0.35,
+            2.8,
+            Color32::from_rgb(255, 190, 45),
+        );
 
         distance += spacing;
+    }
+}
+
+fn draw_flow_pulses(painter: &egui::Painter, points: &[Pos2], flow_phase: f32, wire_width: f32) {
+    let total = polyline_length(points);
+    if total <= 1.0 {
+        return;
+    }
+
+    let spacing = 42.0;
+    let pulse_len = 18.0_f32.min(total.max(1.0));
+    let mut distance = flow_phase.rem_euclid(spacing) - pulse_len;
+    if total < spacing {
+        distance = flow_phase.rem_euclid(total.max(1.0)) - pulse_len;
+    }
+
+    while distance < total {
+        let start = distance.max(0.0);
+        let end = (distance + pulse_len).min(total);
+        if end > start {
+            draw_polyline_range(
+                painter,
+                points,
+                start,
+                end,
+                Stroke::new(
+                    (wire_width + 3.2).max(5.2),
+                    Color32::from_rgba_unmultiplied(255, 220, 70, 135),
+                ),
+            );
+            draw_polyline_range(
+                painter,
+                points,
+                start,
+                end,
+                Stroke::new(
+                    (wire_width + 0.8).max(2.8),
+                    Color32::from_rgb(255, 252, 170),
+                ),
+            );
+        }
+        distance += spacing;
+    }
+}
+
+fn draw_polyline_range(
+    painter: &egui::Painter,
+    points: &[Pos2],
+    start_distance: f32,
+    end_distance: f32,
+    stroke: Stroke,
+) {
+    if end_distance <= start_distance {
+        return;
+    }
+
+    let mut traveled = 0.0;
+    for segment in points.windows(2) {
+        let a = segment[0];
+        let b = segment[1];
+        let length = a.distance(b);
+        if length <= 0.1 {
+            continue;
+        }
+
+        let segment_start = traveled;
+        let segment_end = traveled + length;
+        if segment_end >= start_distance && segment_start <= end_distance {
+            let local_start = ((start_distance - segment_start) / length).clamp(0.0, 1.0);
+            let local_end = ((end_distance - segment_start) / length).clamp(0.0, 1.0);
+            if local_end > local_start {
+                let p0 = a + (b - a) * local_start;
+                let p1 = a + (b - a) * local_end;
+                painter.line_segment([p0, p1], stroke);
+            }
+        }
+        traveled = segment_end;
+        if traveled > end_distance {
+            break;
+        }
     }
 }
 
@@ -6975,6 +7576,18 @@ pub(crate) fn component_pin_defs(component: &Component) -> Vec<CircuitPin> {
                 ("RST", PinRole::Control),
             ],
         ),
+        ComponentKind::Voltmeter | ComponentKind::Ammeter => vec![
+            CircuitPin {
+                label: "+",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.left(), center.y),
+            },
+            CircuitPin {
+                label: "-",
+                role: PinRole::Passive,
+                pos: Pos2::new(rect.right(), center.y),
+            },
+        ],
         _ => vec![
             CircuitPin {
                 label: "A",
@@ -7970,6 +8583,63 @@ fn segment_intersection(a0: Pos2, a1: Pos2, b0: Pos2, b1: Pos2) -> Option<Pos2> 
     }
 }
 
+fn draw_meter(
+    painter: &egui::Painter,
+    rect: Rect,
+    rotation: i32,
+    stroke: Stroke,
+    symbol: &str,
+    energized: bool,
+) {
+    let center = rect.center();
+    let r = rect.width().min(rect.height()) * 0.44;
+    let body_fill = if energized {
+        Color32::from_rgba_unmultiplied(60, 120, 80, 30)
+    } else {
+        Color32::from_rgba_unmultiplied(28, 36, 46, 180)
+    };
+    painter.circle_filled(center, r, body_fill);
+    painter.circle_stroke(center, r, stroke);
+
+    let text_col = if energized {
+        Color32::from_rgb(100, 255, 170)
+    } else {
+        stroke.color
+    };
+    painter.text(
+        center,
+        Align2::CENTER_CENTER,
+        symbol,
+        egui::FontId::proportional(r * 0.85),
+        text_col,
+    );
+
+    // Terminal leads
+    let left_nat = Pos2::new(rect.left(), center.y);
+    let left_inner_nat = Pos2::new(center.x - r, center.y);
+    let right_inner_nat = Pos2::new(center.x + r, center.y);
+    let right_nat = Pos2::new(rect.right(), center.y);
+    let points = [left_nat, left_inner_nat, right_inner_nat, right_nat];
+    let rp: Vec<Pos2> = points.iter().map(|&p| rotate_point(p, center, rotation)).collect();
+    painter.line_segment([rp[0], rp[1]], stroke);
+    painter.line_segment([rp[2], rp[3]], stroke);
+
+    // Polarity marks: + on left lead, − on right lead
+    let plus_pos = rotate_point(
+        Pos2::new(rect.left() + (rect.width() * 0.5 - r) * 0.5, center.y - 8.0),
+        center,
+        rotation,
+    );
+    let minus_pos = rotate_point(
+        Pos2::new(rect.right() - (rect.width() * 0.5 - r) * 0.5, center.y - 8.0),
+        center,
+        rotation,
+    );
+    let pol_col = Color32::from_rgb(180, 190, 200);
+    painter.text(plus_pos, Align2::CENTER_CENTER, "+", egui::FontId::proportional(9.0), pol_col);
+    painter.text(minus_pos, Align2::CENTER_CENTER, "−", egui::FontId::proportional(9.0), pol_col);
+}
+
 fn draw_resistor(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
     let center = rect.center();
     let left = Pos2::new(rect.left(), rect.center().y);
@@ -8115,6 +8785,36 @@ fn draw_diode(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke
     painter.line_segment([rotated[6], rotated[7]], stroke);
 }
 
+fn led_glow_colors(value: &str) -> (Color32, Color32) {
+    let v = value.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "red" | "r" =>
+            (Color32::from_rgba_unmultiplied(255, 40, 40, 30),
+             Color32::from_rgba_unmultiplied(255, 80, 80, 70)),
+        "green" | "g" =>
+            (Color32::from_rgba_unmultiplied(40, 255, 80, 30),
+             Color32::from_rgba_unmultiplied(80, 255, 120, 70)),
+        "blue" | "b" =>
+            (Color32::from_rgba_unmultiplied(40, 100, 255, 30),
+             Color32::from_rgba_unmultiplied(80, 140, 255, 70)),
+        "yellow" | "y" =>
+            (Color32::from_rgba_unmultiplied(255, 240, 40, 30),
+             Color32::from_rgba_unmultiplied(255, 250, 80, 70)),
+        "white" | "w" =>
+            (Color32::from_rgba_unmultiplied(220, 220, 255, 30),
+             Color32::from_rgba_unmultiplied(240, 240, 255, 70)),
+        "orange" | "o" =>
+            (Color32::from_rgba_unmultiplied(255, 140, 20, 30),
+             Color32::from_rgba_unmultiplied(255, 165, 60, 70)),
+        "uv" | "purple" | "violet" =>
+            (Color32::from_rgba_unmultiplied(160, 40, 255, 30),
+             Color32::from_rgba_unmultiplied(190, 80, 255, 70)),
+        _ =>
+            (Color32::from_rgba_unmultiplied(255, 220, 60, 30),
+             Color32::from_rgba_unmultiplied(255, 235, 100, 70)),
+    }
+}
+
 fn draw_led(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
     draw_diode(painter, rect, rotation, stroke, true);
     let center = rect.center();
@@ -8146,16 +8846,19 @@ fn draw_led(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) 
     }
 }
 
-fn draw_switch(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke) {
+fn draw_switch(painter: &egui::Painter, rect: Rect, rotation: i32, stroke: Stroke, closed: bool) {
     let center = rect.center();
     let left = Pos2::new(rect.left(), center.y);
     let right = Pos2::new(rect.right(), center.y);
     let left_contact = Pos2::new(center.x - rect.width() * 0.25, center.y);
     let right_contact = Pos2::new(center.x + rect.width() * 0.25, center.y);
-    let blade_end = Pos2::new(
-        center.x + rect.width() * 0.18,
-        center.y - rect.height() * 0.32,
-    );
+    let blade_end = if closed {
+        // Blade horizontal → connects the two contacts
+        Pos2::new(center.x + rect.width() * 0.25, center.y)
+    } else {
+        // Blade angled up → open
+        Pos2::new(center.x + rect.width() * 0.18, center.y - rect.height() * 0.32)
+    };
     let points = [left, right, left_contact, right_contact, blade_end];
     let rotated: Vec<Pos2> = points
         .iter()
@@ -9702,6 +10405,8 @@ fn component_kind_label(kind: ComponentKind) -> &'static str {
         ComponentKind::Phototransistor => "Phototransistor",
         ComponentKind::Optocoupler => "Optocoupler",
         ComponentKind::GenericIc => "Generic IC",
+        ComponentKind::Voltmeter => "Voltmeter",
+        ComponentKind::Ammeter => "Ammeter",
     }
 }
 
@@ -10198,6 +10903,129 @@ mod tests {
             closed_sim.details
         );
         assert!(closed_sim.energized_components.contains(&motor_id));
+    }
+
+    #[test]
+    fn button_toggle_demo_marks_led_output_path_when_button_is_closed() {
+        let mut app = CircuitApp::new();
+        app.load_button_toggle_led_demo();
+
+        let button_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::PushButton)
+            .map(|component| component.id)
+            .unwrap();
+        let led_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::Led)
+            .map(|component| component.id)
+            .unwrap();
+        let resistor_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::Resistor)
+            .map(|component| component.id)
+            .unwrap();
+        let gpio18_wire = app
+            .wires
+            .iter()
+            .find(|wire| {
+                let gpio18 = app.pin_pos(
+                    app.components
+                        .iter()
+                        .find(|component| component.kind == ComponentKind::Esp32)
+                        .unwrap()
+                        .id,
+                    "GPIO18",
+                );
+                gpio18.is_some_and(|pin| wire.points.iter().any(|point| point.distance(pin) <= 0.5))
+            })
+            .map(|wire| wire.id)
+            .unwrap();
+
+        let open_sim = analyze_circuit(&app.components, &app.wires);
+        assert!(!open_sim.energized_components.contains(&led_id));
+        assert!(!open_sim.energized_wires.contains(&gpio18_wire));
+
+        app.components
+            .iter_mut()
+            .find(|component| component.id == button_id)
+            .unwrap()
+            .value = "closed".to_string();
+
+        let closed_sim = analyze_circuit(&app.components, &app.wires);
+        assert!(
+            closed_sim.energized_components.contains(&led_id),
+            "{:?}",
+            closed_sim.details
+        );
+        assert!(closed_sim.energized_components.contains(&resistor_id));
+        assert!(closed_sim.energized_wires.contains(&gpio18_wire));
+    }
+
+    #[test]
+    fn manually_wired_led_loop_marks_current_path() {
+        let mut app = CircuitApp::new();
+        let battery = app.place_component(ComponentKind::Battery, Pos2::new(160.0, 300.0));
+        let resistor = app.place_component(ComponentKind::Resistor, Pos2::new(340.0, 300.0));
+        let led = app.place_component(ComponentKind::Led, Pos2::new(500.0, 300.0));
+        let ground = app.place_component(ComponentKind::Ground, Pos2::new(660.0, 360.0));
+
+        app.add_wire_between(battery, "+", resistor, "A");
+        app.add_wire_between(resistor, "B", led, "A");
+        app.add_wire_between(led, "B", ground, "GND");
+        app.add_wire_between(battery, "-", ground, "GND");
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+
+        assert_eq!(sim.summary, "Current flowing", "{:?}", sim.details);
+        assert!(sim.energized_components.contains(&resistor));
+        assert!(sim.energized_components.contains(&led));
+        assert_eq!(sim.energized_wires.len(), app.wires.len());
+    }
+
+    #[test]
+    fn manually_wired_controller_switch_led_path_follows_switch_state() {
+        let mut app = CircuitApp::new();
+        let esp32 = app.place_component(ComponentKind::Esp32, Pos2::new(420.0, 320.0));
+        let switch = app.place_component(ComponentKind::Switch, Pos2::new(180.0, 220.0));
+        let resistor = app.place_component(ComponentKind::Resistor, Pos2::new(660.0, 200.0));
+        let led = app.place_component(ComponentKind::Led, Pos2::new(780.0, 200.0));
+        let battery = app.place_component(ComponentKind::Battery, Pos2::new(180.0, 440.0));
+        let ground = app.place_component(ComponentKind::Ground, Pos2::new(880.0, 340.0));
+
+        app.components
+            .iter_mut()
+            .find(|component| component.id == switch)
+            .unwrap()
+            .value = "open".to_string();
+        app.add_wire_between(battery, "+", esp32, "VIN");
+        app.add_wire_between(battery, "-", ground, "GND");
+        app.add_wire_between(esp32, "GND", ground, "GND");
+        app.add_wire_between(esp32, "GPIO23", switch, "A");
+        app.add_wire_between(switch, "B", ground, "GND");
+        app.add_wire_between(esp32, "GPIO5", resistor, "A");
+        app.add_wire_between(resistor, "B", led, "A");
+        app.add_wire_between(led, "B", ground, "GND");
+
+        let open_sim = analyze_circuit(&app.components, &app.wires);
+        assert!(!open_sim.energized_components.contains(&led));
+
+        app.components
+            .iter_mut()
+            .find(|component| component.id == switch)
+            .unwrap()
+            .value = "closed".to_string();
+
+        let closed_sim = analyze_circuit(&app.components, &app.wires);
+        assert!(
+            closed_sim.energized_components.contains(&led),
+            "{:?}",
+            closed_sim.details
+        );
+        assert!(closed_sim.energized_components.contains(&resistor));
     }
 
     #[test]
