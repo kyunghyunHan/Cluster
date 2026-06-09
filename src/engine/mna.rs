@@ -362,6 +362,28 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         }
     }
 
+    // ── 1b. Merge nets connected by NetLabel: same label → same net ──────
+    {
+        let mut label_to_nodes: HashMap<String, Vec<usize>> = HashMap::new();
+        for comp in components {
+            if comp.kind == ComponentKind::NetLabel {
+                let label = comp.label.trim().to_ascii_lowercase();
+                if label.is_empty() {
+                    continue;
+                }
+                for pin in component_pin_defs(comp) {
+                    let idx = nm.reg(pin.pos);
+                    label_to_nodes.entry(label.clone()).or_default().push(idx);
+                }
+            }
+        }
+        for (_, nodes) in &label_to_nodes {
+            for w in nodes.windows(2) {
+                nm.join(w[0], w[1]);
+            }
+        }
+    }
+
     // ── 2. Identify GND roots ────────────────────────────────────────────
     let mut gnd_roots: HashSet<usize> = HashSet::new();
     for comp in components {
@@ -937,6 +959,22 @@ pub fn format_current(i: f64) -> String {
         format!("{:.2}µA", i * 1_000_000.0)
     } else {
         format!("{:.2}nA", i * 1e9)
+    }
+}
+
+/// Format a value with SI prefix and unit (e.g. 1e-6 F → "1.00µF")
+pub fn format_si(val: f64, unit: &str) -> String {
+    let a = val.abs();
+    if a >= 1.0 {
+        format!("{:.3}{}", val, unit)
+    } else if a >= 1e-3 {
+        format!("{:.3}m{}", val * 1e3, unit)
+    } else if a >= 1e-6 {
+        format!("{:.3}µ{}", val * 1e6, unit)
+    } else if a >= 1e-9 {
+        format!("{:.3}n{}", val * 1e9, unit)
+    } else {
+        format!("{:.3}p{}", val * 1e12, unit)
     }
 }
 
