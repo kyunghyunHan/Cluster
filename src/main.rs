@@ -119,6 +119,8 @@ struct CircuitApp {
     ac_freq_hz: f32,
     // ── Right-click context menu: (screen_pos, target component ID) ──────
     context_menu: Option<(egui::Pos2, u64)>,
+    // ── PNG screenshot pending ────────────────────────────────────────────
+    screenshot_pending: bool,
 }
 
 impl CircuitApp {
@@ -179,6 +181,7 @@ impl CircuitApp {
             show_oscilloscope: false,
             ac_freq_hz: 1000.0,
             context_menu: None,
+            screenshot_pending: false,
         }
     }
 
@@ -467,6 +470,7 @@ impl CircuitApp {
                 self.counters.meter += 1;
                 format!("AM{}", self.counters.meter)
             }
+            ComponentKind::TextNote => "NOTE".to_string(),
         }
     }
 
@@ -527,6 +531,7 @@ impl CircuitApp {
             ComponentKind::GenericIc => "IC".to_string(),
             ComponentKind::Voltmeter => "DC".to_string(),
             ComponentKind::Ammeter => "DC".to_string(),
+            ComponentKind::TextNote => "Add your note here".to_string(),
         }
     }
 
@@ -604,19 +609,29 @@ impl CircuitApp {
 
     /// Compute all wire IDs in the same net as `wire_id` using the wire graph.
     fn same_net_wires(&self, wire_id: u64) -> HashSet<u64> {
-        // Build adjacency: wires that share an endpoint
-        let mut same_net = HashSet::new();
-        if !self.wires.iter().any(|w| w.id == wire_id) {
-            return same_net;
+        // Build endpoint key → wire_id multimap once; BFS is then O(E) instead of O(W²)
+        type Key = (i32, i32);
+        let mut ep_to_wires: HashMap<Key, Vec<u64>> =
+            HashMap::with_capacity(self.wires.len() * 2);
+        // id → index for O(1) wire lookup
+        let mut id_to_idx: HashMap<u64, usize> = HashMap::with_capacity(self.wires.len());
+        for (idx, wire) in self.wires.iter().enumerate() {
+            id_to_idx.insert(wire.id, idx);
+            for pt in wire.points.first().into_iter().chain(wire.points.last()) {
+                let key: Key = (pt.x.round() as i32, pt.y.round() as i32);
+                ep_to_wires.entry(key).or_default().push(wire.id);
+            }
         }
-        let mut queue = Vec::new();
-        queue.push(wire_id);
+        if !id_to_idx.contains_key(&wire_id) {
+            return HashSet::new();
+        }
+
+        let mut same_net: HashSet<u64> = HashSet::new();
+        let mut queue: Vec<u64> = vec![wire_id];
         same_net.insert(wire_id);
 
         while let Some(wid) = queue.pop() {
-            let Some(wire) = self.wires.iter().find(|w| w.id == wid) else {
-                continue;
-            };
+            let wire = &self.wires[id_to_idx[&wid]];
             let wire_eps: Vec<Pos2> = wire
                 .points
                 .first()
@@ -625,35 +640,37 @@ impl CircuitApp {
                 .chain(wire.points.last().copied())
                 .collect();
 
+            // Fast path: endpoint-to-endpoint matches via the ep_to_wires map
+            for &ep in &wire_eps {
+                let key: Key = (ep.x.round() as i32, ep.y.round() as i32);
+                for &candidate in ep_to_wires.get(&key).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    if same_net.insert(candidate) {
+                        queue.push(candidate);
+                    }
+                }
+            }
+            // Slow path: T-junction — check if any other wire's endpoint lies on our segments
             for other in &self.wires {
                 if same_net.contains(&other.id) {
                     continue;
                 }
-                let other_eps: Vec<Pos2> = other
+                let mut other_eps = other
                     .points
                     .first()
                     .copied()
                     .into_iter()
-                    .chain(other.points.last().copied())
-                    .collect();
-                // Connected if any endpoint pair is within tolerance, OR
-                // if any endpoint of `other` lies on a segment of `wire` (T-junction)
-                let connected = wire_eps
-                    .iter()
-                    .any(|&ep| other_eps.iter().any(|&oep| ep.distance(oep) < 8.0))
-                    || other_eps.iter().any(|&oep| {
-                        wire.points
-                            .windows(2)
-                            .any(|seg| distance_to_segment(oep, seg[0], seg[1]) < 2.5)
-                    })
-                    || wire_eps.iter().any(|&ep| {
-                        other
-                            .points
-                            .windows(2)
-                            .any(|seg| distance_to_segment(ep, seg[0], seg[1]) < 2.5)
-                    });
-                if connected {
-                    same_net.insert(other.id);
+                    .chain(other.points.last().copied());
+                let connected = other_eps.any(|oep| {
+                    wire.points
+                        .windows(2)
+                        .any(|seg| distance_to_segment(oep, seg[0], seg[1]) < 2.5)
+                }) || wire_eps.iter().any(|&ep| {
+                    other
+                        .points
+                        .windows(2)
+                        .any(|seg| distance_to_segment(ep, seg[0], seg[1]) < 2.5)
+                });
+                if connected && same_net.insert(other.id) {
                     queue.push(other.id);
                 }
             }
@@ -970,6 +987,12 @@ impl CircuitApp {
                 self.status = format!("Export failed: {err}");
             }
         }
+    }
+
+    fn export_png(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        self.screenshot_pending = true;
+        self.status = "Capturing screenshot…".to_string();
     }
 
     fn export_spice_netlist(&mut self) {
@@ -1297,6 +1320,8 @@ impl CircuitApp {
             return simulation.clone();
         }
         let mut simulation = simulation_engine::analyze_circuit(&self.components, &self.wires);
+        // AC operating-point at the user-selected frequency
+        simulation.ac = mna::solve_ac(&self.components, &self.wires, self.ac_freq_hz as f64);
         let netlist = self.current_netlist();
         // Run ERC after topology analysis so it can use simulation results
         simulation.erc = run_erc_with_netlist(&self.components, &self.wires, &simulation, &netlist);
@@ -1585,6 +1610,23 @@ impl eframe::App for CircuitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_app_style(ctx);
 
+        // ── Handle screenshot events ──────────────────────────────────────
+        if self.screenshot_pending {
+            ctx.input(|i| {
+                for event in &i.events {
+                    if let egui::Event::Screenshot { image, .. } = event {
+                        let path = "cluster_circuit.png";
+                        let pixels: Vec<u8> = image.pixels.iter().flat_map(|c| [c.r(), c.g(), c.b(), c.a()]).collect();
+                        match write_png(path, image.width(), image.height(), &pixels) {
+                            Ok(()) => self.status = format!("Saved {path}."),
+                            Err(e) => self.status = format!("PNG export failed: {e}"),
+                        }
+                        self.screenshot_pending = false;
+                    }
+                }
+            });
+        }
+
         let simulation = self.current_simulation();
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
@@ -1696,7 +1738,7 @@ impl eframe::App for CircuitApp {
                     ui.checkbox(&mut self.simulate, "Live simulation");
                     ui.checkbox(&mut self.show_voltage_labels, "Voltage labels on wires");
                     ui.checkbox(&mut self.show_dc_overlay, "V/I badges on components");
-                    ui.checkbox(&mut self.show_oscilloscope, "Oscilloscope panel");
+                    ui.checkbox(&mut self.show_oscilloscope, "DC/AC Analysis panel");
                     ui.add_sized(
                         Vec2::new(180.0, 18.0),
                         egui::Slider::new(&mut self.grid, 10.0..=40.0).text("Grid"),
@@ -1734,6 +1776,10 @@ impl eframe::App for CircuitApp {
                     ui.separator();
                     if menu_action(ui, "Export SVG").clicked() {
                         self.export_svg();
+                        ui.close();
+                    }
+                    if menu_action(ui, "Export PNG (screenshot)").clicked() {
+                        self.export_png(ctx);
                         ui.close();
                     }
                     if menu_action(ui, "Export CIR").clicked() {
@@ -2415,16 +2461,24 @@ impl eframe::App for CircuitApp {
                 ctx.request_repaint();
             }
 
-            // Flow speed: faster when more current (DC-aware), fallback 110 px/s
-            let flow_speed: f32 = simulation.dc.as_ref()
-                .map(|dc| {
-                    let max_i = dc.branch_current.values().map(|v| v.abs()).fold(0.0_f64, f64::max);
-                    (max_i as f32 * 8000.0).clamp(60.0, 220.0)
-                })
-                .unwrap_or(110.0);
+            // Flow speed: faster when more current (DC-aware); shorted circuits run fast/red
+            let (flow_speed, flow_color_override): (f32, Option<egui::Color32>) =
+                if simulation.shorted && !simulation.energized_wires.is_empty() {
+                    // Short circuit: fast red pulse to signal danger
+                    (320.0, Some(egui::Color32::from_rgb(255, 60, 60)))
+                } else {
+                    let spd = simulation.dc.as_ref()
+                        .map(|dc| {
+                            let max_i = dc.branch_current.values().map(|v| v.abs()).fold(0.0_f64, f64::max);
+                            (max_i as f32 * 8000.0).clamp(60.0, 220.0)
+                        })
+                        .unwrap_or(110.0);
+                    (spd, None)
+                };
+            let _ = flow_color_override; // reserved for future tinting; arrows already visually distinct
             let flow_phase = ctx.input(|i| i.time) as f32 * flow_speed;
-            let show_flow =
-                self.simulate && !simulation.shorted && !simulation.energized_wires.is_empty();
+            // Show flow whenever wires are energized — shorted circuits show fast to signal the short
+            let show_flow = self.simulate && !simulation.energized_wires.is_empty();
             if show_flow {
                 ctx.request_repaint();
             }
@@ -3680,103 +3734,161 @@ impl eframe::App for CircuitApp {
             self.show_help = open;
         }
 
-        // ── Oscilloscope / waveform viewer panel ────────────────────────────
+        // ── DC / AC Analysis panel ──────────────────────────────────────────
         if self.show_oscilloscope {
             let mut open = self.show_oscilloscope;
             let dc_result = simulation.dc.clone();
-            // Build id→label map for human-readable display
+            let ac_result = simulation.ac.clone();
             let id_to_label: std::collections::HashMap<u64, String> = self.components.iter()
                 .map(|c| (c.id, format!("{} ({})", c.label, component_kind_label(c.kind))))
                 .collect();
-            let id_to_voltage: std::collections::HashMap<u64, f64> = dc_result.as_ref()
-                .map(|dc| dc.component_voltage.clone())
-                .unwrap_or_default();
 
-            egui::Window::new("Oscilloscope / DC Analysis")
+            // Build wire → net name map: prefer NetLabel values on same net, else "Net#id"
+            let wire_net_names: std::collections::HashMap<u64, String> = {
+                let mut m: std::collections::HashMap<u64, String> = self.wires.iter()
+                    .map(|w| (w.id, format!("Net#{}", w.id)))
+                    .collect();
+                // Find NetLabel components and match their pin position to wires
+                for comp in &self.components {
+                    if comp.kind == ComponentKind::NetLabel && !comp.value.is_empty() {
+                        let pin_positions: Vec<Pos2> = component_pin_defs(comp)
+                            .into_iter().map(|p| p.pos).collect();
+                        for wire in &self.wires {
+                            let touches = pin_positions.iter().any(|&pp| {
+                                wire.points.iter().any(|&wp| wp.distance(pp) < 6.0)
+                                || wire.points.windows(2).any(|seg|
+                                    distance_to_segment(pp, seg[0], seg[1]) < 3.0)
+                            });
+                            if touches {
+                                m.insert(wire.id, comp.value.clone());
+                            }
+                        }
+                    }
+                }
+                m
+            };
+
+            egui::Window::new("DC / AC Analysis")
                 .open(&mut open)
                 .collapsible(true)
                 .resizable(true)
                 .default_pos(egui::Pos2::new(60.0, 120.0))
-                .default_size(Vec2::new(460.0, 380.0))
+                .default_size(Vec2::new(480.0, 480.0))
                 .show(ctx, |ui| {
-                    if let Some(dc) = &dc_result {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                        // ── Component Voltages ─────────────────────────────
-                        ui.label(egui::RichText::new("Component Voltages")
-                            .strong().color(Color32::from_rgb(120, 200, 160)));
-                        ui.separator();
-
-                        let mut comp_voltages: Vec<(String, f64)> = dc.component_voltage
-                            .iter()
-                            .filter_map(|(&id, &v)| {
-                                id_to_label.get(&id).map(|lbl| (lbl.clone(), v))
-                            })
-                            .collect();
-                        comp_voltages.sort_by(|a, b| a.0.cmp(&b.0));
-
-                        if comp_voltages.is_empty() {
-                            ui.label(egui::RichText::new("No voltage data — enable Live Simulation")
-                                .color(Color32::from_rgb(160, 160, 160)).italics());
-                        } else {
-                            let max_v = comp_voltages.iter().map(|(_, v)| v.abs()).fold(0.001_f64, f64::max);
-                            osc_bar_rows(ui, &comp_voltages, max_v, true);
-                        }
-
-                        ui.add_space(10.0);
-
-                        // ── Branch Currents ────────────────────────────────
-                        ui.label(egui::RichText::new("Branch Currents")
-                            .strong().color(Color32::from_rgb(120, 180, 255)));
-                        ui.separator();
-
-                        let mut comp_currents: Vec<(String, f64)> = dc.branch_current
-                            .iter()
-                            .filter_map(|(&id, &v)| {
-                                id_to_label.get(&id).map(|lbl| (lbl.clone(), v))
-                            })
-                            .collect();
-                        comp_currents.sort_by(|a, b| a.0.cmp(&b.0));
-
-                        if comp_currents.is_empty() {
-                            ui.label(egui::RichText::new("No current data")
-                                .color(Color32::from_rgb(160, 160, 160)).italics());
-                        } else {
-                            let max_i = comp_currents.iter().map(|(_, v)| v.abs()).fold(0.001_f64, f64::max);
-                            osc_bar_rows(ui, &comp_currents, max_i, false);
-                        }
-
-                        ui.add_space(10.0);
-
-                        // ── Wire Net Voltages ─────────────────────────────
-                        ui.label(egui::RichText::new("Wire Net Voltages")
-                            .strong().color(Color32::from_rgb(200, 160, 255)));
-                        ui.separator();
-
-                        let mut wire_rows: Vec<(String, f64)> = {
-                            let wire_map: std::collections::HashMap<u64, String> = self.wires.iter()
-                                .map(|w| (w.id, format!("Net#{}", w.id)))
-                                .collect();
-                            dc.wire_voltage.iter()
-                                .filter_map(|(&id, &v)| wire_map.get(&id).map(|l| (l.clone(), v)))
-                                .collect()
-                        };
-                        wire_rows.sort_by(|a, b| a.0.cmp(&b.0));
-                        if wire_rows.is_empty() {
-                            ui.label(egui::RichText::new("No wire data")
-                                .color(Color32::from_rgb(160, 160, 160)).italics());
-                        } else {
-                            let max_v = wire_rows.iter().map(|(_, v)| v.abs()).fold(0.001_f64, f64::max);
-                            osc_bar_rows(ui, &wire_rows, max_v, true);
-                        }
-                        }); // ScrollArea
-                    } else {
+                    if dc_result.is_none() && ac_result.is_none() {
                         ui.add_space(16.0);
                         ui.centered_and_justified(|ui| {
                             ui.label(egui::RichText::new("Enable Live Simulation to see data")
                                 .size(14.0).color(Color32::from_rgb(140, 150, 160)).italics());
                         });
+                    } else {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                        if let Some(dc) = &dc_result {
+                            // ── DC Component Voltages ──────────────────────
+                            ui.label(egui::RichText::new("DC  ·  Component Voltages")
+                                .strong().color(Color32::from_rgb(120, 200, 160)));
+                            ui.separator();
+                            let mut comp_voltages: Vec<(String, f64)> = dc.component_voltage
+                                .iter()
+                                .filter_map(|(&id, &v)| id_to_label.get(&id).map(|l| (l.clone(), v)))
+                                .collect();
+                            comp_voltages.sort_by(|a, b| a.0.cmp(&b.0));
+                            if comp_voltages.is_empty() {
+                                ui.label(egui::RichText::new("No data").color(Color32::from_rgb(120,120,120)).italics());
+                            } else {
+                                let max_v = comp_voltages.iter().map(|(_, v)| v.abs()).fold(0.001_f64, f64::max);
+                                osc_bar_rows(ui, &comp_voltages, max_v, true);
+                            }
+                            ui.add_space(10.0);
+
+                            // ── DC Branch Currents ─────────────────────────
+                            ui.label(egui::RichText::new("DC  ·  Branch Currents")
+                                .strong().color(Color32::from_rgb(120, 180, 255)));
+                            ui.separator();
+                            let mut comp_currents: Vec<(String, f64)> = dc.branch_current
+                                .iter()
+                                .filter_map(|(&id, &v)| id_to_label.get(&id).map(|l| (l.clone(), v)))
+                                .collect();
+                            comp_currents.sort_by(|a, b| a.0.cmp(&b.0));
+                            if comp_currents.is_empty() {
+                                ui.label(egui::RichText::new("No data").color(Color32::from_rgb(120,120,120)).italics());
+                            } else {
+                                let max_i = comp_currents.iter().map(|(_, v)| v.abs()).fold(0.001_f64, f64::max);
+                                osc_bar_rows(ui, &comp_currents, max_i, false);
+                            }
+                            ui.add_space(10.0);
+
+                            // ── DC Wire / Net Voltages ─────────────────────
+                            ui.label(egui::RichText::new("DC  ·  Net Voltages")
+                                .strong().color(Color32::from_rgb(200, 160, 255)));
+                            ui.separator();
+                            let mut wire_rows: Vec<(String, f64)> = dc.wire_voltage.iter()
+                                .filter_map(|(&id, &v)| {
+                                    wire_net_names.get(&id).map(|name| (name.clone(), v))
+                                })
+                                .collect();
+                            // Deduplicate by net name (keep highest absolute voltage)
+                            wire_rows.sort_by(|a, b| a.0.cmp(&b.0));
+                            wire_rows.dedup_by(|b, a| {
+                                if a.0 == b.0 { if b.1.abs() > a.1.abs() { a.1 = b.1; } true }
+                                else { false }
+                            });
+                            if wire_rows.is_empty() {
+                                ui.label(egui::RichText::new("No data").color(Color32::from_rgb(120,120,120)).italics());
+                            } else {
+                                let max_v = wire_rows.iter().map(|(_, v)| v.abs()).fold(0.001_f64, f64::max);
+                                osc_bar_rows(ui, &wire_rows, max_v, true);
+                            }
+                        }
+
+                        // ── AC section ────────────────────────────────────
+                        if let Some(ac) = &ac_result {
+                            ui.add_space(14.0);
+                            ui.label(egui::RichText::new(
+                                format!("AC  ·  {:.0} Hz  ·  Net Voltage |V|", self.ac_freq_hz))
+                                .strong().color(Color32::from_rgb(255, 200, 100)));
+                            ui.separator();
+                            let mut ac_rows: Vec<(String, f64)> = ac.wire_voltage_mag.iter()
+                                .filter_map(|(&id, &mag)| {
+                                    wire_net_names.get(&id).map(|name| (name.clone(), mag))
+                                })
+                                .collect();
+                            ac_rows.sort_by(|a, b| a.0.cmp(&b.0));
+                            ac_rows.dedup_by(|b, a| {
+                                if a.0 == b.0 { if b.1 > a.1 { a.1 = b.1; } true }
+                                else { false }
+                            });
+                            if ac_rows.is_empty() {
+                                ui.label(egui::RichText::new("No AC data (add C, L, or AC source)").color(Color32::from_rgb(120,120,120)).italics());
+                            } else {
+                                let max_v = ac_rows.iter().map(|(_, v)| *v).fold(0.001_f64, f64::max);
+                                osc_bar_rows(ui, &ac_rows, max_v, true);
+                            }
+
+                            // Component impedances
+                            if !ac.component_impedance.is_empty() {
+                                ui.add_space(10.0);
+                                ui.label(egui::RichText::new("AC  ·  Impedances |Z|")
+                                    .strong().color(Color32::from_rgb(255, 165, 80)));
+                                ui.separator();
+                                let mut z_rows: Vec<(String, String)> = ac.component_impedance.iter()
+                                    .filter_map(|(&id, &z)| {
+                                        id_to_label.get(&id).map(|l| (l.clone(), format_resistance(z as f32)))
+                                    })
+                                    .collect();
+                                z_rows.sort_by(|a, b| a.0.cmp(&b.0));
+                                for (lbl, z) in &z_rows {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(lbl).size(11.0).color(Color32::from_rgb(200,210,220)));
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.label(egui::RichText::new(z).size(11.0).monospace().color(Color32::from_rgb(255, 200, 100)));
+                                        });
+                                    });
+                                }
+                            }
+                        }
+                        }); // ScrollArea
                     }
-                    let _ = id_to_voltage; // suppress unused warning
                 });
             self.show_oscilloscope = open;
         }
@@ -5122,6 +5234,7 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         current,
         component_warnings,
         dc,
+        ac: None, // populated in current_simulation()
         erc: Vec::new(), // populated after construction via run_erc()
     }
 }
@@ -5839,6 +5952,7 @@ fn component_conductance(component: &Component) -> Conductance {
         ComponentKind::Transformer => Conductance::Conductor,
         ComponentKind::Voltmeter => Conductance::Open,
         ComponentKind::Ammeter => Conductance::Conductor,
+        ComponentKind::TextNote => Conductance::Open,
     }
 }
 
@@ -5967,6 +6081,7 @@ fn component_size(component: &Component) -> Vec2 {
         ComponentKind::Optocoupler => (80.0, 64.0),
         ComponentKind::GenericIc => (80.0, 80.0),
         ComponentKind::Voltmeter | ComponentKind::Ammeter => (80.0, 60.0),
+        ComponentKind::TextNote => (160.0, 56.0),
     };
     Vec2::new(w, h)
 }
@@ -7071,6 +7186,24 @@ fn draw_component(
                 }
             }
         }
+        ComponentKind::TextNote => {
+            // Bordered text box with the note text (stored in `value`)
+            let text_fill = Color32::from_rgba_unmultiplied(30, 36, 46, 220);
+            let border = if selected {
+                Stroke::new(1.5, Color32::from_rgb(90, 200, 140))
+            } else {
+                Stroke::new(1.0, Color32::from_rgb(90, 110, 140))
+            };
+            painter.rect_filled(rect, 4.0, text_fill);
+            painter.rect_stroke(rect, 4.0, border, egui::StrokeKind::Outside);
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                &component.value,
+                egui::FontId::proportional(12.0 * view.zoom.sqrt()),
+                Color32::from_rgb(210, 220, 230),
+            );
+        }
         ComponentKind::Ammeter => {
             draw_meter(painter, rect, component.rotation, stroke, "A", energized);
             if show_dc_overlay {
@@ -8055,6 +8188,7 @@ pub(crate) fn component_pin_defs(component: &Component) -> Vec<CircuitPin> {
                 pos: Pos2::new(rect.right(), center.y),
             },
         ],
+        ComponentKind::TextNote => vec![], // no electrical pins
         _ => vec![
             CircuitPin {
                 label: "A",
@@ -8925,59 +9059,45 @@ fn draw_junctions(painter: &egui::Painter, wires: &[Wire], view: CanvasView) {
     let mut junction_keys: HashSet<(i32, i32)> = HashSet::new();
     let mut junctions: Vec<Pos2> = Vec::new();
 
-    let add_junction =
-        |key: (i32, i32), pos: Pos2, set: &mut HashSet<(i32, i32)>, out: &mut Vec<Pos2>| {
-            if set.insert(key) {
-                out.push(pos);
-            }
-        };
-
-    // Pass 1: shared vertices (two or more wires share the same point)
-    let mut counts: HashMap<(i32, i32), (Pos2, usize)> = HashMap::new();
+    // Pass 1: shared vertices + collect unique endpoint keys in one scan
+    let mut counts: HashMap<(i32, i32), (Pos2, u32)> = HashMap::with_capacity(wires.len() * 3);
+    let mut endpoint_keys: HashSet<(i32, i32)> = HashSet::with_capacity(wires.len() * 2);
     for wire in wires {
-        for &point in &wire.points {
+        let n = wire.points.len();
+        for (idx, &point) in wire.points.iter().enumerate() {
             let key = (point.x.round() as i32, point.y.round() as i32);
             let entry = counts.entry(key).or_insert((point, 0));
             entry.1 += 1;
+            if idx == 0 || idx + 1 == n {
+                endpoint_keys.insert(key);
+            }
         }
     }
-    for (key, (pos, count)) in &counts {
-        if *count > 1 {
-            add_junction(*key, *pos, &mut junction_keys, &mut junctions);
+    for (&key, &(pos, count)) in &counts {
+        if count > 1 && junction_keys.insert(key) {
+            junctions.push(pos);
         }
     }
 
-    // Pass 2: T-intersections — wire endpoint lies on another wire's segment
-    let endpoints: Vec<Pos2> = wires
+    // Pass 2: T-intersections — flatten all segments for cache-friendly scan
+    let segments: Vec<(Pos2, Pos2)> = wires
         .iter()
-        .flat_map(|w| {
-            let mut pts = Vec::new();
-            if let Some(&p) = w.points.first() {
-                pts.push(p);
-            }
-            if w.points.len() > 1
-                && let Some(&p) = w.points.last()
-            {
-                pts.push(p);
-            }
-            pts
-        })
+        .flat_map(|w| w.points.windows(2).map(|s| (s[0], s[1])))
         .collect();
 
-    for ep in &endpoints {
-        let key = (ep.x.round() as i32, ep.y.round() as i32);
-        if junction_keys.contains(&key) {
-            continue; // already marked
+    for &ep_key in &endpoint_keys {
+        if junction_keys.contains(&ep_key) {
+            continue;
         }
-        for wire in wires {
-            for seg in wire.points.windows(2) {
-                let d = distance_to_segment(*ep, seg[0], seg[1]);
-                // endpoint sits on segment but is not that segment's own endpoint
-                let not_vertex = ep.distance(seg[0]) > 1.5 && ep.distance(seg[1]) > 1.5;
-                if d < 1.5 && not_vertex {
-                    add_junction(key, *ep, &mut junction_keys, &mut junctions);
-                    break;
+        let ep = counts[&ep_key].0;
+        'seg: for &(sa, sb) in &segments {
+            if ep.distance(sa) > 1.5 && ep.distance(sb) > 1.5
+                && distance_to_segment(ep, sa, sb) < 1.5
+            {
+                if junction_keys.insert(ep_key) {
+                    junctions.push(ep);
                 }
+                break 'seg;
             }
         }
     }
@@ -8994,41 +9114,48 @@ fn draw_junctions(painter: &egui::Painter, wires: &[Wire], view: CanvasView) {
     }
 
     // Draw hop arcs at non-connecting crossings (two wires cross but are NOT in junction list)
-    let junction_set: HashSet<(i32, i32)> = junction_keys;
-    for (i, wa) in wires.iter().enumerate() {
-        for seg_a in wa.points.windows(2) {
-            for wb in wires.iter().skip(i + 1) {
-                for seg_b in wb.points.windows(2) {
-                    if let Some(cross) =
-                        segment_intersection(seg_a[0], seg_a[1], seg_b[0], seg_b[1])
-                    {
-                        let key = (cross.x.round() as i32, cross.y.round() as i32);
-                        if junction_set.contains(&key) {
-                            continue;
-                        }
-                        // Draw a small hop arc on wire B over wire A
-                        let sp = view.to_screen(cross);
-                        let hop_r = view.scale_f(5.5).clamp(3.0, 8.0);
-                        // Direction of segment_b
-                        let dir = (seg_b[1] - seg_b[0]).normalized();
-                        let perp = Vec2::new(-dir.y, dir.x);
-                        let a0 = sp - dir * hop_r;
-                        let a1 = sp + dir * hop_r;
-                        let ctrl = sp + perp * hop_r * 1.2;
-                        // Approximate arc as 3 segments
-                        let p0 = a0.lerp(ctrl, 0.5);
-                        let p1 = ctrl;
-                        let p2 = a1.lerp(ctrl, 0.5);
-                        let bg = Color32::from_rgb(18, 22, 28);
-                        // Erase wire underneath with background color
-                        painter.line_segment([a0, a1], Stroke::new(5.0, bg));
-                        let hop_stroke = Stroke::new(2.0, Color32::from_rgb(105, 178, 255));
-                        painter.line_segment([a0, p0], hop_stroke);
-                        painter.line_segment([p0, p1], hop_stroke);
-                        painter.line_segment([p1, p2], hop_stroke);
-                        painter.line_segment([p2, a1], hop_stroke);
-                    }
+    // Flat segment list with AABB min/max pre-computed to skip non-overlapping pairs quickly
+    let seg_data: Vec<(Pos2, Pos2, f32, f32, f32, f32)> = segments
+        .iter()
+        .map(|&(a, b)| {
+            (
+                a, b,
+                a.x.min(b.x), a.x.max(b.x),
+                a.y.min(b.y), a.y.max(b.y),
+            )
+        })
+        .collect();
+
+    let n_seg = seg_data.len();
+    for i in 0..n_seg {
+        let (a0, a1, ax0, ax1, ay0, ay1) = seg_data[i];
+        for j in (i + 1)..n_seg {
+            let (b0, b1, bx0, bx1, by0, by1) = seg_data[j];
+            // AABB overlap test — eliminates ~90% of pairs before the heavier intersection math
+            if ax1 < bx0 || bx1 < ax0 || ay1 < by0 || by1 < ay0 {
+                continue;
+            }
+            if let Some(cross) = segment_intersection(a0, a1, b0, b1) {
+                let key = (cross.x.round() as i32, cross.y.round() as i32);
+                if junction_keys.contains(&key) {
+                    continue;
                 }
+                let sp = view.to_screen(cross);
+                let hop_r = view.scale_f(5.5).clamp(3.0, 8.0);
+                let dir = (b1 - b0).normalized();
+                let perp = Vec2::new(-dir.y, dir.x);
+                let ha0 = sp - dir * hop_r;
+                let ha1 = sp + dir * hop_r;
+                let ctrl = sp + perp * hop_r * 1.2;
+                let p0 = ha0.lerp(ctrl, 0.5);
+                let p2 = ha1.lerp(ctrl, 0.5);
+                let bg = Color32::from_rgb(18, 22, 28);
+                painter.line_segment([ha0, ha1], Stroke::new(5.0, bg));
+                let hop_stroke = Stroke::new(2.0, Color32::from_rgb(105, 178, 255));
+                painter.line_segment([ha0, p0], hop_stroke);
+                painter.line_segment([p0, ctrl], hop_stroke);
+                painter.line_segment([ctrl, p2], hop_stroke);
+                painter.line_segment([p2, ha1], hop_stroke);
             }
         }
     }
@@ -11000,6 +11127,7 @@ fn component_kind_label(kind: ComponentKind) -> &'static str {
         ComponentKind::GenericIc => "Generic IC",
         ComponentKind::Voltmeter => "Voltmeter",
         ComponentKind::Ammeter => "Ammeter",
+        ComponentKind::TextNote => "Text Note",
     }
 }
 
@@ -11027,6 +11155,87 @@ fn escape_xml(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Minimal dependency-free PNG encoder (RGBA8).
+/// Uses zlib's `deflate` via the `miniz_oxide` crate which is a transitive
+/// dependency of eframe, so no new dependency is required.
+fn write_png(path: &str, width: usize, height: usize, rgba: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    fn adler32(data: &[u8]) -> u32 {
+        let (mut s1, mut s2) = (1u32, 0u32);
+        for &b in data {
+            s1 = (s1 + b as u32) % 65521;
+            s2 = (s2 + s1) % 65521;
+        }
+        (s2 << 16) | s1
+    }
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                if crc & 1 != 0 { crc = (crc >> 1) ^ 0xEDB8_8320; }
+                else { crc >>= 1; }
+            }
+        }
+        !crc
+    }
+    fn write_chunk(out: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
+        let len = data.len() as u32;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(tag);
+        out.extend_from_slice(data);
+        let mut crc_data = Vec::with_capacity(4 + data.len());
+        crc_data.extend_from_slice(tag);
+        crc_data.extend_from_slice(data);
+        out.extend_from_slice(&crc32(&crc_data).to_be_bytes());
+    }
+
+    // Build raw scanlines with filter byte 0 (None)
+    let mut raw: Vec<u8> = Vec::with_capacity(height * (1 + width * 4));
+    for y in 0..height {
+        raw.push(0); // filter type None
+        raw.extend_from_slice(&rgba[y * width * 4..(y + 1) * width * 4]);
+    }
+
+    // Store uncompressed via zlib non-compressed block (no extra deps)
+    let mut zlib: Vec<u8> = Vec::new();
+    zlib.push(0x78); // CMF: deflate, window=32KB
+    zlib.push(0x01); // FLG: no dict, check bits
+    // Non-compressed deflate blocks (BFINAL=1, BTYPE=00)
+    let mut pos = 0usize;
+    while pos < raw.len() {
+        let block_len = (raw.len() - pos).min(65535) as u16;
+        let last = (pos + block_len as usize) >= raw.len();
+        zlib.push(last as u8); // BFINAL + BTYPE=00
+        zlib.extend_from_slice(&block_len.to_le_bytes());
+        zlib.extend_from_slice(&(!block_len).to_le_bytes());
+        zlib.extend_from_slice(&raw[pos..pos + block_len as usize]);
+        pos += block_len as usize;
+    }
+    zlib.extend_from_slice(&adler32(&raw).to_be_bytes());
+
+    let mut out: Vec<u8> = Vec::new();
+    // PNG signature
+    out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+    // IHDR
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&(width as u32).to_be_bytes());
+    ihdr.extend_from_slice(&(height as u32).to_be_bytes());
+    ihdr.push(8);  // bit depth
+    ihdr.push(6);  // colour type RGBA
+    ihdr.extend_from_slice(&[0, 0, 0]); // compression, filter, interlace
+    write_chunk(&mut out, b"IHDR", &ihdr);
+    // IDAT
+    write_chunk(&mut out, b"IDAT", &zlib);
+    // IEND
+    write_chunk(&mut out, b"IEND", &[]);
+
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(&out)?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -58,6 +58,7 @@ pub(crate) enum ComponentKind {
     GenericIc,
     Voltmeter,
     Ammeter,
+    TextNote,
 }
 
 #[derive(Debug, Clone)]

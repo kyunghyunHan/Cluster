@@ -221,6 +221,7 @@ fn component_kind_label(kind: ComponentKind) -> &'static str {
         ComponentKind::GenericIc => "IC",
         ComponentKind::Voltmeter => "VM",
         ComponentKind::Ammeter => "AM",
+        ComponentKind::TextNote => "NOTE",
     }
 }
 
