@@ -91,7 +91,7 @@ struct CircuitApp {
     snap_target: Option<Pos2>,
     circuit_revision: u64,
     cached_netlist: Option<(u64, CircuitNetlist)>,
-    cached_simulation: Option<(u64, Simulation)>,
+    cached_simulation: Option<(u64, u32, Simulation)>,
     cached_connected_pins: Option<(u64, Vec<(i32, i32)>)>,
     last_autorecover_revision: u64,
     /// Show DC voltage labels on every wire
@@ -555,6 +555,14 @@ impl CircuitApp {
         id
     }
 
+    fn place_note(&mut self, pos: Pos2, text: &str) -> u64 {
+        let note = self.place_component(ComponentKind::TextNote, pos);
+        if let Some(component) = self.components.iter_mut().find(|component| component.id == note) {
+            component.value = text.to_string();
+        }
+        note
+    }
+
     fn add_wire(&mut self, points: Vec<Pos2>) {
         let points = simplify_wire(points);
         if points.len() < 2 {
@@ -687,6 +695,12 @@ impl CircuitApp {
         self.multi_selected.clear();
         self.drag = None;
         self.draft_wire.clear();
+        self.wire_from_select = false;
+        self.hovered_net_wire = None;
+        self.highlighted_net_wires.clear();
+        self.snap_target = None;
+        self.inline_edit = None;
+        self.context_menu = None;
         self.counters = Counters::default();
         self.next_id = 1;
         self.tool = Tool::Select;
@@ -745,7 +759,190 @@ impl CircuitApp {
         self.add_wire_between(resistor, "B", led, "A");
         self.add_wire_between(led, "B", ground, "GND");
         self.add_wire_between(battery, "-", ground, "GND");
+        self.place_note(
+            Pos2::new(440.0, 110.0),
+            "EXPECT: ON\nBattery + -> resistor -> LED -> GND",
+        );
         self.status = "Loaded LED current-limiting demo.".to_string();
+        self.pending_fit = true;
+    }
+
+    fn load_switch_led_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(180.0, 390.0));
+        let resistor = self.place_component(ComponentKind::Resistor, Pos2::new(360.0, 220.0));
+        let led = self.place_component(ComponentKind::Led, Pos2::new(540.0, 220.0));
+        let switch = self.place_component(ComponentKind::Switch, Pos2::new(700.0, 320.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(820.0, 430.0));
+
+        self.add_wire_between(battery, "+", resistor, "A");
+        self.add_wire_between(resistor, "B", led, "A");
+        self.add_wire_between(led, "B", switch, "A");
+        self.add_wire_between(switch, "B", ground, "GND");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.place_note(
+            Pos2::new(490.0, 120.0),
+            "EXPECT: ON when SW1 is closed\nOpen SW1 to break current.",
+        );
+        self.status = "Loaded switch-controlled LED demo. Set SW1 open/closed to compare.".to_string();
+        self.pending_fit = true;
+    }
+
+    fn load_open_switch_led_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(180.0, 390.0));
+        let resistor = self.place_component(ComponentKind::Resistor, Pos2::new(360.0, 220.0));
+        let led = self.place_component(ComponentKind::Led, Pos2::new(540.0, 220.0));
+        let switch = self.place_component(ComponentKind::Switch, Pos2::new(700.0, 320.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(820.0, 430.0));
+
+        if let Some(component) = self.components.iter_mut().find(|component| component.id == switch) {
+            component.value = "open".to_string();
+        }
+        self.add_wire_between(battery, "+", resistor, "A");
+        self.add_wire_between(resistor, "B", led, "A");
+        self.add_wire_between(led, "B", switch, "A");
+        self.add_wire_between(switch, "B", ground, "GND");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.place_note(
+            Pos2::new(490.0, 120.0),
+            "EXPECT: OFF / Open circuit\nSW1 is open, so current must not pass.",
+        );
+        self.status = "Loaded open-switch lesson. LED should stay off.".to_string();
+        self.pending_fit = true;
+    }
+
+    fn load_capacitor_dc_block_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(180.0, 390.0));
+        let resistor = self.place_component(ComponentKind::Resistor, Pos2::new(360.0, 220.0));
+        let capacitor = self.place_component(ComponentKind::Capacitor, Pos2::new(540.0, 220.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(720.0, 400.0));
+
+        self.add_wire_between(battery, "+", resistor, "A");
+        self.add_wire_between(resistor, "B", capacitor, "A");
+        self.add_wire_between(capacitor, "B", ground, "GND");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.place_note(
+            Pos2::new(450.0, 110.0),
+            "EXPECT: OFF in DC\nCapacitor blocks steady current.",
+        );
+        self.status = "Loaded DC capacitor block lesson. Simulation should show Open circuit.".to_string();
+        self.pending_fit = true;
+    }
+
+    fn load_missing_return_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(180.0, 350.0));
+        let resistor = self.place_component(ComponentKind::Resistor, Pos2::new(360.0, 220.0));
+        let led = self.place_component(ComponentKind::Led, Pos2::new(540.0, 220.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(720.0, 390.0));
+
+        self.add_wire_between(battery, "+", resistor, "A");
+        self.add_wire_between(resistor, "B", led, "A");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.place_note(
+            Pos2::new(450.0, 110.0),
+            "EXPECT: OFF / Open circuit\nLED cathode is not returned to GND.",
+        );
+        self.status = "Loaded missing-return lesson. Complete the LED to GND wire to fix it.".to_string();
+        self.pending_fit = true;
+    }
+
+    fn load_short_circuit_lesson_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(180.0, 340.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(460.0, 340.0));
+
+        self.add_wire_between(battery, "+", ground, "GND");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.place_note(
+            Pos2::new(330.0, 180.0),
+            "EXPECT: ERROR / Short circuit\nBattery + is tied directly to GND.",
+        );
+        self.status = "Loaded short-circuit lesson. ERC should report an error.".to_string();
+        self.pending_fit = true;
+    }
+
+    fn load_direct_gpio_motor_warning_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(150.0, 430.0));
+        let esp32 = self.place_component(ComponentKind::Esp32, Pos2::new(430.0, 320.0));
+        let motor = self.place_component(ComponentKind::DcMotor, Pos2::new(720.0, 260.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(820.0, 430.0));
+
+        self.add_wire_between(battery, "+", esp32, "VIN");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.add_wire_between(esp32, "GND", ground, "GND");
+        self.add_wire_between(esp32, "GPIO18", motor, "+");
+        self.add_wire_between(motor, "-", ground, "GND");
+        self.place_note(
+            Pos2::new(600.0, 120.0),
+            "EXPECT: WARNING\nGPIO should not drive a motor directly.",
+        );
+        self.status = "Loaded direct-GPIO motor warning lesson. Use a motor driver instead.".to_string();
+        self.pending_fit = true;
+    }
+
+    fn load_parallel_led_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(160.0, 360.0));
+        let r1 = self.place_component(ComponentKind::Resistor, Pos2::new(360.0, 220.0));
+        let led1 = self.place_component(ComponentKind::Led, Pos2::new(540.0, 220.0));
+        let r2 = self.place_component(ComponentKind::Resistor, Pos2::new(360.0, 360.0));
+        let led2 = self.place_component(ComponentKind::Led, Pos2::new(540.0, 360.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(740.0, 470.0));
+
+        self.add_wire_between(battery, "+", r1, "A");
+        self.add_wire_between(battery, "+", r2, "A");
+        self.add_wire_between(r1, "B", led1, "A");
+        self.add_wire_between(r2, "B", led2, "A");
+        self.add_wire_between(led1, "B", ground, "GND");
+        self.add_wire_between(led2, "B", ground, "GND");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.place_note(
+            Pos2::new(440.0, 120.0),
+            "EXPECT: BOTH ON\nEach LED has its own resistor.",
+        );
+        self.status = "Loaded parallel LEDs demo with one resistor per LED.".to_string();
+        self.pending_fit = true;
+    }
+
+    fn load_lamp_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(180.0, 360.0));
+        let fuse = self.place_component(ComponentKind::Fuse, Pos2::new(360.0, 220.0));
+        let lamp = self.place_component(ComponentKind::Lamp, Pos2::new(540.0, 220.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(720.0, 390.0));
+
+        self.add_wire_between(battery, "+", fuse, "A");
+        self.add_wire_between(fuse, "B", lamp, "A");
+        self.add_wire_between(lamp, "B", ground, "GND");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.place_note(
+            Pos2::new(430.0, 110.0),
+            "EXPECT: ON\nFuse is in series with the lamp.",
+        );
+        self.status = "Loaded fused lamp demo.".to_string();
+        self.pending_fit = true;
+    }
+
+    fn load_reversed_led_warning_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(180.0, 360.0));
+        let resistor = self.place_component(ComponentKind::Resistor, Pos2::new(360.0, 220.0));
+        let led = self.place_component(ComponentKind::Led, Pos2::new(540.0, 220.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(720.0, 390.0));
+
+        self.add_wire_between(battery, "+", resistor, "A");
+        self.add_wire_between(resistor, "B", led, "B");
+        self.add_wire_between(led, "A", ground, "GND");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.place_note(
+            Pos2::new(440.0, 110.0),
+            "EXPECT: ERROR / OFF\nLED polarity is reversed.",
+        );
+        self.status = "Loaded reversed LED warning demo. ERC should flag LED polarity.".to_string();
         self.pending_fit = true;
     }
 
@@ -762,6 +959,62 @@ impl CircuitApp {
         self.add_wire_between(esp32, "GPIO21", oled, "SDA");
         self.add_wire_between(esp32, "GPIO22", oled, "SCL");
         self.status = "Loaded ESP32 + OLED I2C demo.".to_string();
+        self.pending_fit = true;
+    }
+
+    fn load_esp32_sensor_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(170.0, 380.0));
+        let esp32 = self.place_component(ComponentKind::Esp32, Pos2::new(430.0, 310.0));
+        let sensor = self.place_component(ComponentKind::Sensor, Pos2::new(720.0, 300.0));
+
+        self.add_wire_between(battery, "+", esp32, "VIN");
+        self.add_wire_between(battery, "-", esp32, "GND");
+        self.add_wire_between(esp32, "3V3", sensor, "VCC");
+        self.add_wire_between(esp32, "GND", sensor, "GND");
+        self.add_wire_between(esp32, "GPIO21", sensor, "SDA");
+        self.add_wire_between(esp32, "GPIO22", sensor, "SCL");
+        self.status = "Loaded ESP32 + I2C sensor demo.".to_string();
+        self.pending_fit = true;
+    }
+
+    fn load_arduino_led_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(150.0, 430.0));
+        let arduino = self.place_component(ComponentKind::ArduinoUno, Pos2::new(430.0, 320.0));
+        let resistor = self.place_component(ComponentKind::Resistor, Pos2::new(720.0, 220.0));
+        let led = self.place_component(ComponentKind::Led, Pos2::new(860.0, 220.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(920.0, 430.0));
+
+        self.add_wire_between(battery, "+", arduino, "VIN");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.add_wire_between(arduino, "GND", ground, "GND");
+        self.add_wire_between(arduino, "D13", resistor, "A");
+        self.add_wire_between(resistor, "B", led, "A");
+        self.add_wire_between(led, "B", ground, "GND");
+        self.status = "Loaded Arduino LED output demo.".to_string();
+        self.pending_fit = true;
+    }
+
+    fn load_motor_driver_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(160.0, 420.0));
+        let esp32 = self.place_component(ComponentKind::Esp32, Pos2::new(390.0, 320.0));
+        let driver = self.place_component(ComponentKind::MotorDriver, Pos2::new(680.0, 320.0));
+        let motor = self.place_component(ComponentKind::DcMotor, Pos2::new(920.0, 300.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(720.0, 500.0));
+
+        self.add_wire_between(battery, "+", esp32, "VIN");
+        self.add_wire_between(battery, "+", driver, "VCC");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.add_wire_between(esp32, "GND", ground, "GND");
+        self.add_wire_between(driver, "GND", ground, "GND");
+        self.add_wire_between(esp32, "GPIO18", driver, "IN1");
+        self.add_wire_between(esp32, "GPIO19", driver, "IN2");
+        self.add_wire_between(esp32, "GPIO5", driver, "EN");
+        self.add_wire_between(driver, "OUT1", motor, "+");
+        self.add_wire_between(driver, "OUT2", motor, "-");
+        self.status = "Loaded ESP32 + motor driver wiring demo.".to_string();
         self.pending_fit = true;
     }
 
@@ -1314,8 +1567,10 @@ impl CircuitApp {
         if !self.simulate {
             return Simulation::default();
         }
-        if let Some((revision, simulation)) = &self.cached_simulation
+        let ac_key = self.ac_freq_hz.to_bits();
+        if let Some((revision, cached_ac_key, simulation)) = &self.cached_simulation
             && *revision == self.circuit_revision
+            && *cached_ac_key == ac_key
         {
             return simulation.clone();
         }
@@ -1325,7 +1580,7 @@ impl CircuitApp {
         let netlist = self.current_netlist();
         // Run ERC after topology analysis so it can use simulation results
         simulation.erc = run_erc_with_netlist(&self.components, &self.wires, &simulation, &netlist);
-        self.cached_simulation = Some((self.circuit_revision, simulation.clone()));
+        self.cached_simulation = Some((self.circuit_revision, ac_key, simulation.clone()));
         simulation
     }
 
@@ -1983,15 +2238,51 @@ impl eframe::App for CircuitApp {
                             &filter,
                         );
 
-                        palette_section(ui, "Examples", SectionMode::Open, |ui| {
-                            if palette_action(ui, "🔘 Button → LED Toggle").clicked() {
-                                self.load_button_toggle_led_demo();
-                            }
+                        palette_section(ui, "Lessons: Current Flows", SectionMode::Open, |ui| {
                             if palette_action(ui, "LED Circuit").clicked() {
                                 self.load_led_demo();
                             }
+                            if palette_action(ui, "Switch + LED").clicked() {
+                                self.load_switch_led_demo();
+                            }
+                            if palette_action(ui, "Parallel LEDs").clicked() {
+                                self.load_parallel_led_demo();
+                            }
+                            if palette_action(ui, "Fused Lamp").clicked() {
+                                self.load_lamp_demo();
+                            }
                             if palette_action(ui, "Transistor Switch").clicked() {
                                 self.load_transistor_switch_demo();
+                            }
+                            if palette_action(ui, "Relay + Motor").clicked() {
+                                self.load_motor_relay_demo();
+                            }
+                        });
+
+                        palette_section(ui, "Lessons: Find The Problem", SectionMode::Open, |ui| {
+                            if palette_action(ui, "Open Switch LED").clicked() {
+                                self.load_open_switch_led_demo();
+                            }
+                            if palette_action(ui, "Capacitor Blocks DC").clicked() {
+                                self.load_capacitor_dc_block_demo();
+                            }
+                            if palette_action(ui, "Missing Return Wire").clicked() {
+                                self.load_missing_return_demo();
+                            }
+                            if palette_action(ui, "Reversed LED Warning").clicked() {
+                                self.load_reversed_led_warning_demo();
+                            }
+                            if palette_action(ui, "Short Circuit Warning").clicked() {
+                                self.load_short_circuit_lesson_demo();
+                            }
+                            if palette_action(ui, "GPIO Direct Motor").clicked() {
+                                self.load_direct_gpio_motor_warning_demo();
+                            }
+                        });
+
+                        palette_section(ui, "Examples: MCU Modules", SectionMode::Open, |ui| {
+                            if palette_action(ui, "🔘 Button → LED Toggle").clicked() {
+                                self.load_button_toggle_led_demo();
                             }
                             if palette_action(ui, "Voltage Divider").clicked() {
                                 self.load_voltage_divider_demo();
@@ -2002,8 +2293,14 @@ impl eframe::App for CircuitApp {
                             if palette_action(ui, "ESP32 + OLED").clicked() {
                                 self.load_esp32_oled_demo();
                             }
-                            if palette_action(ui, "Relay + Motor").clicked() {
-                                self.load_motor_relay_demo();
+                            if palette_action(ui, "ESP32 + Sensor").clicked() {
+                                self.load_esp32_sensor_demo();
+                            }
+                            if palette_action(ui, "Arduino + LED").clicked() {
+                                self.load_arduino_led_demo();
+                            }
+                            if palette_action(ui, "ESP32 + Motor Driver").clicked() {
+                                self.load_motor_driver_demo();
                             }
                             if palette_action(ui, "Blank").clicked() {
                                 self.reset_canvas();
@@ -6081,7 +6378,16 @@ fn component_size(component: &Component) -> Vec2 {
         ComponentKind::Optocoupler => (80.0, 64.0),
         ComponentKind::GenericIc => (80.0, 80.0),
         ComponentKind::Voltmeter | ComponentKind::Ammeter => (80.0, 60.0),
-        ComponentKind::TextNote => (160.0, 56.0),
+        ComponentKind::TextNote => {
+            let lines = component.value.lines().count().max(1) as f32;
+            let longest = component
+                .value
+                .lines()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(12) as f32;
+            ((longest * 7.2 + 28.0).clamp(180.0, 320.0), 28.0 + lines * 18.0)
+        }
     };
     Vec2::new(w, h)
 }
@@ -7196,13 +7502,21 @@ fn draw_component(
             };
             painter.rect_filled(rect, 4.0, text_fill);
             painter.rect_stroke(rect, 4.0, border, egui::StrokeKind::Outside);
-            painter.text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                &component.value,
-                egui::FontId::proportional(12.0 * view.zoom.sqrt()),
-                Color32::from_rgb(210, 220, 230),
-            );
+            let font = egui::FontId::proportional(12.0 * view.zoom.sqrt());
+            let line_h = 16.0 * view.zoom.sqrt();
+            let lines = component.value.lines().collect::<Vec<_>>();
+            let total_h = line_h * lines.len().max(1) as f32;
+            let mut y = rect.center().y - total_h * 0.5 + line_h * 0.5;
+            for line in lines {
+                painter.text(
+                    Pos2::new(rect.center().x, y),
+                    Align2::CENTER_CENTER,
+                    line,
+                    font.clone(),
+                    Color32::from_rgb(210, 220, 230),
+                );
+                y += line_h;
+            }
         }
         ComponentKind::Ammeter => {
             draw_meter(painter, rect, component.rotation, stroke, "A", energized);
@@ -11855,6 +12169,199 @@ mod tests {
             "OLED should have no warnings: {:?}",
             sim.component_warnings.get(&oled_id)
         );
+    }
+
+    #[test]
+    fn beginner_example_switch_led_flows_when_closed() {
+        let mut app = CircuitApp::new();
+        app.load_switch_led_demo();
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+        let led_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::Led)
+            .map(|component| component.id)
+            .unwrap();
+
+        assert_eq!(sim.summary, "Current flowing", "{:?}", sim.details);
+        assert!(sim.energized_components.contains(&led_id));
+    }
+
+    #[test]
+    fn lesson_open_switch_led_does_not_conduct() {
+        let mut app = CircuitApp::new();
+        app.load_open_switch_led_demo();
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+        let led_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::Led)
+            .map(|component| component.id)
+            .unwrap();
+
+        assert_eq!(sim.summary, "Open circuit", "{:?}", sim.details);
+        assert!(!sim.energized_components.contains(&led_id));
+    }
+
+    #[test]
+    fn lesson_capacitor_blocks_dc_current() {
+        let mut app = CircuitApp::new();
+        app.load_capacitor_dc_block_demo();
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+        let capacitor_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::Capacitor)
+            .map(|component| component.id)
+            .unwrap();
+
+        assert_eq!(sim.summary, "Open circuit", "{:?}", sim.details);
+        assert!(!sim.energized_components.contains(&capacitor_id));
+    }
+
+    #[test]
+    fn lesson_missing_return_wire_keeps_led_off() {
+        let mut app = CircuitApp::new();
+        app.load_missing_return_demo();
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+        let led_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::Led)
+            .map(|component| component.id)
+            .unwrap();
+
+        assert_eq!(sim.summary, "Open circuit", "{:?}", sim.details);
+        assert!(!sim.energized_components.contains(&led_id));
+    }
+
+    #[test]
+    fn lesson_short_circuit_reports_error() {
+        let mut app = CircuitApp::new();
+        app.load_short_circuit_lesson_demo();
+
+        let mut sim = analyze_circuit(&app.components, &app.wires);
+        sim.erc = run_erc(&app.components, &app.wires, &sim);
+
+        assert!(sim.shorted, "{:?}", sim.details);
+        assert_eq!(sim.summary, "Short circuit");
+        assert!(sim.erc.iter().any(|violation| {
+            violation.severity == ErcSeverity::Error
+                && (violation.message.contains("Short")
+                    || violation.message.contains("Power net conflict"))
+        }));
+    }
+
+    #[test]
+    fn lesson_direct_gpio_motor_reports_warning_and_motor_off() {
+        let mut app = CircuitApp::new();
+        app.load_direct_gpio_motor_warning_demo();
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+        let erc = run_erc(&app.components, &app.wires, &sim);
+        let motor_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::DcMotor)
+            .map(|component| component.id)
+            .unwrap();
+
+        assert!(!sim.energized_components.contains(&motor_id), "{:?}", sim.details);
+        assert!(erc.iter().any(|violation| {
+            violation.message.contains("GPIO") && violation.message.contains("motor")
+        }));
+    }
+
+    #[test]
+    fn beginner_example_parallel_leds_has_two_lit_leds() {
+        let mut app = CircuitApp::new();
+        app.load_parallel_led_demo();
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+        let lit_leds = app
+            .components
+            .iter()
+            .filter(|component| component.kind == ComponentKind::Led)
+            .filter(|component| sim.energized_components.contains(&component.id))
+            .count();
+        let erc = run_erc(&app.components, &app.wires, &sim);
+
+        assert_eq!(lit_leds, 2, "{:?}", sim.details);
+        assert!(
+            !erc.iter()
+                .any(|violation| violation.message.contains("current limiting resistor")),
+            "{:?}",
+            erc
+        );
+    }
+
+    #[test]
+    fn beginner_example_reversed_led_reports_polarity() {
+        let mut app = CircuitApp::new();
+        app.load_reversed_led_warning_demo();
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+        let erc = run_erc(&app.components, &app.wires, &sim);
+
+        assert!(erc.iter().any(|violation| {
+            violation.severity == ErcSeverity::Error && violation.message.contains("reversed")
+        }));
+    }
+
+    #[test]
+    fn beginner_example_esp32_sensor_energizes_sensor() {
+        let mut app = CircuitApp::new();
+        app.load_esp32_sensor_demo();
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+        let sensor_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::Sensor)
+            .map(|component| component.id)
+            .unwrap();
+
+        assert!(sim.energized_components.contains(&sensor_id), "{:?}", sim.details);
+        assert!(sim.component_warnings.get(&sensor_id).is_none());
+    }
+
+    #[test]
+    fn beginner_example_motor_driver_avoids_direct_gpio_motor_warning() {
+        let mut app = CircuitApp::new();
+        app.load_motor_driver_demo();
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+        let erc = run_erc(&app.components, &app.wires, &sim);
+
+        assert!(app.components.iter().any(|c| c.kind == ComponentKind::MotorDriver));
+        assert!(app.components.iter().any(|c| c.kind == ComponentKind::DcMotor));
+        assert!(
+            !erc.iter().any(|violation| {
+                violation.message.contains("GPIO") && violation.message.contains("motor")
+            }),
+            "{:?}",
+            erc
+        );
+    }
+
+    #[test]
+    fn ac_frequency_is_part_of_simulation_cache_key() {
+        let mut app = CircuitApp::new();
+        app.load_led_demo();
+
+        let _ = app.current_simulation();
+        let first_key = app.cached_simulation.as_ref().map(|(_, key, _)| *key).unwrap();
+
+        app.ac_freq_hz = 10_000.0;
+        let _ = app.current_simulation();
+        let second_key = app.cached_simulation.as_ref().map(|(_, key, _)| *key).unwrap();
+
+        assert_ne!(first_key, second_key);
+        assert_eq!(second_key, 10_000.0f32.to_bits());
     }
 }
 

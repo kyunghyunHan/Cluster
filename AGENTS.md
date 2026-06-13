@@ -174,7 +174,7 @@ Notes:
 4. 작업 속도 개선: 복제, 정렬, 그룹 이동, 키보드 단축키, undo/redo
 5. PNG 내보내기: SVG 유지 + raster export 옵션
 6. 부품 라이브러리 확장: Arduino, Raspberry Pi Pico, 릴레이, 모터, 브레드보드
-7. 샘플 회로와 템플릿: LED 기본 회로, ESP32 + OLED I2C, 센서 입력 회로
+7. 샘플 회로와 템플릿: 일부 완료 - 앱 내 Lessons/Examples에 전류 흐름 예제(LED, 스위치 LED, 병렬 LED, 램프, 릴레이 모터), 문제 찾기 예제(open switch, DC capacitor block, missing return, reversed LED, short circuit, GPIO motor warning), ESP32/OLED/Sensor, Arduino LED, 모터 드라이버 예제 포함
 
 ## Definition Of Done
 
