@@ -160,7 +160,10 @@ fn check_reversed_diode(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
                 let cathode_net = netlist
                     .pins
                     .iter()
-                    .find(|p| p.component_id == pin.component_id && p.pin_name == "K")
+                    .find(|p| {
+                        p.component_id == pin.component_id
+                            && (p.pin_name == "K" || p.pin_name == "B")
+                    })
                     .map(|p| p.net_id);
                 let cathode_is_power = cathode_net.is_some_and(|nid| {
                     netlist.pins.iter().any(|p| {
@@ -384,19 +387,21 @@ fn check_floating_pins(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
         });
     }
 
-    // Warn about components completely isolated from the rest of the circuit.
+    for wire_id in &netlist.isolated_wires {
+        v.push(ErcViolation {
+            severity: ErcSeverity::Warning,
+            component_id: None,
+            wire_id: Some(*wire_id),
+            message: "Wire segment is isolated: it connects to only one component pin."
+                .to_string(),
+        });
+    }
+
+    let mut reported_components = std::collections::HashSet::new();
     for pin in &netlist.pins {
         if !connected_component_ids.contains(&pin.component_id)
-            && !matches!(
-                pin.component_kind,
-                ComponentKind::Ground | ComponentKind::NetLabel
-            )
-            && pin.pin_name == netlist
-                .pins
-                .iter()
-                .find(|p| p.component_id == pin.component_id)
-                .map(|p| p.pin_name.as_str())
-                .unwrap_or("")
+            && !matches!(pin.component_kind, ComponentKind::Ground | ComponentKind::NetLabel)
+            && reported_components.insert(pin.component_id)
         {
             v.push(ErcViolation {
                 severity: ErcSeverity::Warning,
@@ -408,7 +413,25 @@ fn check_floating_pins(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
                     pin.component_label
                 ),
             });
-            break;
+        } else if !pin.connected_by_wire
+            && matches!(
+                pin.electrical_type,
+                ElectricalType::Digital
+                    | ElectricalType::I2c
+                    | ElectricalType::Control
+            )
+        {
+            v.push(ErcViolation {
+                severity: ErcSeverity::Warning,
+                component_id: Some(pin.component_id),
+                wire_id: None,
+                message: format!(
+                    "{} {} input/pin {} is floating.",
+                    component_kind_short(pin.component_kind),
+                    pin.component_label,
+                    pin.pin_name
+                ),
+            });
         }
     }
 }
@@ -533,6 +556,7 @@ mod tests {
             pins,
             wire_nets: Default::default(),
             floating_wires: Vec::new(),
+            isolated_wires: Vec::new(),
         }
     }
 

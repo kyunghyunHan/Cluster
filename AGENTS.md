@@ -132,6 +132,11 @@ Notes:
 - 커패시터/OP AMP는 기본 DC 도통 경로에서는 open으로 처리
 - ESP32/OLED/Sensor 모듈은 live loop에 핀이 연결되면 활성 표시
 - 배선 클릭 위치가 핀 근처이면 자동으로 핀에 스냅한다.
+- 부품 핀이 배선 선분 중간에 닿아도 같은 net으로 병합한다.
+- DC MNA 분기 전류에서 배선 전류 크기와 방향을 계산해 표시한다.
+- 다이오드/LED는 역바이어스에서 누설 수준으로 처리하고 순방향 전압 강하를 적용한다.
+- NMOS/PMOS는 Vgs/Vsg 임계전압에 따라 ON/OFF 저항을 전환한다.
+- floating pin/net, 아무 핀에도 연결되지 않은 배선, 한 핀에만 연결된 고립 배선을 ERC로 경고한다.
 
 향후 시뮬레이션 방향:
 - 핀 역할(VCC/GND/SDA/SCL/GPIO)을 구조화한다.
@@ -169,7 +174,7 @@ Notes:
 
 우선순위 높은 순서:
 1. 저장/불러오기: schema version이 있는 회로 JSON 저장과 복원
-2. 더 정확한 시뮬레이션: 쇼트, 방향성, 간단한 전류/전압 추정
+2. 더 정확한 시뮬레이션: 일부 완료 - 쇼트, 다이오드 방향성, MNA 전류/전압, 배선 전류, MOSFET gate switching 지원. 향후 Shockley/Newton-Raphson 및 MOSFET 선형/포화 영역 추가
 3. I2C/SPI/UART 신호 연결 검증: OLED SDA/SCL이 ESP32 GPIO21/22에 연결됐는지 확인
 4. 작업 속도 개선: 복제, 정렬, 그룹 이동, 키보드 단축키, undo/redo
 5. PNG 내보내기: SVG 유지 + raster export 옵션

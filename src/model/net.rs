@@ -14,4 +14,5 @@ pub(crate) struct CircuitNetlist {
     pub(crate) pins: Vec<NetlistPin>,
     pub(crate) wire_nets: HashMap<u64, usize>,
     pub(crate) floating_wires: Vec<u64>,
+    pub(crate) isolated_wires: Vec<u64>,
 }

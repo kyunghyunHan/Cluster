@@ -3,8 +3,8 @@
 //!
 //! Builds the MNA matrix from the schematic, solves with Gaussian elimination
 //! (partial pivoting), and returns node voltages + branch currents.
-//! Nonlinear elements (diodes, transistors) use a single-iteration linearised
-//! companion model adequate for educational / first-pass analysis.
+//! Diodes and MOSFETs use a two-stage operating-point classification before
+//! the final linear solve; BJTs use a linearised educational companion model.
 
 use egui::Pos2;
 use std::collections::{HashMap, HashSet};
@@ -30,6 +30,8 @@ pub struct DcResult {
     pub component_power: HashMap<u64, f64>,
     /// wire_id → representative voltage on that wire (V)
     pub wire_voltage: HashMap<u64, f64>,
+    /// wire_id → conventional current along the stored wire point order (A)
+    pub wire_current: HashMap<u64, f64>,
     /// Maximum absolute voltage seen anywhere in the circuit (for display scaling)
     pub vmax: f64,
 }
@@ -335,6 +337,17 @@ struct DiodeEntry {
     rb: f64,        // bulk series resistance (Ω)
 }
 
+struct MosEntry {
+    id: u64,
+    gate: usize,
+    drain: usize,
+    source: usize,
+    pmos: bool,
+    vth: f64,
+    r_on: f64,
+    r_off: f64,
+}
+
 /// BJT companion model: VBE diode + CCCS for collector current.
 struct BjtEntry {
     id: u64,
@@ -406,7 +419,7 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         let mut label_to_nodes: HashMap<String, Vec<usize>> = HashMap::new();
         for comp in components {
             if comp.kind == ComponentKind::NetLabel {
-                let label = comp.label.trim().to_ascii_lowercase();
+                let label = comp.value.trim().to_ascii_lowercase();
                 if label.is_empty() {
                     continue;
                 }
@@ -479,6 +492,7 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
     let mut is_src: Vec<IsEntry> = Vec::new();
     let mut diode_entries: Vec<DiodeEntry> = Vec::new();
     let mut bjt_entries: Vec<BjtEntry> = Vec::new();
+    let mut mos_entries: Vec<MosEntry> = Vec::new();
 
     for comp in components {
         let pins = component_pin_defs(comp);
@@ -627,27 +641,36 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
                 let s_n = pins.iter().find(|p| p.label == "S")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(g), Some(d), Some(s)) = (g_n, d_n, s_n) {
-                    // Id = Gm*(Vgs) flowing D→S; Gm = 50 mS typical small-signal
-                    // stamp_vccs: current INTO d, OUT of s; ctrl = g - s
-                    res.push(ResEntry { id: comp.id, a: d, b: s, r: 50.0 });
-                    // vccs is recorded after matrix build via direct stamp
-                    let _ = (g, d, s); // used below in separate loop
-                }
-                // Fallback: just stamp VCCS inline
-                if let (Some(g), Some(d), Some(s)) = (g_n, d_n, s_n) {
-                    // VCCS stamp deferred — capture as separate entry
-                    // For now keep res-based stub (fixed Rds=50Ω).
-                    // TODO: proper VCCS requires access to mat after construction.
-                    let _ = (g, d, s);
+                    mos_entries.push(MosEntry {
+                        id: comp.id,
+                        gate: g,
+                        drain: d,
+                        source: s,
+                        pmos: false,
+                        vth: 2.0,
+                        r_on: 1.0,
+                        r_off: 1.0e9,
+                    });
                 }
             }
             ComponentKind::Pmosfet => {
+                let g_n = pins.iter().find(|p| p.label == "G")
+                    .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 let d_n = pins.iter().find(|p| p.label == "D")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 let s_n = pins.iter().find(|p| p.label == "S")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                if let (Some(d), Some(s)) = (d_n, s_n) {
-                    res.push(ResEntry { id: comp.id, a: s, b: d, r: 20.0 });
+                if let (Some(g), Some(d), Some(s)) = (g_n, d_n, s_n) {
+                    mos_entries.push(MosEntry {
+                        id: comp.id,
+                        gate: g,
+                        drain: d,
+                        source: s,
+                        pmos: true,
+                        vth: 2.0,
+                        r_on: 1.0,
+                        r_off: 1.0e9,
+                    });
                 }
             }
             // ── Voltage sources ───────────────────────────────────────
@@ -868,30 +891,9 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         }
     }
 
-    // ── 5. Expand diodes into series (Vf + Rb) with virtual intermediate nodes ──
-    // Each diode needs one intermediate node (num_nodes + diode_index).
-    // Virtual nodes are appended after the normal non-GND nodes.
-    let diode_start_node = num_nodes + 1; // 1-indexed virtual node for diode 0
-    for (di, de) in diode_entries.iter().enumerate() {
-        let mid = diode_start_node + di; // MNA node for anode side of Rb
-        // anode → [Vf source] → mid → [Rb] → cathode
-        vs.push(VsEntry {
-            id: de.id,
-            pos: de.anode,
-            neg: mid,
-            v: de.vf,
-        });
-        res.push(ResEntry {
-            id: de.id,
-            a: mid,
-            b: de.cathode,
-            r: de.rb,
-        });
-    }
-
     // ── 5b. Expand BJTs: VBE diode + CCCS for Ic = hFE·Ib ──────────────
     // Each BJT needs one intermediate node (for the VBE diode series resistor).
-    let bjt_start_node = num_nodes + diode_entries.len() + 1;
+    let bjt_start_node = num_nodes + 1;
     // Record the index of the first BJT VS entry (used for CCCS stamp below)
     let bjt_vs_start = vs.len();
     for (bi, bjt) in bjt_entries.iter().enumerate() {
@@ -906,38 +908,83 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
             res.push(ResEntry { id: bjt.id, a: mid, b: bjt.b, r: bjt.rb_be });
         }
     }
-    let total_nodes = num_nodes + diode_entries.len() + bjt_entries.len();
+    let total_nodes = num_nodes + bjt_entries.len();
 
     // ── 6. Build MNA matrix ──────────────────────────────────────────────
     let m = vs.len();
     if total_nodes == 0 {
         return None;
     }
-    let mut mat = Mna::new(total_nodes, m);
-
-    for re in &res {
-        mat.stamp_r(re.a, re.b, re.r);
-    }
-    for (k, v_src) in vs.iter().enumerate() {
-        mat.stamp_vs(k, v_src.pos, v_src.neg, v_src.v);
-    }
-    // Stamp CCCS for each BJT (Ic = hFE * Ib; Ib is the branch current of the VBE VS)
-    for (bi, bjt) in bjt_entries.iter().enumerate() {
-        let k_vbe = bjt_vs_start + bi;
-        if bjt.npn {
-            // NPN: Ic flows INTO C, OUT of E; Ib = I_k_vbe > 0 into B
-            mat.stamp_cccs(bjt.c, bjt.e, k_vbe, bjt.h_fe);
-        } else {
-            // PNP: Ic flows INTO E, OUT of C; Ib = I_k_veb > 0 into E (so reverse sign)
-            mat.stamp_cccs(bjt.c, bjt.e, k_vbe, -bjt.h_fe);
+    let solve_with_states = |diode_on: &[bool], mos_on: &[bool]| -> Option<Vec<f64>> {
+        let mut mat = Mna::new(total_nodes, m);
+        for re in &res {
+            mat.stamp_r(re.a, re.b, re.r);
         }
-    }
-    for i_src in &is_src {
-        mat.stamp_is(i_src.pos, i_src.neg, i_src.i);
-    }
+        for (index, diode) in diode_entries.iter().enumerate() {
+            if diode_on.get(index).copied().unwrap_or(false) {
+                mat.stamp_r(diode.anode, diode.cathode, diode.rb);
+                mat.stamp_is(
+                    diode.anode,
+                    diode.cathode,
+                    diode.vf / diode.rb,
+                );
+            } else {
+                mat.stamp_r(diode.anode, diode.cathode, 1.0e9);
+            }
+        }
+        for (index, mos) in mos_entries.iter().enumerate() {
+            mat.stamp_r(
+                mos.drain,
+                mos.source,
+                if mos_on.get(index).copied().unwrap_or(false) {
+                    mos.r_on
+                } else {
+                    mos.r_off
+                },
+            );
+        }
+        for (k, v_src) in vs.iter().enumerate() {
+            mat.stamp_vs(k, v_src.pos, v_src.neg, v_src.v);
+        }
+        for (bi, bjt) in bjt_entries.iter().enumerate() {
+            let k_vbe = bjt_vs_start + bi;
+            if bjt.npn {
+                mat.stamp_cccs(bjt.c, bjt.e, k_vbe, bjt.h_fe);
+            } else {
+                mat.stamp_cccs(bjt.c, bjt.e, k_vbe, -bjt.h_fe);
+            }
+        }
+        for i_src in &is_src {
+            mat.stamp_is(i_src.pos, i_src.neg, i_src.i);
+        }
+        mat.solve()
+    };
 
-    // ── 6. Solve ─────────────────────────────────────────────────────────
-    let x = mat.solve()?;
+    let initial_diode_states = vec![false; diode_entries.len()];
+    let initial_mos_states = vec![false; mos_entries.len()];
+    let initial = solve_with_states(&initial_diode_states, &initial_mos_states)?;
+    let initial_voltage = |mna_idx: usize| -> f64 {
+        if mna_idx == 0 {
+            0.0
+        } else {
+            initial.get(mna_idx - 1).copied().unwrap_or(0.0)
+        }
+    };
+    let diode_states = diode_entries
+        .iter()
+        .map(|diode| initial_voltage(diode.anode) - initial_voltage(diode.cathode) >= diode.vf)
+        .collect::<Vec<_>>();
+    let mos_states = mos_entries
+        .iter()
+        .map(|mos| {
+            if mos.pmos {
+                initial_voltage(mos.source) - initial_voltage(mos.gate) >= mos.vth
+            } else {
+                initial_voltage(mos.gate) - initial_voltage(mos.source) >= mos.vth
+            }
+        })
+        .collect::<Vec<_>>();
+    let x = solve_with_states(&diode_states, &mos_states)?;
 
     // ── 8. Decode results ─────────────────────────────────────────────────
     let vnode = |mna_idx: usize| -> f64 {
@@ -985,9 +1032,30 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         let vk = vnode(de.cathode);
         let vd = va - vk;
         component_voltage.insert(de.id, vd);
-        if let Some(i) = branch_current.get(&de.id) {
-            component_power.insert(de.id, (vd * i).abs());
-        }
+        let index = diode_entries
+            .iter()
+            .position(|candidate| candidate.id == de.id)
+            .unwrap_or(0);
+        let current = if diode_states.get(index).copied().unwrap_or(false) {
+            ((vd - de.vf) / de.rb).max(0.0)
+        } else {
+            vd / 1.0e9
+        };
+        branch_current.insert(de.id, current);
+        component_power.insert(de.id, (vd * current).abs());
+    }
+
+    for (index, mos) in mos_entries.iter().enumerate() {
+        let vd = vnode(mos.drain) - vnode(mos.source);
+        let resistance = if mos_states.get(index).copied().unwrap_or(false) {
+            mos.r_on
+        } else {
+            mos.r_off
+        };
+        let current = vd / resistance;
+        component_voltage.insert(mos.id, vd);
+        branch_current.insert(mos.id, current);
+        component_power.insert(mos.id, (vd * current).abs());
     }
 
     // For BJTs: override with Vce voltage and total Ic current
@@ -1030,6 +1098,68 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         }
     }
 
+    let mut wire_current = HashMap::new();
+    let mut wire_roots = HashMap::new();
+    for wire in wires {
+        if let Some(root) = wire.points.first().and_then(|point| nm.root_of(*point)) {
+            wire_roots.insert(wire.id, root);
+        }
+        let mut strongest: Option<f64> = None;
+        for component in components {
+            let Some(&current) = branch_current.get(&component.id) else {
+                continue;
+            };
+            let pins = component_pin_defs(component);
+            for (pin_index, pin) in pins.iter().enumerate() {
+                if !wire.points.windows(2).any(|segment| {
+                    point_touches_wire_segment(pin.pos, segment[0], segment[1])
+                }) {
+                    continue;
+                }
+                let terminal_current = terminal_current_into_component(
+                    component.kind,
+                    pin,
+                    pin_index,
+                    current,
+                );
+                let Some(distance) = distance_along_wire(&wire.points, pin.pos) else {
+                    continue;
+                };
+                let toward_pin_sign = if distance <= wire_polyline_length(&wire.points) * 0.5 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let candidate = terminal_current * toward_pin_sign;
+                if strongest.is_none_or(|value| candidate.abs() > value.abs()) {
+                    strongest = Some(candidate);
+                }
+            }
+        }
+        wire_current.insert(wire.id, strongest.unwrap_or(0.0));
+    }
+    let mut net_current = HashMap::<usize, f64>::new();
+    for (&wire_id, &current) in &wire_current {
+        let Some(&root) = wire_roots.get(&wire_id) else {
+            continue;
+        };
+        let entry = net_current.entry(root).or_insert(current);
+        if current.abs() > entry.abs() {
+            *entry = current;
+        }
+    }
+    for (&wire_id, current) in &mut wire_current {
+        if current.abs() > 1.0e-12 {
+            continue;
+        }
+        if let Some(net_value) = wire_roots
+            .get(&wire_id)
+            .and_then(|root| net_current.get(root))
+        {
+            *current = *net_value;
+        }
+    }
+
     let vmax = net_voltages
         .values()
         .map(|v| v.abs())
@@ -1041,8 +1171,89 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         branch_current,
         component_power,
         wire_voltage,
+        wire_current,
         vmax: vmax.max(0.1),
     })
+}
+
+fn terminal_current_into_component(
+    kind: ComponentKind,
+    pin: &crate::CircuitPin,
+    pin_index: usize,
+    branch_current: f64,
+) -> f64 {
+    match kind {
+        ComponentKind::VSource | ComponentKind::Battery => {
+            if pin.role == PinRole::Positive || pin.label == "+" {
+                branch_current
+            } else {
+                -branch_current
+            }
+        }
+        ComponentKind::ISource => {
+            if pin.role == PinRole::Positive || pin.label == "+" {
+                -branch_current
+            } else {
+                branch_current
+            }
+        }
+        ComponentKind::Diode
+        | ComponentKind::Led
+        | ComponentKind::SchottkyDiode
+        | ComponentKind::ZenerDiode
+        | ComponentKind::TvsDiode => {
+            if pin.label == "A" {
+                branch_current
+            } else {
+                -branch_current
+            }
+        }
+        ComponentKind::Nmosfet | ComponentKind::Pmosfet => match pin.label {
+            "D" => branch_current,
+            "S" => -branch_current,
+            _ => 0.0,
+        },
+        _ => {
+            if pin_index == 0 {
+                branch_current
+            } else if pin_index == 1 {
+                -branch_current
+            } else {
+                0.0
+            }
+        }
+    }
+}
+
+fn wire_polyline_length(points: &[Pos2]) -> f32 {
+    points
+        .windows(2)
+        .map(|segment| segment[0].distance(segment[1]))
+        .sum()
+}
+
+fn distance_along_wire(points: &[Pos2], point: Pos2) -> Option<f32> {
+    let mut traveled = 0.0;
+    let mut best: Option<(f32, f32)> = None;
+    for segment in points.windows(2) {
+        let a = segment[0];
+        let b = segment[1];
+        let ab = b - a;
+        let length_sq = ab.length_sq();
+        if length_sq <= f32::EPSILON {
+            continue;
+        }
+        let t = ((point - a).dot(ab) / length_sq).clamp(0.0, 1.0);
+        let projection = a + ab * t;
+        let distance = projection.distance(point);
+        let along = traveled + a.distance(b) * t;
+        if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+            best = Some((distance, along));
+        }
+        traveled += a.distance(b);
+    }
+    best.filter(|(distance, _)| *distance <= 1.0)
+        .map(|(_, along)| along)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1206,7 +1417,7 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
         let mut label_nodes: HashMap<String, Vec<usize>> = HashMap::new();
         for comp in components {
             if comp.kind == ComponentKind::NetLabel {
-                let lbl = comp.label.trim().to_ascii_lowercase();
+                let lbl = comp.value.trim().to_ascii_lowercase();
                 if lbl.is_empty() { continue; }
                 for pin in component_pin_defs(comp) {
                     let idx = nm.reg(pin.pos);
@@ -1539,6 +1750,10 @@ mod tests {
             (bat_i.abs() - 0.009).abs() < 0.001,
             "Expected ~9 mA, got {bat_i:.4} A"
         );
+        assert!(
+            dc.wire_current.values().any(|current| current.abs() > 0.008),
+            "Wire current should be derived from solved branch current"
+        );
     }
 
     // ── No GND → solver returns None ─────────────────────────────────────
@@ -1584,6 +1799,91 @@ mod tests {
             assert!(r_i.abs() < 1e-6, "Open switch should block current, got {r_i}");
         }
         // None (singular matrix) is also acceptable for an open circuit.
+    }
+
+    #[test]
+    fn reversed_led_has_only_leakage_current() {
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
+        let led = comp(2, ComponentKind::Led, Pos2::new(180.0, 0.0), "LED1", "red");
+        let bat_pins = component_pin_defs(&bat);
+        let led_pins = component_pin_defs(&led);
+        let bat_p = bat_pins.iter().find(|pin| pin.label == "+").unwrap().pos;
+        let bat_n = bat_pins.iter().find(|pin| pin.label == "-").unwrap().pos;
+        let anode = led_pins.iter().find(|pin| pin.label == "A").unwrap().pos;
+        let cathode = led_pins.iter().find(|pin| pin.label == "B").unwrap().pos;
+        let wires = vec![
+            lseg(
+                10,
+                vec![
+                    bat_p,
+                    Pos2::new(bat_p.x, -40.0),
+                    Pos2::new(cathode.x, -40.0),
+                    cathode,
+                ],
+            ),
+            lseg(
+                11,
+                vec![
+                    anode,
+                    Pos2::new(anode.x, 40.0),
+                    Pos2::new(bat_n.x, 40.0),
+                    bat_n,
+                ],
+            ),
+        ];
+
+        let dc = solve_dc(&[bat, led], &wires).expect("reverse-biased LED circuit should solve");
+        let current = dc.branch_current.get(&2).copied().unwrap_or(0.0);
+        assert!(
+            current.abs() < 1.0e-6,
+            "Reverse-biased LED should be nearly open, got {current} A"
+        );
+    }
+
+    fn mosfet_switch_circuit(gate_high: bool) -> (Vec<Component>, Vec<Wire>, u64) {
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "5V");
+        let resistor = comp(2, ComponentKind::Resistor, Pos2::new(160.0, -100.0), "R1", "1k");
+        let mos = comp(3, ComponentKind::Nmosfet, Pos2::new(300.0, 0.0), "Q1", "2N7000");
+        let bat_pins = component_pin_defs(&bat);
+        let resistor_pins = component_pin_defs(&resistor);
+        let mos_pins = component_pin_defs(&mos);
+        let bat_p = bat_pins.iter().find(|pin| pin.label == "+").unwrap().pos;
+        let bat_n = bat_pins.iter().find(|pin| pin.label == "-").unwrap().pos;
+        let r_a = resistor_pins.iter().find(|pin| pin.label == "A").unwrap().pos;
+        let r_b = resistor_pins.iter().find(|pin| pin.label == "B").unwrap().pos;
+        let gate = mos_pins.iter().find(|pin| pin.label == "G").unwrap().pos;
+        let drain = mos_pins.iter().find(|pin| pin.label == "D").unwrap().pos;
+        let source = mos_pins.iter().find(|pin| pin.label == "S").unwrap().pos;
+        let gate_source = if gate_high { bat_p } else { bat_n };
+        (
+            vec![bat, resistor, mos],
+            vec![
+                l_wire(10, bat_p, r_a),
+                l_wire(11, r_b, drain),
+                l_wire(12, source, bat_n),
+                l_wire(13, gate_source, gate),
+            ],
+            3,
+        )
+    }
+
+    #[test]
+    fn nmos_gate_low_is_off() {
+        let (components, wires, mos_id) = mosfet_switch_circuit(false);
+        let dc = solve_dc(&components, &wires).expect("NMOS off circuit should solve");
+        let current = dc.branch_current.get(&mos_id).copied().unwrap_or(0.0);
+        assert!(current.abs() < 1.0e-6, "NMOS should be OFF, got {current} A");
+    }
+
+    #[test]
+    fn nmos_gate_high_is_on() {
+        let (components, wires, mos_id) = mosfet_switch_circuit(true);
+        let dc = solve_dc(&components, &wires).expect("NMOS on circuit should solve");
+        let current = dc.branch_current.get(&mos_id).copied().unwrap_or(0.0);
+        assert!(
+            (current.abs() - 0.005).abs() < 0.0005,
+            "NMOS should conduct about 5 mA, got {current} A"
+        );
     }
 
     // ── Voltage divider ──────────────────────────────────────────────────

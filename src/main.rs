@@ -2728,8 +2728,17 @@ impl eframe::App for CircuitApp {
                             if let Some(dc) = &simulation.dc {
                                 if let Some(&wv) = dc.wire_voltage.get(&wire.id) {
                                     ui.add_space(8.0);
-                                    section_title(ui, "DC Net Voltage");
+                                    section_title(ui, "DC Wire");
                                     dc_metric_row(ui, "Voltage", &mna::format_voltage(wv));
+                                }
+                                if let Some(&current) = dc.wire_current.get(&wire.id) {
+                                    let direction = if current < 0.0 {
+                                        "end -> start"
+                                    } else {
+                                        "start -> end"
+                                    };
+                                    dc_metric_row(ui, "Current", &mna::format_current(current.abs()));
+                                    metric_row(ui, "Direction", direction);
                                 }
                             }
                         }
@@ -2937,6 +2946,10 @@ impl eframe::App for CircuitApp {
                     .dc
                     .as_ref()
                     .and_then(|dc| dc.wire_voltage.get(&wire.id).copied());
+                let dc_i = simulation
+                    .dc
+                    .as_ref()
+                    .and_then(|dc| dc.wire_current.get(&wire.id).copied());
                 let dc_vmax = simulation.dc.as_ref().map(|dc| dc.vmax).unwrap_or(1.0);
                 draw_wire(
                     &painter,
@@ -2944,10 +2957,11 @@ impl eframe::App for CircuitApp {
                     self.selected == Some(Selection::Wire(wire.id)),
                     energized,
                     simulation.shorted && energized,
-                    show_flow && energized,
+                    show_flow && dc_i.is_some_and(|current| current.abs() > 1e-9),
                     flow_phase,
                     net_highlighted,
                     dc_v,
+                    dc_i,
                     dc_vmax,
                     dc_imax,
                     self.show_voltage_labels && simulation.dc.is_some(),
@@ -3258,10 +3272,21 @@ impl eframe::App for CircuitApp {
                         let net_size = self.highlighted_net_wires.len();
                         let dc_v = simulation.dc.as_ref()
                             .and_then(|dc| dc.wire_voltage.get(&wid).copied());
-                        let tip_text = if let Some(v) = dc_v {
-                            format!("Net  {}  ·  {} wire(s)", mna::format_voltage(v), net_size)
-                        } else {
-                            format!("Net  ·  {} wire(s)", net_size)
+                        let dc_i = simulation.dc.as_ref()
+                            .and_then(|dc| dc.wire_current.get(&wid).copied());
+                        let direction = dc_i.map(|current| if current < 0.0 { "←" } else { "→" });
+                        let tip_text = match (dc_v, dc_i, direction) {
+                            (Some(v), Some(i), Some(direction)) => format!(
+                                "Net  {}  ·  {} {}  ·  {} wire(s)",
+                                mna::format_voltage(v),
+                                direction,
+                                mna::format_current(i.abs()),
+                                net_size
+                            ),
+                            (Some(v), _, _) => {
+                                format!("Net  {}  ·  {} wire(s)", mna::format_voltage(v), net_size)
+                            }
+                            _ => format!("Net  ·  {} wire(s)", net_size),
                         };
                         let tip_col = if dc_v.is_some() {
                             Color32::from_rgb(120, 220, 255)
@@ -5544,17 +5569,19 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         };
         connect(&mut graph, a, b);
         component_edges.push((component.id, a, b, conductance == Conductance::Load));
-        if component.kind == ComponentKind::Relay
-            && relay_coil_is_enabled(
+        if component.kind == ComponentKind::Relay {
+            let relay_positive_reach = reachable_nodes(&graph, &positive_nodes);
+            let relay_return_reach = reachable_nodes(&graph, &return_nodes);
+            if relay_coil_is_enabled(
                 &pins,
                 &pin_nodes,
-                &control_from_positive,
-                &control_from_return,
-            )
-            && let Some((com, no)) = relay_contact_nodes(&pins, &pin_nodes)
-        {
-            connect(&mut graph, com, no);
-            component_edges.push((component.id, com, no, false));
+                &relay_positive_reach,
+                &relay_return_reach,
+            ) && let Some((com, no)) = relay_contact_nodes(&pins, &pin_nodes)
+            {
+                connect(&mut graph, com, no);
+                component_edges.push((component.id, com, no, false));
+            }
         }
     }
 
@@ -5940,7 +5967,9 @@ fn wire_contact_points(components: &[Component], wires: &[Wire]) -> Vec<Pos2> {
     for wire in wires {
         points.extend(wire.points.iter().copied());
     }
-    let _ = components;
+    for component in components {
+        points.extend(component_pin_defs(component).into_iter().map(|pin| pin.pos));
+    }
     points
 }
 
@@ -6640,7 +6669,6 @@ fn component_has_dc_current_model(kind: ComponentKind) -> bool {
             | ComponentKind::Varistor
             | ComponentKind::Fuse
             | ComponentKind::Lamp
-            | ComponentKind::DcMotor
             | ComponentKind::Relay
             | ComponentKind::VoltageReg
             | ComponentKind::NpnTransistor
@@ -7470,7 +7498,9 @@ fn connected_pin_positions(components: &[Component], wires: &[Wire]) -> Vec<(i32
         for pin in component_pin_defs(component) {
             let key = (pin.pos.x.round() as i32, pin.pos.y.round() as i32);
             let is_conn = wires.iter().any(|w| {
-                w.points.iter().any(|&p| p.distance(pin.pos) <= 1.0)
+                w.points
+                    .windows(2)
+                    .any(|segment| point_touches_wire_segment(pin.pos, segment[0], segment[1]))
             });
             if is_conn {
                 connected.push(key);
@@ -7586,15 +7616,6 @@ fn run_erc_with_netlist(
                 message: "Short circuit detected: source + reaches GND without a load.".to_string(),
             });
         }
-    }
-
-    for wire_id in &netlist.floating_wires {
-        v.push(ErcViolation {
-            severity: ErcSeverity::Warning,
-            component_id: None,
-            wire_id: Some(*wire_id),
-            message: format!("Wire {wire_id} is floating: it is not connected to any pin."),
-        });
     }
 
     for warning in validate_beginner_rules(&netlist) {
@@ -8247,17 +8268,27 @@ fn draw_wire(
     flow_phase: f32,
     net_highlighted: bool,
     dc_voltage: Option<f64>,
+    dc_current: Option<f64>,
     dc_vmax: f64,
     dc_current_max: f64,
     show_voltage_labels: bool,
     view: CanvasView,
 ) {
-    // Wire thickness proportional to current magnitude (1.5 .. 5.0 px range)
-    let wire_current = dc_voltage.map(|v| {
-        if dc_vmax > 1e-9 { (v.abs() / dc_vmax).clamp(0.0, 1.0) } else { 0.0 }
+    // Wire thickness is based on solved branch current, not energized voltage.
+    let wire_current = dc_current.map(|current| {
+        if dc_current_max > 1e-12 {
+            (current.abs() / dc_current_max).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }).unwrap_or(0.0);
-    let base_w = if energized { 2.8 + wire_current as f32 * 2.0 } else { 2.0 };
-    let _ = dc_current_max;
+    let base_w = if wire_current > 0.0 {
+        2.8 + wire_current as f32 * 2.0
+    } else if energized {
+        2.8
+    } else {
+        2.0
+    };
 
     let stroke = if selected {
         Stroke::new(3.5, Color32::from_rgb(90, 235, 170))
@@ -8274,7 +8305,10 @@ fn draw_wire(
         Stroke::new(2.0, Color32::from_rgb(105, 178, 255))
     };
 
-    let screen_points: Vec<Pos2> = wire.points.iter().map(|&p| view.to_screen(p)).collect();
+    let mut screen_points: Vec<Pos2> = wire.points.iter().map(|&p| view.to_screen(p)).collect();
+    if dc_current.is_some_and(|current| current < 0.0) {
+        screen_points.reverse();
+    }
     for segment in screen_points.windows(2) {
         painter.line_segment([segment[0], segment[1]], stroke);
     }
@@ -8283,12 +8317,21 @@ fn draw_wire(
         draw_short_fault_markers(painter, &screen_points);
     }
 
-    // Voltage label overlay
+    // Voltage/current label overlay
     if show_voltage_labels {
-        if let Some(v) = dc_voltage {
-            if let Some(mid) = midpoint_of_polyline(&screen_points) {
-                let label = mna::format_voltage(v);
-                let col = mna::voltage_color(v, dc_vmax);
+        if let Some(mid) = midpoint_of_polyline(&screen_points) {
+            let mut labels = Vec::new();
+            if let Some(v) = dc_voltage {
+                labels.push(mna::format_voltage(v));
+            }
+            if let Some(current) = dc_current.filter(|current| current.abs() > 1e-12) {
+                labels.push(mna::format_current(current.abs()));
+            }
+            if !labels.is_empty() {
+                let label = labels.join(" / ");
+                let col = dc_voltage
+                    .map(|voltage| mna::voltage_color(voltage, dc_vmax))
+                    .unwrap_or(Color32::from_rgb(100, 210, 255));
                 // background pill
                 let font = egui::FontId::proportional(10.0);
                 let galley = painter.layout_no_wrap(label, font.clone(), col);
@@ -11266,6 +11309,28 @@ fn circuit_to_spice_netlist(components: &[Component], wires: &[Wire]) -> String 
                     nets.union(contact_node, b);
                 }
             }
+        }
+    }
+
+    let mut label_nodes: HashMap<String, Vec<usize>> = HashMap::new();
+    for component in components {
+        if component.kind != ComponentKind::NetLabel {
+            continue;
+        }
+        let label = component.value.trim().to_ascii_lowercase();
+        if label.is_empty() {
+            continue;
+        }
+        for pin in component_pin_defs(component) {
+            label_nodes
+                .entry(label.clone())
+                .or_default()
+                .push(nodes.node_for(pin.pos));
+        }
+    }
+    for nodes_with_label in label_nodes.values() {
+        for pair in nodes_with_label.windows(2) {
+            nets.union(pair[0], pair[1]);
         }
     }
 

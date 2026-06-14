@@ -93,6 +93,28 @@ pub(crate) fn build_circuit_netlist(components: &[Component], wires: &[Wire]) ->
         }
     }
 
+    let mut label_nodes: HashMap<String, Vec<usize>> = HashMap::new();
+    for component in components {
+        if component.kind != ComponentKind::NetLabel {
+            continue;
+        }
+        let label = component.value.trim().to_ascii_lowercase();
+        if label.is_empty() {
+            continue;
+        }
+        for pin in component_pin_defs(component) {
+            label_nodes
+                .entry(label.clone())
+                .or_default()
+                .push(nodes.node_for(pin.pos));
+        }
+    }
+    for nodes_with_label in label_nodes.values() {
+        for pair in nodes_with_label.windows(2) {
+            nets.union(pair[0], pair[1]);
+        }
+    }
+
     let mut root_has_wire = HashSet::new();
     let mut wire_root_sets: HashMap<u64, HashSet<usize>> = HashMap::new();
     for wire in wires {
@@ -188,16 +210,18 @@ pub(crate) fn build_circuit_netlist(components: &[Component], wires: &[Wire]) ->
 
     let mut wire_nets = HashMap::new();
     let mut floating_wires = Vec::new();
+    let mut isolated_wires = Vec::new();
     for wire in wires {
         let roots = wire_root_sets.remove(&wire.id).unwrap_or_default();
         let root = roots.iter().next().copied();
         if let Some(root) = root.and_then(|root| root_to_id.get(&root).copied()) {
             wire_nets.insert(wire.id, root);
-            if net_rows
-                .get(root)
-                .is_some_and(|net| net.connected_pins.is_empty())
-            {
-                floating_wires.push(wire.id);
+            if let Some(net) = net_rows.get(root) {
+                if net.connected_pins.is_empty() {
+                    floating_wires.push(wire.id);
+                } else if net.connected_pins.len() == 1 {
+                    isolated_wires.push(wire.id);
+                }
             }
         }
     }
@@ -207,6 +231,7 @@ pub(crate) fn build_circuit_netlist(components: &[Component], wires: &[Wire]) ->
         pins,
         wire_nets,
         floating_wires,
+        isolated_wires,
     }
 }
 
@@ -227,7 +252,9 @@ fn wire_contact_points(components: &[Component], wires: &[Wire]) -> Vec<Pos2> {
     for wire in wires {
         points.extend(wire.points.iter().copied());
     }
-    let _ = components;
+    for component in components {
+        points.extend(component_pin_defs(component).into_iter().map(|pin| pin.pos));
+    }
     points
 }
 
@@ -315,6 +342,38 @@ mod tests {
         assert_eq!(net1, net2, "T-junction wires must share a net");
     }
 
+    #[test]
+    fn component_pin_touching_wire_midpoint_joins_wire_net() {
+        let resistor = comp(
+            10,
+            ComponentKind::Resistor,
+            Pos2::new(100.0, 100.0),
+            "R1",
+            "1k",
+        );
+        let pin_a = component_pin_defs(&resistor)
+            .into_iter()
+            .find(|pin| pin.label == "A")
+            .unwrap()
+            .pos;
+        let wire = wire(
+            11,
+            vec![
+                Pos2::new(pin_a.x - 40.0, pin_a.y),
+                Pos2::new(pin_a.x + 20.0, pin_a.y),
+            ],
+        );
+
+        let netlist = build_circuit_netlist(&[resistor], &[wire]);
+        let pin = netlist
+            .pins
+            .iter()
+            .find(|pin| pin.component_id == 10 && pin.pin_name == "A")
+            .unwrap();
+        assert!(pin.connected_by_wire);
+        assert_eq!(netlist.wire_nets[&11], pin.net_id);
+    }
+
     // ── Floating wire has no component pins ──────────────────────────────
 
     #[test]
@@ -322,6 +381,26 @@ mod tests {
         let w = wire(99, vec![Pos2::new(500.0, 500.0), Pos2::new(600.0, 500.0)]);
         let netlist = build_circuit_netlist(&[], &[w]);
         assert!(netlist.floating_wires.contains(&99), "Free-standing wire should be floating");
+    }
+
+    #[test]
+    fn one_pin_wire_is_isolated() {
+        let resistor = comp(
+            1,
+            ComponentKind::Resistor,
+            Pos2::new(100.0, 100.0),
+            "R1",
+            "1k",
+        );
+        let pin_a = component_pin_defs(&resistor)
+            .into_iter()
+            .find(|pin| pin.label == "A")
+            .unwrap()
+            .pos;
+        let dangling = wire(2, vec![pin_a, Pos2::new(pin_a.x - 60.0, pin_a.y)]);
+        let netlist = build_circuit_netlist(&[resistor], &[dangling]);
+        assert!(netlist.isolated_wires.contains(&2));
+        assert!(!netlist.floating_wires.contains(&2));
     }
 
     // ── GND net merge: two GND symbols → same net ────────────────────────
@@ -346,5 +425,31 @@ mod tests {
         let label = comp(1, ComponentKind::NetLabel, Pos2::new(100.0, 100.0), "VCC_LBL", "VCC");
         let netlist = build_circuit_netlist(&[label], &[]);
         assert!(netlist.nets.iter().any(|n| n.name == "VCC"));
+    }
+
+    #[test]
+    fn identical_net_label_values_merge_remote_nets() {
+        let label_a = comp(
+            1,
+            ComponentKind::NetLabel,
+            Pos2::new(100.0, 100.0),
+            "NET1",
+            "SENSE",
+        );
+        let label_b = comp(
+            2,
+            ComponentKind::NetLabel,
+            Pos2::new(400.0, 100.0),
+            "NET2",
+            "SENSE",
+        );
+        let netlist = build_circuit_netlist(&[label_a, label_b], &[]);
+        let label_nets = netlist
+            .pins
+            .iter()
+            .filter(|pin| pin.component_kind == ComponentKind::NetLabel)
+            .map(|pin| pin.net_id)
+            .collect::<HashSet<_>>();
+        assert_eq!(label_nets.len(), 1);
     }
 }
