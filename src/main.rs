@@ -927,6 +927,30 @@ impl CircuitApp {
         self.pending_fit = true;
     }
 
+    fn load_ohms_law_meter_demo(&mut self) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(160.0, 390.0));
+        let ammeter = self.place_component(ComponentKind::Ammeter, Pos2::new(320.0, 220.0));
+        let resistor = self.place_component(ComponentKind::Resistor, Pos2::new(500.0, 220.0));
+        let led = self.place_component(ComponentKind::Led, Pos2::new(680.0, 220.0));
+        let voltmeter = self.place_component(ComponentKind::Voltmeter, Pos2::new(500.0, 350.0));
+        let ground = self.place_component(ComponentKind::Ground, Pos2::new(840.0, 430.0));
+
+        self.add_wire_between(battery, "+", ammeter, "+");
+        self.add_wire_between(ammeter, "-", resistor, "A");
+        self.add_wire_between(resistor, "B", led, "A");
+        self.add_wire_between(led, "B", ground, "GND");
+        self.add_wire_between(battery, "-", ground, "GND");
+        self.add_wire_between(voltmeter, "+", resistor, "A");
+        self.add_wire_between(voltmeter, "-", resistor, "B");
+        self.place_note(
+            Pos2::new(500.0, 115.0),
+            "EXPECT: ON\nAmmeter is series, voltmeter is parallel.",
+        );
+        self.status = "Loaded Ohm's law meter lesson.".to_string();
+        self.pending_fit = true;
+    }
+
     fn load_reversed_led_warning_demo(&mut self) {
         self.reset_canvas();
         let battery = self.place_component(ComponentKind::Battery, Pos2::new(180.0, 360.0));
@@ -1117,6 +1141,61 @@ impl CircuitApp {
         self.pending_fit = true;
         self.status =
             "Button-Toggle-LED demo loaded. Click the button to toggle the LED path.".to_string();
+    }
+
+    /// ESP32 GPIO21 button debounce lesson, based on the common INPUT_PULLUP wiring pattern.
+    fn load_esp32_button_debounce_demo(&mut self) {
+        self.reset_canvas();
+        let esp32 = self.place_component(ComponentKind::Esp32, Pos2::new(420.0, 320.0));
+        let button = self.place_component(ComponentKind::PushButton, Pos2::new(180.0, 220.0));
+        let r_led = self.place_component(ComponentKind::Resistor, Pos2::new(660.0, 200.0));
+        let led = self.place_component(ComponentKind::Led, Pos2::new(780.0, 200.0));
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(180.0, 440.0));
+        let gnd = self.place_component(ComponentKind::Ground, Pos2::new(880.0, 340.0));
+
+        self.place_note(
+            Pos2::new(130.0, 90.0),
+            "EXPECT: OFF\nGPIO21 INPUT_PULLUP: open button = HIGH, no LED current.",
+        );
+        self.place_note(
+            Pos2::new(575.0, 90.0),
+            "Debounce: accept one press only after 50 ms stable LOW.",
+        );
+
+        // ESP32 supply and common return.
+        if let (Some(bat_plus), Some(vin)) = (self.pin_pos(battery, "+"), self.pin_pos(esp32, "VIN"))
+        {
+            self.add_wire(vec![
+                bat_plus,
+                Pos2::new(bat_plus.x, bat_plus.y + 70.0),
+                Pos2::new(vin.x + 30.0, bat_plus.y + 70.0),
+                Pos2::new(vin.x + 30.0, vin.y),
+                vin,
+            ]);
+        }
+        if let (Some(bat_minus), Some(gnd_pin)) =
+            (self.pin_pos(battery, "-"), self.pin_pos(gnd, "GND"))
+        {
+            self.add_wire(vec![
+                bat_minus,
+                Pos2::new(bat_minus.x, bat_minus.y + 120.0),
+                Pos2::new(gnd_pin.x, bat_minus.y + 120.0),
+                gnd_pin,
+            ]);
+        }
+        self.add_wire_between(esp32, "GND", gnd, "GND");
+        // Active-low input: GPIO21 is held HIGH internally, then the button pulls it to GND.
+        self.add_wire_between(esp32, "GPIO21", button, "A");
+        self.add_wire_between(button, "B", gnd, "GND");
+        // Output load: only this resistor + LED path should show current when software drives GPIO18.
+        self.add_wire_between(esp32, "GPIO18", r_led, "A");
+        self.add_wire_between(r_led, "B", led, "A");
+        self.add_wire_between(led, "B", gnd, "GND");
+
+        self.simulate = true;
+        self.pending_fit = true;
+        self.status =
+            "ESP32 debounce lesson loaded. Open button: no LED current. Closed stable press: LED path turns on.".to_string();
     }
 
     fn push_wire_point(&mut self, pos: Pos2) {
@@ -2251,6 +2330,9 @@ impl eframe::App for CircuitApp {
                             if palette_action(ui, "Fused Lamp").clicked() {
                                 self.load_lamp_demo();
                             }
+                            if palette_action(ui, "Ohm Meter LED").clicked() {
+                                self.load_ohms_law_meter_demo();
+                            }
                             if palette_action(ui, "Transistor Switch").clicked() {
                                 self.load_transistor_switch_demo();
                             }
@@ -2283,6 +2365,9 @@ impl eframe::App for CircuitApp {
                         palette_section(ui, "Examples: MCU Modules", SectionMode::Open, |ui| {
                             if palette_action(ui, "🔘 Button → LED Toggle").clicked() {
                                 self.load_button_toggle_led_demo();
+                            }
+                            if palette_action(ui, "ESP32 Button Debounce").clicked() {
+                                self.load_esp32_button_debounce_demo();
                             }
                             if palette_action(ui, "Voltage Divider").clicked() {
                                 self.load_voltage_divider_demo();
@@ -2509,6 +2594,12 @@ impl eframe::App for CircuitApp {
             .default_width(248.0)
             .resizable(true)
             .show(ctx, |ui| {
+                if let Some(report) = lesson_report(&self.components, &simulation) {
+                    render_lesson_report(ui, &report);
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                }
                 ui.heading("Inspector");
                 ui.separator();
                 match self.selected {
@@ -2758,24 +2849,16 @@ impl eframe::App for CircuitApp {
                 ctx.request_repaint();
             }
 
-            // Flow speed: faster when more current (DC-aware); shorted circuits run fast/red
-            let (flow_speed, flow_color_override): (f32, Option<egui::Color32>) =
-                if simulation.shorted && !simulation.energized_wires.is_empty() {
-                    // Short circuit: fast red pulse to signal danger
-                    (320.0, Some(egui::Color32::from_rgb(255, 60, 60)))
-                } else {
-                    let spd = simulation.dc.as_ref()
-                        .map(|dc| {
-                            let max_i = dc.branch_current.values().map(|v| v.abs()).fold(0.0_f64, f64::max);
-                            (max_i as f32 * 8000.0).clamp(60.0, 220.0)
-                        })
-                        .unwrap_or(110.0);
-                    (spd, None)
-                };
-            let _ = flow_color_override; // reserved for future tinting; arrows already visually distinct
+            // Flow arrows are only for valid load paths. A short is a fault, not
+            // useful "current flow", so it gets red wire highlighting instead.
+            let flow_speed = simulation.dc.as_ref()
+                .map(|dc| {
+                    let max_i = dc.branch_current.values().map(|v| v.abs()).fold(0.0_f64, f64::max);
+                    (max_i as f32 * 8000.0).clamp(60.0, 220.0)
+                })
+                .unwrap_or(110.0);
             let flow_phase = ctx.input(|i| i.time) as f32 * flow_speed;
-            // Show flow whenever wires are energized — shorted circuits show fast to signal the short
-            let show_flow = self.simulate && !simulation.energized_wires.is_empty();
+            let show_flow = flow_overlay_enabled(&simulation, self.simulate);
             if show_flow {
                 ctx.request_repaint();
             }
@@ -2860,6 +2943,7 @@ impl eframe::App for CircuitApp {
                     wire,
                     self.selected == Some(Selection::Wire(wire.id)),
                     energized,
+                    simulation.shorted && energized,
                     show_flow && energized,
                     flow_phase,
                     net_highlighted,
@@ -4629,6 +4713,18 @@ enum StatusTone {
     Error,
 }
 
+struct LessonReport {
+    title: String,
+    checks: Vec<LessonCheck>,
+    next_action: String,
+}
+
+struct LessonCheck {
+    label: String,
+    passed: bool,
+    detail: String,
+}
+
 fn apply_app_style(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.window_fill = Color32::from_rgb(18, 21, 26);
@@ -4777,6 +4873,172 @@ fn simulation_warning_count(simulation: &Simulation) -> usize {
         .count()
 }
 
+fn flow_overlay_enabled(simulation: &Simulation, simulate_enabled: bool) -> bool {
+    simulate_enabled && !simulation.shorted && !simulation.energized_wires.is_empty()
+}
+
+fn lesson_report(components: &[Component], simulation: &Simulation) -> Option<LessonReport> {
+    let notes = components
+        .iter()
+        .filter(|component| component.kind == ComponentKind::TextNote)
+        .map(|component| component.value.trim())
+        .filter(|value| value.to_ascii_lowercase().contains("expect:"))
+        .collect::<Vec<_>>();
+    if notes.is_empty() {
+        return None;
+    }
+
+    let joined = notes.join("\n");
+    let lower = joined.to_ascii_lowercase();
+    let mut checks = Vec::new();
+
+    let erc_errors = simulation
+        .erc
+        .iter()
+        .filter(|violation| violation.severity == ErcSeverity::Error)
+        .count();
+    let erc_warnings = simulation
+        .erc
+        .iter()
+        .filter(|violation| violation.severity == ErcSeverity::Warning)
+        .count();
+    let led_ids = components
+        .iter()
+        .filter(|component| component.kind == ComponentKind::Led)
+        .map(|component| component.id)
+        .collect::<Vec<_>>();
+    let motor_ids = components
+        .iter()
+        .filter(|component| component.kind == ComponentKind::DcMotor)
+        .map(|component| component.id)
+        .collect::<Vec<_>>();
+    let capacitor_ids = components
+        .iter()
+        .filter(|component| component.kind == ComponentKind::Capacitor)
+        .map(|component| component.id)
+        .collect::<Vec<_>>();
+    let energized_leds = led_ids
+        .iter()
+        .filter(|id| simulation.energized_components.contains(id))
+        .count();
+    let energized_motors = motor_ids
+        .iter()
+        .filter(|id| simulation.energized_components.contains(id))
+        .count();
+    let energized_caps = capacitor_ids
+        .iter()
+        .filter(|id| simulation.energized_components.contains(id))
+        .count();
+
+    let expects_on = lower.contains("expect: on") || lower.contains("expect: both on");
+    let expects_off = lower.contains("expect: off") || lower.contains("open circuit");
+    let expects_error = lower.contains("expect: error") || lower.contains("short circuit");
+    let expects_warning = lower.contains("expect: warning") || lower.contains("warning");
+
+    if expects_on {
+        checks.push(LessonCheck {
+            label: "Closed path".to_string(),
+            passed: simulation.closed && !simulation.shorted && erc_errors == 0,
+            detail: simulation.summary.clone(),
+        });
+        if !led_ids.is_empty() {
+            checks.push(LessonCheck {
+                label: "LED output".to_string(),
+                passed: energized_leds == led_ids.len(),
+                detail: format!("{energized_leds}/{} lit", led_ids.len()),
+            });
+        }
+        if !motor_ids.is_empty() {
+            checks.push(LessonCheck {
+                label: "Motor output".to_string(),
+                passed: energized_motors == motor_ids.len(),
+                detail: format!("{energized_motors}/{} running", motor_ids.len()),
+            });
+        }
+    }
+
+    if expects_off {
+        checks.push(LessonCheck {
+            label: "No closed current path".to_string(),
+            passed: !simulation.closed && !simulation.shorted,
+            detail: simulation.summary.clone(),
+        });
+        if !led_ids.is_empty() {
+            checks.push(LessonCheck {
+                label: "LED stays off".to_string(),
+                passed: energized_leds == 0,
+                detail: format!("{energized_leds}/{} lit", led_ids.len()),
+            });
+        }
+        if lower.contains("capacitor") && !capacitor_ids.is_empty() {
+            checks.push(LessonCheck {
+                label: "Capacitor blocks DC".to_string(),
+                passed: energized_caps == 0,
+                detail: format!("{energized_caps}/{} conducting", capacitor_ids.len()),
+            });
+        }
+    }
+
+    if expects_error {
+        checks.push(LessonCheck {
+            label: "Error detected".to_string(),
+            passed: simulation.shorted || erc_errors > 0,
+            detail: format!("{erc_errors} ERC error(s)"),
+        });
+    }
+
+    if expects_warning {
+        checks.push(LessonCheck {
+            label: "Warning detected".to_string(),
+            passed: erc_errors + erc_warnings > 0,
+            detail: format!("{erc_errors} error(s), {erc_warnings} warning(s)"),
+        });
+        if lower.contains("gpio") && lower.contains("motor") {
+            let gpio_motor_warning = simulation.erc.iter().any(|violation| {
+                violation.message.contains("GPIO") && violation.message.contains("motor")
+            });
+            checks.push(LessonCheck {
+                label: "GPIO motor rule".to_string(),
+                passed: gpio_motor_warning,
+                detail: "Use a driver, transistor, or relay".to_string(),
+            });
+            if !motor_ids.is_empty() {
+                checks.push(LessonCheck {
+                    label: "Motor stays off".to_string(),
+                    passed: energized_motors == 0,
+                    detail: format!("{energized_motors}/{} running", motor_ids.len()),
+                });
+            }
+        }
+    }
+
+    if checks.is_empty() {
+        checks.push(LessonCheck {
+            label: "Simulation state".to_string(),
+            passed: !simulation.shorted,
+            detail: simulation.summary.clone(),
+        });
+    }
+
+    let passed = checks.iter().filter(|check| check.passed).count();
+    let total = checks.len();
+    let next_action = if passed == total {
+        "Matches the EXPECT note. Try editing one wire or value and watch this change.".to_string()
+    } else if expects_off {
+        "Find the unwanted live path or missing break, then compare orange highlights.".to_string()
+    } else if expects_error || expects_warning {
+        "Open the ERC panel and click the reported item to locate the fault.".to_string()
+    } else {
+        "Complete the source-load-return path, then verify the orange live path.".to_string()
+    };
+
+    Some(LessonReport {
+        title: format!("Lesson Check {passed}/{total}"),
+        checks,
+        next_action,
+    })
+}
+
 fn metric_row(ui: &mut egui::Ui, label: impl Into<String>, value: impl Into<String>) {
     ui.horizontal(|ui| {
         ui.set_width(ui.available_width());
@@ -4793,6 +5055,74 @@ fn metric_row(ui: &mut egui::Ui, label: impl Into<String>, value: impl Into<Stri
             );
         });
     });
+}
+
+fn render_lesson_report(ui: &mut egui::Ui, report: &LessonReport) {
+    let all_passed = report.checks.iter().all(|check| check.passed);
+    let (fill, stroke, title_color) = if all_passed {
+        (
+            Color32::from_rgb(20, 42, 34),
+            Color32::from_rgb(58, 150, 105),
+            Color32::from_rgb(150, 245, 185),
+        )
+    } else {
+        (
+            Color32::from_rgb(48, 36, 22),
+            Color32::from_rgb(170, 115, 48),
+            Color32::from_rgb(255, 205, 115),
+        )
+    };
+
+    egui::Frame::NONE
+        .fill(fill)
+        .stroke(Stroke::new(1.0, stroke))
+        .corner_radius(egui::CornerRadius::same(5))
+        .inner_margin(egui::Margin::symmetric(9, 7))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(&report.title)
+                    .size(12.0)
+                    .strong()
+                    .color(title_color),
+            );
+            ui.add_space(4.0);
+            for check in &report.checks {
+                let mark = if check.passed { "PASS" } else { "CHECK" };
+                let color = if check.passed {
+                    Color32::from_rgb(150, 235, 180)
+                } else {
+                    Color32::from_rgb(255, 190, 115)
+                };
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        Vec2::new(42.0, 16.0),
+                        egui::Label::new(
+                            egui::RichText::new(mark)
+                                .size(10.0)
+                                .monospace()
+                                .strong()
+                                .color(color),
+                        ),
+                    );
+                    ui.label(
+                        egui::RichText::new(&check.label)
+                            .size(11.0)
+                            .color(Color32::from_rgb(220, 228, 235)),
+                    );
+                });
+                ui.label(
+                    egui::RichText::new(&check.detail)
+                        .size(10.5)
+                        .color(Color32::from_rgb(150, 160, 170)),
+                );
+            }
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(&report.next_action)
+                    .size(11.0)
+                    .color(Color32::from_rgb(205, 214, 222)),
+            );
+        });
 }
 
 fn dc_metric_row(ui: &mut egui::Ui, label: &str, value: &str) {
@@ -5426,8 +5756,9 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         .intersection(&wire_from_return)
         .next()
         .is_some();
+    let hard_direct_short = explicit_source_to_ground_wire_short(components, wires);
     // Short if + reaches return via bare wires, OR if the closed loop has no resistive/module load.
-    let shorted = direct_wire_short || energized_loads.is_empty();
+    let mut shorted = hard_direct_short || (direct_wire_short && energized_loads.is_empty());
 
     prune_uncontrolled_digital_output_paths(
         components,
@@ -5493,11 +5824,8 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         }
     }
 
-    // Append per-component warnings to details
-    for component in components {
-        if let Some(warning) = component_warnings.get(&component.id) {
-            details.push(format!("{}: {}", component.label, warning));
-        }
+    if !hard_direct_short && has_energized_load_component(components, &energized_components) {
+        shorted = false;
     }
 
     let voltage = estimate_loop_voltage(components, &nodes, &loop_nodes);
@@ -5514,6 +5842,26 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
     }
 
     let dc = mna::solve_dc(components, wires);
+    apply_engineering_checks(
+        components,
+        dc.as_ref(),
+        shorted,
+        &mut component_warnings,
+        &mut details,
+    );
+    prune_unphysical_energized_components(
+        components,
+        dc.as_ref(),
+        shorted,
+        &mut energized_components,
+    );
+
+    // Append per-component warnings to details after engineering checks.
+    for component in components {
+        if let Some(warning) = component_warnings.get(&component.id) {
+            details.push(format!("{}: {}", component.label, warning));
+        }
+    }
 
     Simulation {
         closed: true,
@@ -5553,7 +5901,7 @@ impl CircuitNodes {
     fn find_existing(&self, pos: Pos2) -> Option<usize> {
         self.positions
             .iter()
-            .position(|existing| existing.distance(pos) <= 8.0)
+            .position(|existing| existing.distance(pos) <= 1.0)
     }
 }
 
@@ -5592,14 +5940,12 @@ fn wire_contact_points(components: &[Component], wires: &[Wire]) -> Vec<Pos2> {
     for wire in wires {
         points.extend(wire.points.iter().copied());
     }
-    for component in components {
-        points.extend(component_pin_defs(component).into_iter().map(|pin| pin.pos));
-    }
+    let _ = components;
     points
 }
 
 pub(crate) fn point_touches_wire_segment(point: Pos2, a: Pos2, b: Pos2) -> bool {
-    distance_to_segment(point, a, b) <= 5.0
+    distance_to_segment(point, a, b) <= 1.0
 }
 
 fn reachable_nodes(graph: &[HashSet<usize>], starts: &[usize]) -> HashSet<usize> {
@@ -5627,6 +5973,11 @@ fn nodes_connected(graph: &[HashSet<usize>], a: usize, b: usize) -> bool {
     reachable_nodes(graph, &[a]).contains(&b)
 }
 
+fn module_pin_can_drive_digital_load(pin: &CircuitPin) -> bool {
+    matches!(pin.role, PinRole::Digital | PinRole::Output)
+        || (pin.role == PinRole::I2c && pin.label.to_ascii_uppercase().contains("GPIO"))
+}
+
 fn prune_uncontrolled_digital_output_paths(
     components: &[Component],
     wires: &[Wire],
@@ -5643,7 +5994,7 @@ fn prune_uncontrolled_digital_output_paths(
     for module in components.iter().filter(|component| component_is_powered_module(component)) {
         for pin in component_pin_defs(module)
             .iter()
-            .filter(|pin| matches!(pin.role, PinRole::Digital | PinRole::Output))
+            .filter(|pin| module_pin_can_drive_digital_load(pin))
         {
             let Some(digital_node) = nodes.find_existing(pin.pos) else {
                 continue;
@@ -5718,7 +6069,7 @@ fn mark_powered_digital_output_paths(
         let pins = component_pin_defs(module);
         let digital_pins = pins
             .iter()
-            .filter(|pin| matches!(pin.role, PinRole::Digital | PinRole::Output))
+            .filter(|pin| module_pin_can_drive_digital_load(pin))
             .filter_map(|pin| nodes.find_existing(pin.pos))
             .collect::<Vec<_>>();
 
@@ -6088,6 +6439,257 @@ fn estimate_loop_resistance(
         })
         .sum::<f32>();
     (resistance > 0.0).then_some(resistance)
+}
+
+fn explicit_source_to_ground_wire_short(components: &[Component], wires: &[Wire]) -> bool {
+    let mut source_positive_pins = Vec::new();
+    let mut return_pins = Vec::new();
+
+    for component in components {
+        for pin in component_pin_defs(component) {
+            if matches!(
+                component.kind,
+                ComponentKind::Battery | ComponentKind::VSource | ComponentKind::ISource
+            ) && pin.role == PinRole::Positive
+            {
+                source_positive_pins.push(pin.pos);
+            }
+            if component.kind == ComponentKind::Ground
+                || (matches!(
+                    component.kind,
+                    ComponentKind::Battery | ComponentKind::VSource | ComponentKind::ISource
+                ) && pin.role == PinRole::Ground)
+            {
+                return_pins.push(pin.pos);
+            }
+        }
+    }
+
+    wires.iter().any(|wire| {
+        let touches_source = wire_touches_any_pin(wire, &source_positive_pins);
+        let touches_return = wire_touches_any_pin(wire, &return_pins);
+        touches_source && touches_return
+    })
+}
+
+fn wire_touches_any_pin(wire: &Wire, pins: &[Pos2]) -> bool {
+    pins.iter().any(|pin| {
+        wire.points
+            .first()
+            .is_some_and(|point| point.distance(*pin) <= 5.0)
+            || wire
+                .points
+                .last()
+                .is_some_and(|point| point.distance(*pin) <= 5.0)
+    })
+}
+
+fn has_energized_load_component(
+    components: &[Component],
+    energized_components: &HashSet<u64>,
+) -> bool {
+    components.iter().any(|component| {
+        energized_components.contains(&component.id)
+            && !matches!(
+                component.kind,
+                ComponentKind::Battery
+                    | ComponentKind::VSource
+                    | ComponentKind::ISource
+                    | ComponentKind::Ground
+                    | ComponentKind::TextNote
+            )
+            && (component_conductance(component) == Conductance::Load
+                || component_is_powered_module(component))
+    })
+}
+
+fn apply_engineering_checks(
+    components: &[Component],
+    dc: Option<&mna::DcResult>,
+    shorted: bool,
+    component_warnings: &mut HashMap<u64, String>,
+    details: &mut Vec<String>,
+) {
+    if shorted {
+        details.push("Engineering check: fault current path detected; loads are not treated as normally powered.".to_string());
+    }
+
+    let Some(dc) = dc else {
+        if shorted {
+            details.push("DC operating point is singular because the source is shorted.".to_string());
+        }
+        return;
+    };
+
+    let mut max_source_current = 0.0_f64;
+    for component in components {
+        let current = dc.branch_current.get(&component.id).copied().unwrap_or(0.0).abs();
+        let power = dc.component_power.get(&component.id).copied().unwrap_or(0.0).abs();
+        let voltage = dc.component_voltage.get(&component.id).copied().unwrap_or(0.0);
+
+        if matches!(
+            component.kind,
+            ComponentKind::Battery | ComponentKind::VSource | ComponentKind::ISource
+        ) {
+            max_source_current = max_source_current.max(current);
+        }
+
+        if let Some(limit) = component_current_limit(component) {
+            if current > limit {
+                component_warnings.entry(component.id).or_insert_with(|| {
+                    format!(
+                        "Overcurrent risk: {} through {}, limit about {}.",
+                        mna::format_current(current),
+                        component.label,
+                        mna::format_current(limit)
+                    )
+                });
+            }
+        }
+
+        if let Some(limit) = component_power_limit(component) {
+            if power > limit {
+                component_warnings.entry(component.id).or_insert_with(|| {
+                    format!(
+                        "Overpower risk: {} in {}, limit about {}.",
+                        mna::format_power(power),
+                        component.label,
+                        mna::format_power(limit)
+                    )
+                });
+            }
+        }
+
+        if component.kind == ComponentKind::Led {
+            let current_ma = current * 1000.0;
+            if current > 0.0 {
+                details.push(format!(
+                    "{} LED current: {:.2} mA, Vf {:.2} V.",
+                    component.label, current_ma, voltage
+                ));
+            }
+        }
+    }
+
+    if max_source_current > 2.0 {
+        details.push(format!(
+            "Engineering check: source current {} is high for a beginner circuit.",
+            mna::format_current(max_source_current)
+        ));
+    }
+}
+
+fn prune_unphysical_energized_components(
+    components: &[Component],
+    dc: Option<&mna::DcResult>,
+    shorted: bool,
+    energized_components: &mut HashSet<u64>,
+) {
+    if shorted {
+        energized_components.retain(|id| {
+            components
+                .iter()
+                .find(|component| component.id == *id)
+                .is_some_and(|component| {
+                    matches!(
+                        component.kind,
+                        ComponentKind::Battery
+                            | ComponentKind::VSource
+                            | ComponentKind::ISource
+                            | ComponentKind::Ground
+                    )
+                })
+        });
+        return;
+    }
+
+    let Some(dc) = dc else {
+        return;
+    };
+
+    energized_components.retain(|id| {
+        let Some(component) = components.iter().find(|component| component.id == *id) else {
+            return false;
+        };
+        if component_is_powered_module(component)
+            || matches!(
+                component.kind,
+                ComponentKind::Battery
+                    | ComponentKind::VSource
+                    | ComponentKind::ISource
+                    | ComponentKind::Ground
+            )
+        {
+            return true;
+        }
+        if !component_has_dc_current_model(component.kind) {
+            return true;
+        }
+        dc.branch_current
+            .get(id)
+            .is_some_and(|current| current.abs() > 1e-9)
+    });
+}
+
+fn component_has_dc_current_model(kind: ComponentKind) -> bool {
+    matches!(
+        kind,
+        ComponentKind::Resistor
+            | ComponentKind::Potentiometer
+            | ComponentKind::Thermistor
+            | ComponentKind::Varistor
+            | ComponentKind::Fuse
+            | ComponentKind::Lamp
+            | ComponentKind::DcMotor
+            | ComponentKind::Relay
+            | ComponentKind::VoltageReg
+            | ComponentKind::NpnTransistor
+            | ComponentKind::PnpTransistor
+            | ComponentKind::Nmosfet
+            | ComponentKind::Pmosfet
+            | ComponentKind::Diode
+            | ComponentKind::Led
+            | ComponentKind::ZenerDiode
+            | ComponentKind::SchottkyDiode
+            | ComponentKind::TvsDiode
+            | ComponentKind::Phototransistor
+            | ComponentKind::Timer555
+            | ComponentKind::Voltmeter
+            | ComponentKind::Ammeter
+    )
+}
+
+fn component_current_limit(component: &Component) -> Option<f64> {
+    match component.kind {
+        ComponentKind::Led => Some(0.025),
+        ComponentKind::Diode | ComponentKind::SchottkyDiode | ComponentKind::ZenerDiode => {
+            Some(1.0)
+        }
+        ComponentKind::Fuse => parse_metric_value(&component.value, "a")
+            .map(|value| value as f64)
+            .filter(|value| *value > 0.0),
+        ComponentKind::DcMotor => Some(2.0),
+        ComponentKind::Relay => Some(0.2),
+        ComponentKind::Ammeter => Some(10.0),
+        _ => None,
+    }
+}
+
+fn component_power_limit(component: &Component) -> Option<f64> {
+    match component.kind {
+        ComponentKind::Resistor => Some(0.25),
+        ComponentKind::Potentiometer | ComponentKind::Thermistor => Some(0.125),
+        ComponentKind::Led => Some(0.08),
+        ComponentKind::Diode | ComponentKind::SchottkyDiode | ComponentKind::ZenerDiode => {
+            Some(0.5)
+        }
+        ComponentKind::Fuse => Some(0.5),
+        ComponentKind::Lamp => Some(40.0),
+        ComponentKind::DcMotor => Some(12.0),
+        ComponentKind::Relay => Some(1.0),
+        ComponentKind::VoltageReg => Some(1.5),
+        _ => None,
+    }
 }
 
 pub(crate) fn parse_metric_value(value: &str, unit_hint: &str) -> Option<f32> {
@@ -6859,19 +7461,16 @@ fn draw_empty_canvas_hint(painter: &egui::Painter, canvas: Rect) {
     );
 }
 
-/// Returns grid-rounded positions of all component pins that have at least one
-/// wire endpoint or segment passing through them.
+/// Returns grid-rounded positions of all component pins that have a snapped
+/// wire endpoint/control point on the pin. A wire merely passing nearby is not
+/// a connection.
 fn connected_pin_positions(components: &[Component], wires: &[Wire]) -> Vec<(i32, i32)> {
     let mut connected = Vec::new();
     for component in components {
         for pin in component_pin_defs(component) {
             let key = (pin.pos.x.round() as i32, pin.pos.y.round() as i32);
             let is_conn = wires.iter().any(|w| {
-                w.points.first().is_some_and(|&p| p.distance(pin.pos) < 4.0)
-                    || w.points.last().is_some_and(|&p| p.distance(pin.pos) < 4.0)
-                    || w.points
-                        .windows(2)
-                        .any(|seg| distance_to_segment(pin.pos, seg[0], seg[1]) < 3.0)
+                w.points.iter().any(|&p| p.distance(pin.pos) <= 1.0)
             });
             if is_conn {
                 connected.push(key);
@@ -7643,6 +8242,7 @@ fn draw_wire(
     wire: &Wire,
     selected: bool,
     energized: bool,
+    fault_highlight: bool,
     show_flow: bool,
     flow_phase: f32,
     net_highlighted: bool,
@@ -7661,6 +8261,8 @@ fn draw_wire(
 
     let stroke = if selected {
         Stroke::new(3.5, Color32::from_rgb(90, 235, 170))
+    } else if fault_highlight {
+        Stroke::new(4.2, Color32::from_rgb(255, 72, 58))
     } else if let Some(v) = dc_voltage {
         let col = mna::voltage_color(v, dc_vmax);
         Stroke::new(base_w, col)
@@ -7675,6 +8277,10 @@ fn draw_wire(
     let screen_points: Vec<Pos2> = wire.points.iter().map(|&p| view.to_screen(p)).collect();
     for segment in screen_points.windows(2) {
         painter.line_segment([segment[0], segment[1]], stroke);
+    }
+
+    if fault_highlight {
+        draw_short_fault_markers(painter, &screen_points);
     }
 
     // Voltage label overlay
@@ -7773,6 +8379,31 @@ fn draw_flow_markers(painter: &egui::Painter, points: &[Pos2], flow_phase: f32) 
         );
 
         distance += spacing;
+    }
+}
+
+fn draw_short_fault_markers(painter: &egui::Painter, points: &[Pos2]) {
+    let total = polyline_length(points);
+    if total <= 1.0 {
+        return;
+    }
+
+    let spacing = 70.0;
+    let marker_count = (total / spacing).ceil().max(1.0) as usize;
+    let stroke = Stroke::new(2.0, Color32::from_rgb(255, 220, 210));
+    for idx in 0..marker_count {
+        let distance = if marker_count == 1 {
+            total * 0.5
+        } else {
+            (idx as f32 + 0.5) * total / marker_count as f32
+        };
+        let Some(pos) = point_on_polyline(points, distance) else {
+            continue;
+        };
+        let r = 5.0;
+        painter.circle_filled(pos, 7.0, Color32::from_rgba_unmultiplied(120, 0, 0, 120));
+        painter.line_segment([pos + Vec2::new(-r, -r), pos + Vec2::new(r, r)], stroke);
+        painter.line_segment([pos + Vec2::new(-r, r), pos + Vec2::new(r, -r)], stroke);
     }
 }
 
@@ -11013,7 +11644,9 @@ fn generate_arduino_code(netlist: &CircuitNetlist) -> String {
                 if has_button_on_net && button_gpio.is_none() {
                     button_gpio = Some(gpio_num.clone());
                 }
-                if has_led_on_net && led_gpio.is_none() {
+                if (has_led_on_net || net_drives_led_through_series_part(netlist, net.id))
+                    && led_gpio.is_none()
+                {
                     led_gpio = Some(gpio_num);
                 }
             }
@@ -11051,23 +11684,31 @@ fn generate_arduino_code(netlist: &CircuitNetlist) -> String {
         if let (Some(btn), Some(led)) = (&button_gpio, &led_gpio) {
             code.push_str(&format!("\nconst int BUTTON_PIN = {btn};\n"));
             code.push_str(&format!("const int LED_PIN    = {led};\n"));
-            code.push_str("\nbool ledState = false;\nbool lastBtnState = HIGH;\n");
+            code.push_str("const unsigned long DEBOUNCE_MS = 50;\n");
+            code.push_str("\nbool ledState = false;\n");
+            code.push_str("int lastReading = HIGH;\n");
+            code.push_str("int stableState = HIGH;\n");
+            code.push_str("unsigned long lastDebounceTime = 0;\n");
 
             code.push_str("\nvoid setup() {\n  Serial.begin(115200);\n");
             code.push_str("  pinMode(BUTTON_PIN, INPUT_PULLUP);  // active-low button\n");
             code.push_str("  pinMode(LED_PIN, OUTPUT);\n");
             code.push_str("  digitalWrite(LED_PIN, LOW);\n");
             code.push_str("}\n\nvoid loop() {\n");
-            code.push_str("  bool btnState = digitalRead(BUTTON_PIN);\n");
-            code.push_str("  // Detect falling edge (button press)\n");
-            code.push_str("  if (lastBtnState == HIGH && btnState == LOW) {\n");
-            code.push_str("    ledState = !ledState;\n");
-            code.push_str("    digitalWrite(LED_PIN, ledState ? HIGH : LOW);\n");
-            code.push_str("    Serial.print(\"LED: \");\n");
-            code.push_str("    Serial.println(ledState ? \"ON\" : \"OFF\");\n");
+            code.push_str("  int reading = digitalRead(BUTTON_PIN);\n");
+            code.push_str("  if (reading != lastReading) {\n");
+            code.push_str("    lastDebounceTime = millis();\n");
+            code.push_str("    lastReading = reading;\n");
+            code.push_str("  }\n\n");
+            code.push_str("  if ((millis() - lastDebounceTime) > DEBOUNCE_MS && reading != stableState) {\n");
+            code.push_str("    stableState = reading;\n");
+            code.push_str("    if (stableState == LOW) {  // pressed with INPUT_PULLUP\n");
+            code.push_str("      ledState = !ledState;\n");
+            code.push_str("      digitalWrite(LED_PIN, ledState ? HIGH : LOW);\n");
+            code.push_str("      Serial.println(ledState ? \"LED ON\" : \"LED OFF\");\n");
+            code.push_str("    }\n");
             code.push_str("  }\n");
-            code.push_str("  lastBtnState = btnState;\n");
-            code.push_str("  delay(50);  // debounce\n");
+            code.push_str("  delay(1);\n");
             code.push_str("}\n");
             return code;
         }
@@ -11110,6 +11751,43 @@ fn digits_from_pin_name(name: &str) -> Option<String> {
         .take_while(|ch| ch.is_ascii_digit())
         .collect::<String>();
     (!digits.is_empty()).then_some(digits)
+}
+
+fn net_drives_led_through_series_part(netlist: &CircuitNetlist, net_id: usize) -> bool {
+    let series_parts = netlist
+        .pins
+        .iter()
+        .filter(|pin| pin.net_id == net_id)
+        .filter(|pin| {
+            matches!(
+                pin.component_kind,
+                ComponentKind::Resistor | ComponentKind::Ammeter | ComponentKind::Fuse
+            )
+        });
+
+    for part_pin in series_parts {
+        let output_net_ids = netlist
+            .pins
+            .iter()
+            .filter(|pin| {
+                pin.component_id == part_pin.component_id
+                    && pin.pin_name != part_pin.pin_name
+                    && pin.net_id != net_id
+            })
+            .map(|pin| pin.net_id);
+
+        for output_net_id in output_net_ids {
+            if netlist
+                .pins
+                .iter()
+                .any(|pin| pin.net_id == output_net_id && pin.component_kind == ComponentKind::Led)
+            {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn sanitize_code_ident(name: &str) -> String {
@@ -11934,7 +12612,7 @@ mod tests {
     }
 
     #[test]
-    fn simulation_connects_pin_touching_wire_segment() {
+    fn simulation_connects_pin_when_wire_endpoint_is_snapped_to_pin() {
         let mut app = CircuitApp::new();
         let battery = app.place_component(ComponentKind::Battery, Pos2::new(160.0, 300.0));
         let resistor = app.place_component(ComponentKind::Resistor, Pos2::new(360.0, 300.0));
@@ -11946,10 +12624,7 @@ mod tests {
         let r_b = app.pin_pos(resistor, "B").unwrap();
         let gnd = app.pin_pos(ground, "GND").unwrap();
 
-        app.add_wire(vec![
-            Pos2::new(bat_pos.x, r_a.y),
-            Pos2::new(r_a.x + 12.0, r_a.y),
-        ]);
+        app.add_wire(vec![Pos2::new(bat_pos.x, r_a.y), r_a]);
         app.add_wire(vec![bat_pos, Pos2::new(bat_pos.x, r_a.y)]);
         app.add_wire(vec![r_b, Pos2::new(r_b.x, gnd.y), gnd]);
         app.add_wire(vec![bat_neg, Pos2::new(bat_neg.x, gnd.y), gnd]);
@@ -11958,6 +12633,34 @@ mod tests {
 
         assert_eq!(sim.summary, "Current flowing", "{:?}", sim.details);
         assert!(sim.energized_components.contains(&resistor));
+    }
+
+    #[test]
+    fn near_pin_wire_segment_does_not_connect_without_snap_point() {
+        let mut app = CircuitApp::new();
+        let battery = app.place_component(ComponentKind::Battery, Pos2::new(160.0, 300.0));
+        let resistor = app.place_component(ComponentKind::Resistor, Pos2::new(360.0, 300.0));
+        let ground = app.place_component(ComponentKind::Ground, Pos2::new(560.0, 360.0));
+
+        let bat_pos = app.pin_pos(battery, "+").unwrap();
+        let bat_neg = app.pin_pos(battery, "-").unwrap();
+        let r_a = app.pin_pos(resistor, "A").unwrap();
+        let r_b = app.pin_pos(resistor, "B").unwrap();
+        let gnd = app.pin_pos(ground, "GND").unwrap();
+
+        // This wire passes close to R1.A, but it does not include R1.A as an
+        // endpoint/control point. It must remain visually and electrically open.
+        app.add_wire(vec![
+            bat_pos,
+            Pos2::new(r_a.x + 20.0, r_a.y + 4.0),
+        ]);
+        app.add_wire(vec![r_b, Pos2::new(r_b.x, gnd.y), gnd]);
+        app.add_wire(vec![bat_neg, Pos2::new(bat_neg.x, gnd.y), gnd]);
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+
+        assert_eq!(sim.summary, "Open circuit", "{:?}", sim.details);
+        assert!(!sim.energized_components.contains(&resistor));
     }
 
     #[test]
@@ -12079,6 +12782,89 @@ mod tests {
         );
         assert!(closed_sim.energized_components.contains(&resistor_id));
         assert!(closed_sim.energized_wires.contains(&gpio18_wire));
+    }
+
+    #[test]
+    fn esp32_button_debounce_demo_current_follows_button_state() {
+        let mut app = CircuitApp::new();
+        app.load_esp32_button_debounce_demo();
+
+        let button_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::PushButton)
+            .map(|component| component.id)
+            .unwrap();
+        let led_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::Led)
+            .map(|component| component.id)
+            .unwrap();
+        let resistor_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::Resistor)
+            .map(|component| component.id)
+            .unwrap();
+        let gpio18_wire = app
+            .wires
+            .iter()
+            .find(|wire| {
+                let gpio18 = app.pin_pos(
+                    app.components
+                        .iter()
+                        .find(|component| component.kind == ComponentKind::Esp32)
+                        .unwrap()
+                        .id,
+                    "GPIO18",
+                );
+                gpio18.is_some_and(|pin| wire.points.iter().any(|point| point.distance(pin) <= 0.5))
+            })
+            .map(|wire| wire.id)
+            .unwrap();
+
+        let open_sim = analyze_circuit(&app.components, &app.wires);
+        assert!(!open_sim.energized_components.contains(&led_id));
+        assert!(!open_sim.energized_components.contains(&resistor_id));
+        assert!(!open_sim.energized_wires.contains(&gpio18_wire));
+
+        app.components
+            .iter_mut()
+            .find(|component| component.id == button_id)
+            .unwrap()
+            .value = "closed".to_string();
+
+        let closed_sim = analyze_circuit(&app.components, &app.wires);
+        assert!(
+            closed_sim.energized_components.contains(&led_id),
+            "{:?}",
+            closed_sim.details
+        );
+        assert!(closed_sim.energized_components.contains(&resistor_id));
+        assert!(closed_sim.energized_wires.contains(&gpio18_wire));
+        assert_ne!(closed_sim.summary, "Short circuit");
+    }
+
+    #[test]
+    fn arduino_codegen_uses_millis_debounce_for_button_led() {
+        let mut app = CircuitApp::new();
+        app.load_esp32_button_debounce_demo();
+
+        let netlist = build_circuit_netlist(&app.components, &app.wires);
+        let code = generate_arduino_code(&netlist);
+
+        assert!(
+            code.contains("const int BUTTON_PIN = 21;"),
+            "{code}\n\npins: {:?}\nnets: {:?}",
+            netlist.pins,
+            netlist.nets
+        );
+        assert!(code.contains("const unsigned long DEBOUNCE_MS = 50;"));
+        assert!(code.contains("pinMode(BUTTON_PIN, INPUT_PULLUP);"));
+        assert!(code.contains("lastDebounceTime = millis();"));
+        assert!(code.contains("(millis() - lastDebounceTime) > DEBOUNCE_MS"));
+        assert!(code.contains("stableState == LOW"));
     }
 
     #[test]
@@ -12257,6 +13043,71 @@ mod tests {
     }
 
     #[test]
+    fn short_circuit_disables_current_flow_arrows() {
+        let mut short_app = CircuitApp::new();
+        short_app.load_short_circuit_lesson_demo();
+        let short_sim = analyze_circuit(&short_app.components, &short_app.wires);
+
+        assert!(short_sim.shorted);
+        assert!(!short_sim.energized_wires.is_empty());
+        assert!(!flow_overlay_enabled(&short_sim, true));
+
+        let mut led_app = CircuitApp::new();
+        led_app.load_led_demo();
+        let led_sim = analyze_circuit(&led_app.components, &led_app.wires);
+
+        assert!(!led_sim.shorted);
+        assert!(!led_sim.energized_wires.is_empty());
+        assert!(flow_overlay_enabled(&led_sim, true));
+        assert!(!flow_overlay_enabled(&led_sim, false));
+    }
+
+    #[test]
+    fn short_circuit_does_not_light_load_components() {
+        let mut app = CircuitApp::new();
+        let battery = app.place_component(ComponentKind::Battery, Pos2::new(160.0, 300.0));
+        let resistor = app.place_component(ComponentKind::Resistor, Pos2::new(340.0, 220.0));
+        let led = app.place_component(ComponentKind::Led, Pos2::new(500.0, 220.0));
+        let ground = app.place_component(ComponentKind::Ground, Pos2::new(660.0, 360.0));
+
+        app.add_wire_between(battery, "+", resistor, "A");
+        app.add_wire_between(resistor, "B", led, "A");
+        app.add_wire_between(led, "B", ground, "GND");
+        app.add_wire_between(battery, "-", ground, "GND");
+        app.add_wire_between(battery, "+", ground, "GND");
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+
+        assert!(sim.shorted);
+        assert!(!sim.energized_components.contains(&resistor));
+        assert!(!sim.energized_components.contains(&led));
+        assert!(!flow_overlay_enabled(&sim, true));
+    }
+
+    #[test]
+    fn engineering_checks_report_led_overcurrent_without_resistor() {
+        let mut app = CircuitApp::new();
+        let battery = app.place_component(ComponentKind::Battery, Pos2::new(180.0, 300.0));
+        let led = app.place_component(ComponentKind::Led, Pos2::new(420.0, 300.0));
+        let ground = app.place_component(ComponentKind::Ground, Pos2::new(620.0, 360.0));
+
+        app.add_wire_between(battery, "+", led, "A");
+        app.add_wire_between(led, "B", ground, "GND");
+        app.add_wire_between(battery, "-", ground, "GND");
+
+        let sim = analyze_circuit(&app.components, &app.wires);
+        let warning = sim.component_warnings.get(&led).cloned().unwrap_or_default();
+
+        assert!(warning.contains("Overcurrent risk"), "{warning}");
+        assert!(
+            sim.dc
+                .as_ref()
+                .and_then(|dc| dc.branch_current.get(&led))
+                .is_some_and(|current| current.abs() > 0.025)
+        );
+    }
+
+    #[test]
     fn lesson_direct_gpio_motor_reports_warning_and_motor_off() {
         let mut app = CircuitApp::new();
         app.load_direct_gpio_motor_warning_demo();
@@ -12274,6 +13125,80 @@ mod tests {
         assert!(erc.iter().any(|violation| {
             violation.message.contains("GPIO") && violation.message.contains("motor")
         }));
+    }
+
+    #[test]
+    fn lesson_report_passes_current_flow_example() {
+        let mut app = CircuitApp::new();
+        app.load_led_demo();
+
+        let sim = app.current_simulation();
+        let report = lesson_report(&app.components, &sim).unwrap();
+
+        assert!(report.checks.iter().all(|check| check.passed), "{:?}", report.title);
+        assert!(report.checks.iter().any(|check| check.label == "Closed path"));
+        assert!(report.checks.iter().any(|check| check.label == "LED output"));
+    }
+
+    #[test]
+    fn lesson_report_passes_open_circuit_example() {
+        let mut app = CircuitApp::new();
+        app.load_open_switch_led_demo();
+
+        let sim = app.current_simulation();
+        let report = lesson_report(&app.components, &sim).unwrap();
+
+        assert!(report.checks.iter().all(|check| check.passed), "{:?}", report.title);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.label == "No closed current path")
+        );
+    }
+
+    #[test]
+    fn lesson_report_catches_when_expected_on_is_broken() {
+        let mut app = CircuitApp::new();
+        app.load_led_demo();
+        if let Some(wire) = app.wires.pop() {
+            app.status = format!("Removed wire {} for test.", wire.id);
+        }
+        app.mark_dirty();
+
+        let sim = app.current_simulation();
+        let report = lesson_report(&app.components, &sim).unwrap();
+
+        assert!(report.checks.iter().any(|check| !check.passed), "{:?}", report.title);
+    }
+
+    #[test]
+    fn lesson_report_passes_short_and_gpio_warning_examples() {
+        let mut short_app = CircuitApp::new();
+        short_app.load_short_circuit_lesson_demo();
+        let short_sim = short_app.current_simulation();
+        let short_report = lesson_report(&short_app.components, &short_sim).unwrap();
+        assert!(
+            short_report.checks.iter().all(|check| check.passed),
+            "{:?}",
+            short_report.title
+        );
+
+        let mut motor_app = CircuitApp::new();
+        motor_app.load_direct_gpio_motor_warning_demo();
+        let motor_sim = motor_app.current_simulation();
+        let motor_report = lesson_report(&motor_app.components, &motor_sim).unwrap();
+        assert!(
+            motor_report.checks.iter().all(|check| check.passed),
+            "{:?}",
+            motor_report.title
+        );
+        assert!(
+            motor_report
+                .checks
+                .iter()
+                .any(|check| check.label == "GPIO motor rule")
+        );
     }
 
     #[test]
@@ -12297,6 +13222,27 @@ mod tests {
             "{:?}",
             erc
         );
+    }
+
+    #[test]
+    fn beginner_example_ohms_law_meter_has_series_current_and_parallel_voltage() {
+        let mut app = CircuitApp::new();
+        app.load_ohms_law_meter_demo();
+
+        let sim = app.current_simulation();
+        let led_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::Led)
+            .map(|component| component.id)
+            .unwrap();
+        let report = lesson_report(&app.components, &sim).unwrap();
+
+        assert_eq!(sim.summary, "Current flowing", "{:?}", sim.details);
+        assert!(sim.energized_components.contains(&led_id));
+        assert!(app.components.iter().any(|c| c.kind == ComponentKind::Ammeter));
+        assert!(app.components.iter().any(|c| c.kind == ComponentKind::Voltmeter));
+        assert!(report.checks.iter().all(|check| check.passed), "{:?}", report.title);
     }
 
     #[test]

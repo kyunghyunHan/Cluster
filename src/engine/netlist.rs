@@ -13,7 +13,7 @@ impl NetlistNodes {
         if let Some(index) = self
             .positions
             .iter()
-            .position(|existing| existing.distance(pos) <= 8.0)
+            .position(|existing| existing.distance(pos) <= 1.0)
         {
             return index;
         }
@@ -227,9 +227,7 @@ fn wire_contact_points(components: &[Component], wires: &[Wire]) -> Vec<Pos2> {
     for wire in wires {
         points.extend(wire.points.iter().copied());
     }
-    for component in components {
-        points.extend(component_pin_defs(component).into_iter().map(|pin| pin.pos));
-    }
+    let _ = components;
     points
 }
 
@@ -258,7 +256,17 @@ mod tests {
     fn builds_net_from_wire_and_component_pins() {
         let r1 = comp(1, ComponentKind::Resistor, Pos2::new(100.0, 100.0), "R1", "1k");
         let led = comp(2, ComponentKind::Led, Pos2::new(220.0, 100.0), "LED1", "red");
-        let w = wire(3, vec![Pos2::new(136.0, 100.0), Pos2::new(192.0, 100.0)]);
+        let r1_b_pos = component_pin_defs(&r1)
+            .into_iter()
+            .find(|pin| pin.label == "B")
+            .unwrap()
+            .pos;
+        let led_a_pos = component_pin_defs(&led)
+            .into_iter()
+            .find(|pin| pin.label == "A")
+            .unwrap()
+            .pos;
+        let w = wire(3, vec![r1_b_pos, led_a_pos]);
 
         let netlist = build_circuit_netlist(&[r1, led], &[w]);
         let r1_b = netlist.pins.iter().find(|p| p.component_label == "R1" && p.pin_name == "B").unwrap();
