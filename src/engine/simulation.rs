@@ -17,6 +17,7 @@ pub(crate) struct Simulation {
     pub(crate) current: Option<f32>,
     pub(crate) component_warnings: HashMap<u64, String>,
     pub(crate) dc: Option<mna::DcResult>,
+    pub(crate) dc_error: Option<mna::SimulationError>,
     pub(crate) ac: Option<mna::AcResult>,
     pub(crate) erc: Vec<ErcViolation>,
 }

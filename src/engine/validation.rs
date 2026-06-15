@@ -27,12 +27,17 @@ pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolat
     check_reversed_led(netlist, &mut v);
     check_reversed_diode(netlist, &mut v);
     check_5v_on_3v3(netlist, &mut v);
-    check_gpio_drives_motor(netlist, &mut v);
+    check_gpio_direct_loads(netlist, &mut v);
+    check_esp_gpio_overvoltage(netlist, &mut v);
+    check_power_rail_conflicts(netlist, &mut v);
+    check_relay_flyback_diodes(netlist, &mut v);
+    check_i2c_pullups(netlist, &mut v);
     check_oled_sda_scl_swap(netlist, &mut v);
     check_missing_values(netlist, &mut v);
     check_floating_pins(netlist, &mut v);
     check_floating_dc_nets(netlist, &mut v);
     check_open_voltage_sources(netlist, &mut v);
+    check_symbolic_components(netlist, &mut v);
 
     v
 }
@@ -60,16 +65,11 @@ fn check_missing_gnd(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
 
 fn check_power_gnd_short(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
     for net in &netlist.nets {
-        let pins: Vec<&NetlistPin> = netlist
-            .pins
-            .iter()
-            .filter(|p| p.net_id == net.id)
-            .collect();
+        let pins: Vec<&NetlistPin> = netlist.pins.iter().filter(|p| p.net_id == net.id).collect();
 
         let power_pin = pins.iter().find(|p| pin_is_power_positive(p));
         let gnd_pin = pins.iter().find(|p| {
-            p.electrical_type == ElectricalType::Ground
-                || p.component_kind == ComponentKind::Ground
+            p.electrical_type == ElectricalType::Ground || p.component_kind == ComponentKind::Ground
         });
 
         if let (Some(pwr), Some(gnd)) = (power_pin, gnd_pin) {
@@ -99,9 +99,10 @@ fn check_led_without_resistor(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation
             .map(|p| p.net_id)
             .collect();
 
-        let has_resistor = netlist.pins.iter().any(|p| {
-            p.component_kind == ComponentKind::Resistor && led_nets.contains(&p.net_id)
-        });
+        let has_resistor = netlist
+            .pins
+            .iter()
+            .any(|p| p.component_kind == ComponentKind::Resistor && led_nets.contains(&p.net_id));
         if !has_resistor {
             v.push(ErcViolation {
                 severity: ErcSeverity::Warning,
@@ -121,11 +122,7 @@ fn check_reversed_led(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
         if net.name != "GND" {
             continue;
         }
-        let pins: Vec<&NetlistPin> = netlist
-            .pins
-            .iter()
-            .filter(|p| p.net_id == net.id)
-            .collect();
+        let pins: Vec<&NetlistPin> = netlist.pins.iter().filter(|p| p.net_id == net.id).collect();
         for pin in &pins {
             if pin.component_kind == ComponentKind::Led && pin.pin_name == "A" {
                 v.push(ErcViolation {
@@ -152,11 +149,7 @@ fn check_reversed_diode(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
         if net.name != "GND" {
             continue;
         }
-        let pins: Vec<&NetlistPin> = netlist
-            .pins
-            .iter()
-            .filter(|p| p.net_id == net.id)
-            .collect();
+        let pins: Vec<&NetlistPin> = netlist.pins.iter().filter(|p| p.net_id == net.id).collect();
         for pin in &pins {
             if diode_kinds.contains(&pin.component_kind) && pin.pin_name == "A" {
                 // Anode on GND net — likely reversed if cathode is on a higher potential net.
@@ -169,9 +162,10 @@ fn check_reversed_diode(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
                     })
                     .map(|p| p.net_id);
                 let cathode_is_power = cathode_net.is_some_and(|nid| {
-                    netlist.pins.iter().any(|p| {
-                        p.net_id == nid && pin_is_power_positive(p)
-                    })
+                    netlist
+                        .pins
+                        .iter()
+                        .any(|p| p.net_id == nid && pin_is_power_positive(p))
                 });
                 if cathode_is_power {
                     v.push(ErcViolation {
@@ -191,11 +185,7 @@ fn check_reversed_diode(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
 
 fn check_5v_on_3v3(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
     for net in &netlist.nets {
-        let pins: Vec<&NetlistPin> = netlist
-            .pins
-            .iter()
-            .filter(|p| p.net_id == net.id)
-            .collect();
+        let pins: Vec<&NetlistPin> = netlist.pins.iter().filter(|p| p.net_id == net.id).collect();
         let has_5v = pins.iter().any(|p| pin_is_5v_source(p));
         let target_3v3 = pins.iter().find(|p| pin_name_is_3v3(&p.pin_name));
         if has_5v {
@@ -204,30 +194,63 @@ fn check_5v_on_3v3(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
                     severity: ErcSeverity::Error,
                     component_id: Some(target.component_id),
                     wire_id: None,
-                    message: format!(
-                        "{} connects 5V to a 3.3V rail/pin.",
-                        net.name
-                    ),
+                    message: format!("{} connects 5V to a 3.3V rail/pin.", net.name),
                 });
             }
         }
+    }
+}
 
-        // ESP32 recommended I2C pins
-        for gpio in pins
+fn check_gpio_direct_loads(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let direct_loads = [
+        ComponentKind::Led,
+        ComponentKind::DcMotor,
+        ComponentKind::Relay,
+        ComponentKind::Servo,
+        ComponentKind::Lamp,
+    ];
+    let mut seen = HashSet::new();
+    for net in &netlist.nets {
+        let pins = pins_on_net(netlist, net.id);
+        let gpios = pins
             .iter()
-            .filter(|p| pin_is_microcontroller_gpio(p) && !pin_is_i2c_named(&p.pin_name))
-        {
-            if pins
-                .iter()
-                .any(|p| p.component_kind == ComponentKind::DcMotor)
+            .filter(|pin| pin_is_microcontroller_gpio(pin))
+            .copied()
+            .collect::<Vec<_>>();
+        for load in pins.iter().filter(|pin| {
+            direct_loads.contains(&pin.component_kind)
+                && match pin.component_kind {
+                    ComponentKind::Relay => pin.pin_name == "COIL+" || pin.pin_name == "COIL-",
+                    ComponentKind::Servo => pin.pin_name == "VCC",
+                    _ => true,
+                }
+        }) {
+            if load.component_kind == ComponentKind::Led
+                && net_has_component_kind(netlist, net.id, ComponentKind::Resistor)
             {
+                continue;
+            }
+            for gpio in &gpios {
+                if !seen.insert((gpio.component_id, load.component_id)) {
+                    continue;
+                }
+                let metadata = electrical_metadata(load.component_kind);
+                let fix = if metadata.needs_current_limit {
+                    "Add a 220 ohm-1 kohm resistor in series."
+                } else {
+                    "Use a transistor, MOSFET, relay driver, or motor driver with a separate supply."
+                };
                 v.push(ErcViolation {
                     severity: ErcSeverity::Error,
                     component_id: Some(gpio.component_id),
                     wire_id: None,
                     message: format!(
-                        "{} {} is connected directly to a motor. Use a transistor, relay, or driver.",
-                        gpio.component_label, gpio.pin_name
+                        "{} {} directly drives {} {}. GPIO current is limited and the load can damage the controller. {}",
+                        gpio.component_label,
+                        gpio.pin_name,
+                        component_kind_short(load.component_kind),
+                        load.component_label,
+                        fix
                     ),
                 });
             }
@@ -235,41 +258,154 @@ fn check_5v_on_3v3(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
     }
 }
 
-fn check_gpio_drives_motor(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+fn check_esp_gpio_overvoltage(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
     for net in &netlist.nets {
-        let pins: Vec<&NetlistPin> = netlist
-            .pins
-            .iter()
-            .filter(|p| p.net_id == net.id)
-            .collect();
-        let has_motor = pins.iter().any(|p| p.component_kind == ComponentKind::DcMotor);
-        if !has_motor {
+        let pins = pins_on_net(netlist, net.id);
+        if !pins.iter().any(|pin| pin_is_5v_source(pin)) {
             continue;
         }
-        for gpio in pins.iter().filter(|p| pin_is_microcontroller_gpio(p)) {
-            // Already reported in check_5v_on_3v3 path, but also catch non-5V cases
-            if !pins.iter().any(|p| pin_is_5v_source(p)) {
+        for gpio in pins.iter().filter(|pin| {
+            matches!(
+                pin.component_kind,
+                ComponentKind::Esp32
+                    | ComponentKind::Esp32S3
+                    | ComponentKind::Esp32C3
+                    | ComponentKind::RaspberryPiPico
+            ) && pin_is_microcontroller_gpio(pin)
+        }) {
+            v.push(ErcViolation {
+                severity: ErcSeverity::Error,
+                component_id: Some(gpio.component_id),
+                wire_id: None,
+                message: format!(
+                    "{} {} is connected to a 5V net. The GPIO is not 5V tolerant; use a level shifter or resistor divider.",
+                    gpio.component_label, gpio.pin_name
+                ),
+            });
+        }
+    }
+}
+
+fn check_power_rail_conflicts(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    for net in &netlist.nets {
+        let pins = pins_on_net(netlist, net.id);
+        let has_5v = pins
+            .iter()
+            .any(|pin| pin.pin_name.eq_ignore_ascii_case("5V") || pin_is_5v_source(pin));
+        let rail_3v3 = pins.iter().find(|pin| pin_name_is_3v3(&pin.pin_name));
+        if has_5v {
+            if let Some(rail) = rail_3v3 {
                 v.push(ErcViolation {
-                    severity: ErcSeverity::Warning,
-                    component_id: Some(gpio.component_id),
+                    severity: ErcSeverity::Error,
+                    component_id: Some(rail.component_id),
                     wire_id: None,
                     message: format!(
-                        "{} GPIO {} drives a motor directly. Use a driver IC or transistor.",
-                        gpio.component_label, gpio.pin_name
+                        "{} ties a 3.3V rail to 5V. Separate the rails or add a regulator/level shifter.",
+                        net.name
                     ),
                 });
             }
         }
+    }
+}
+
+fn check_relay_flyback_diodes(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let relay_ids = component_ids_of_kind(netlist, ComponentKind::Relay);
+    for relay_id in relay_ids {
+        let coil_nets = component_pin_nets(netlist, relay_id, &["COIL+", "COIL-"]);
+        let [Some(coil_pos), Some(coil_neg)] = coil_nets.as_slice() else {
+            continue;
+        };
+        let has_diode = netlist.pins.iter().any(|pin| {
+            matches!(
+                pin.component_kind,
+                ComponentKind::Diode
+                    | ComponentKind::SchottkyDiode
+                    | ComponentKind::ZenerDiode
+                    | ComponentKind::TvsDiode
+            ) && {
+                let diode_nets = component_net_ids(netlist, pin.component_id);
+                diode_nets.contains(coil_pos) && diode_nets.contains(coil_neg)
+            }
+        });
+        if !has_diode {
+            let label = netlist
+                .pins
+                .iter()
+                .find(|pin| pin.component_id == relay_id)
+                .map(|pin| pin.component_label.as_str())
+                .unwrap_or("relay");
+            v.push(ErcViolation {
+                severity: ErcSeverity::Warning,
+                component_id: Some(relay_id),
+                wire_id: None,
+                message: format!(
+                    "Relay {label} has no flyback diode across COIL+ and COIL-. Add a reverse-biased diode to clamp the turn-off voltage spike."
+                ),
+            });
+        }
+    }
+}
+
+fn check_i2c_pullups(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    for signal in ["SDA", "SCL"] {
+        let nets = netlist
+            .pins
+            .iter()
+            .filter(|pin| pin.pin_name.to_ascii_uppercase().contains(signal))
+            .map(|pin| pin.net_id)
+            .collect::<HashSet<_>>();
+        for net_id in nets {
+            if net_has_pullup(netlist, net_id) {
+                continue;
+            }
+            let pin = netlist
+                .pins
+                .iter()
+                .find(|pin| {
+                    pin.net_id == net_id && pin.pin_name.to_ascii_uppercase().contains(signal)
+                })
+                .unwrap();
+            v.push(ErcViolation {
+                severity: ErcSeverity::Warning,
+                component_id: Some(pin.component_id),
+                wire_id: None,
+                message: format!(
+                    "I2C {signal} has no pull-up resistor. Add about 2.2k-10k to the controller logic rail unless the module already includes pull-ups."
+                ),
+            });
+        }
+    }
+}
+
+fn check_symbolic_components(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let mut seen = HashSet::new();
+    for pin in &netlist.pins {
+        if !seen.insert(pin.component_id)
+            || electrical_metadata(pin.component_kind).simulation != SimulationSupport::Symbolic
+            || matches!(
+                pin.component_kind,
+                ComponentKind::TextNote | ComponentKind::NetLabel
+            )
+        {
+            continue;
+        }
+        v.push(ErcViolation {
+            severity: ErcSeverity::Info,
+            component_id: Some(pin.component_id),
+            wire_id: None,
+            message: format!(
+                "{} {} is symbolic in DC simulation. Connections are checked, but current and voltage behavior are not modeled.",
+                component_kind_short(pin.component_kind),
+                pin.component_label
+            ),
+        });
     }
 }
 
 fn check_oled_sda_scl_swap(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
     for net in &netlist.nets {
-        let pins: Vec<&NetlistPin> = netlist
-            .pins
-            .iter()
-            .filter(|p| p.net_id == net.id)
-            .collect();
+        let pins: Vec<&NetlistPin> = netlist.pins.iter().filter(|p| p.net_id == net.id).collect();
 
         let oled_sda = pins.iter().any(|p| {
             p.component_kind == ComponentKind::Oled && p.pin_name.eq_ignore_ascii_case("SDA")
@@ -395,15 +531,17 @@ fn check_floating_pins(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
             severity: ErcSeverity::Warning,
             component_id: None,
             wire_id: Some(*wire_id),
-            message: "Wire segment is isolated: it connects to only one component pin."
-                .to_string(),
+            message: "Wire segment is isolated: it connects to only one component pin.".to_string(),
         });
     }
 
     let mut reported_components = std::collections::HashSet::new();
     for pin in &netlist.pins {
         if !connected_component_ids.contains(&pin.component_id)
-            && !matches!(pin.component_kind, ComponentKind::Ground | ComponentKind::NetLabel)
+            && !matches!(
+                pin.component_kind,
+                ComponentKind::Ground | ComponentKind::NetLabel
+            )
             && reported_components.insert(pin.component_id)
         {
             v.push(ErcViolation {
@@ -419,9 +557,7 @@ fn check_floating_pins(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
         } else if !pin.connected_by_wire
             && matches!(
                 pin.electrical_type,
-                ElectricalType::Digital
-                    | ElectricalType::I2c
-                    | ElectricalType::Control
+                ElectricalType::Digital | ElectricalType::I2c | ElectricalType::Control
             )
         {
             v.push(ErcViolation {
@@ -470,10 +606,7 @@ fn check_floating_dc_nets(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
             .iter()
             .filter(|pin| pin.net_id == net.id)
             .collect::<Vec<_>>();
-        if referenced.contains(&net.id)
-            || !wired_nets.contains(&net.id)
-            || pins_on_net.is_empty()
-        {
+        if referenced.contains(&net.id) || !wired_nets.contains(&net.id) || pins_on_net.is_empty() {
             continue;
         }
         let wire_id = netlist
@@ -550,10 +683,16 @@ fn check_open_voltage_sources(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation
     }
 }
 
-fn dc_net_graph(netlist: &CircuitNetlist, include_voltage_sources: bool) -> HashMap<usize, HashSet<usize>> {
+fn dc_net_graph(
+    netlist: &CircuitNetlist,
+    include_voltage_sources: bool,
+) -> HashMap<usize, HashSet<usize>> {
     let mut component_pins: HashMap<u64, Vec<&NetlistPin>> = HashMap::new();
     for pin in &netlist.pins {
-        component_pins.entry(pin.component_id).or_default().push(pin);
+        component_pins
+            .entry(pin.component_id)
+            .or_default()
+            .push(pin);
     }
 
     let mut graph: HashMap<usize, HashSet<usize>> = HashMap::new();
@@ -561,8 +700,11 @@ fn dc_net_graph(netlist: &CircuitNetlist, include_voltage_sources: bool) -> Hash
         let Some(first) = pins.first() else {
             continue;
         };
-        if !component_can_form_dc_path(first.component_kind, &first.component_value, include_voltage_sources)
-        {
+        if !component_can_form_dc_path(
+            first.component_kind,
+            &first.component_value,
+            include_voltage_sources,
+        ) {
             continue;
         }
         let Some((a, b)) = dc_terminal_nets(pins) else {
@@ -624,13 +766,9 @@ fn dc_terminal_nets(pins: &[&NetlistPin]) -> Option<(usize, usize)> {
         ComponentKind::NpnTransistor | ComponentKind::PnpTransistor => {
             Some((by_name("C")?, by_name("E")?))
         }
-        ComponentKind::Nmosfet | ComponentKind::Pmosfet => {
-            Some((by_name("D")?, by_name("S")?))
-        }
+        ComponentKind::Nmosfet | ComponentKind::Pmosfet => Some((by_name("D")?, by_name("S")?)),
         ComponentKind::Relay => Some((by_name("COIL+")?, by_name("COIL-")?)),
-        ComponentKind::Battery | ComponentKind::VSource => {
-            Some((by_name("+")?, by_name("-")?))
-        }
+        ComponentKind::Battery | ComponentKind::VSource => Some((by_name("+")?, by_name("-")?)),
         _ => Some((pins.first()?.net_id, pins.get(1)?.net_id)),
     }
 }
@@ -656,6 +794,74 @@ fn reachable_net_ids(
         }
     }
     seen
+}
+
+fn pins_on_net(netlist: &CircuitNetlist, net_id: usize) -> Vec<&NetlistPin> {
+    netlist
+        .pins
+        .iter()
+        .filter(|pin| pin.net_id == net_id)
+        .collect()
+}
+
+fn net_has_component_kind(netlist: &CircuitNetlist, net_id: usize, kind: ComponentKind) -> bool {
+    netlist
+        .pins
+        .iter()
+        .any(|pin| pin.net_id == net_id && pin.component_kind == kind)
+}
+
+fn component_ids_of_kind(netlist: &CircuitNetlist, kind: ComponentKind) -> HashSet<u64> {
+    netlist
+        .pins
+        .iter()
+        .filter(|pin| pin.component_kind == kind)
+        .map(|pin| pin.component_id)
+        .collect()
+}
+
+fn component_net_ids(netlist: &CircuitNetlist, component_id: u64) -> HashSet<usize> {
+    netlist
+        .pins
+        .iter()
+        .filter(|pin| pin.component_id == component_id)
+        .map(|pin| pin.net_id)
+        .collect()
+}
+
+fn component_pin_nets(
+    netlist: &CircuitNetlist,
+    component_id: u64,
+    names: &[&str],
+) -> Vec<Option<usize>> {
+    names
+        .iter()
+        .map(|name| {
+            netlist
+                .pins
+                .iter()
+                .find(|pin| pin.component_id == component_id && pin.pin_name == *name)
+                .map(|pin| pin.net_id)
+        })
+        .collect()
+}
+
+fn net_has_pullup(netlist: &CircuitNetlist, signal_net: usize) -> bool {
+    component_ids_of_kind(netlist, ComponentKind::Resistor)
+        .into_iter()
+        .any(|resistor_id| {
+            let nets = component_net_ids(netlist, resistor_id);
+            nets.contains(&signal_net)
+                && nets.iter().any(|net_id| {
+                    *net_id != signal_net
+                        && netlist.pins.iter().any(|pin| {
+                            pin.net_id == *net_id
+                                && (pin.electrical_type == ElectricalType::PowerIn
+                                    || pin_name_is_3v3(&pin.pin_name)
+                                    || pin.pin_name.eq_ignore_ascii_case("5V"))
+                        })
+                })
+        })
 }
 
 // ─── Helper predicates ───────────────────────────────────────────────────────
@@ -794,7 +1000,10 @@ mod tests {
             ],
         );
         let v = validate_beginner_rules(&nl);
-        assert!(v.iter().any(|e| e.message.contains("current limiting resistor")));
+        assert!(
+            v.iter()
+                .any(|e| e.message.contains("current limiting resistor"))
+        );
     }
 
     // ── LED with resistor → no warning ───────────────────────────────────
@@ -811,7 +1020,10 @@ mod tests {
             ],
         );
         let v = validate_beginner_rules(&nl);
-        assert!(!v.iter().any(|e| e.message.contains("current limiting resistor")));
+        assert!(
+            !v.iter()
+                .any(|e| e.message.contains("current limiting resistor"))
+        );
     }
 
     // ── Missing GND ───────────────────────────────────────────────────────
@@ -845,7 +1057,10 @@ mod tests {
         nl2.pins[0].electrical_type = ElectricalType::PowerIn;
         nl2.pins[1].electrical_type = ElectricalType::Ground;
         let v = validate_beginner_rules(&nl2);
-        assert!(v.iter().any(|e| e.severity == ErcSeverity::Error && e.message.contains("short")));
+        assert!(
+            v.iter()
+                .any(|e| e.severity == ErcSeverity::Error && e.message.contains("short"))
+        );
     }
 
     // ── 5V on 3.3V pin ───────────────────────────────────────────────────
@@ -913,10 +1128,7 @@ mod tests {
 
     #[test]
     fn reports_floating_wire() {
-        let mut nl = netlist(
-            vec![make_net(0, "NET_001")],
-            vec![],
-        );
+        let mut nl = netlist(vec![make_net(0, "NET_001")], vec![]);
         nl.floating_wires.push(42);
         let v = validate_beginner_rules(&nl);
         assert!(v.iter().any(|e| e.wire_id == Some(42)));
@@ -924,15 +1136,7 @@ mod tests {
 
     #[test]
     fn reports_floating_dc_island() {
-        let mut gnd = make_pin(
-            1,
-            "GND1",
-            ComponentKind::Ground,
-            "0V",
-            "GND",
-            0,
-            true,
-        );
+        let mut gnd = make_pin(1, "GND1", ComponentKind::Ground, "0V", "GND", 0, true);
         gnd.electrical_type = ElectricalType::Ground;
         let nl = CircuitNetlist {
             nets: vec![make_net(0, "GND"), make_net(1, "FLOAT")],
@@ -955,25 +1159,9 @@ mod tests {
 
     #[test]
     fn reports_voltage_source_without_closed_load_path() {
-        let mut positive = make_pin(
-            1,
-            "BAT1",
-            ComponentKind::Battery,
-            "5V",
-            "+",
-            1,
-            true,
-        );
+        let mut positive = make_pin(1, "BAT1", ComponentKind::Battery, "5V", "+", 1, true);
         positive.electrical_type = ElectricalType::PowerIn;
-        let mut negative = make_pin(
-            1,
-            "BAT1",
-            ComponentKind::Battery,
-            "5V",
-            "-",
-            0,
-            false,
-        );
+        let mut negative = make_pin(1, "BAT1", ComponentKind::Battery, "5V", "-", 0, false);
         negative.electrical_type = ElectricalType::Ground;
         let nl = CircuitNetlist {
             nets: vec![make_net(0, "GND"), make_net(1, "VCC")],
@@ -1002,6 +1190,9 @@ mod tests {
             ],
         );
         let v = validate_beginner_rules(&nl);
-        assert!(v.iter().any(|e| e.message.contains("SDA") && e.message.contains("SCL")));
+        assert!(
+            v.iter()
+                .any(|e| e.message.contains("SDA") && e.message.contains("SCL"))
+        );
     }
 }

@@ -137,6 +137,12 @@ Notes:
 - 다이오드/LED는 역바이어스에서 누설 수준으로 처리하고 순방향 전압 강하를 적용한다.
 - NMOS/PMOS는 Vgs/Vsg 임계전압에 따라 ON/OFF 저항을 전환한다.
 - floating pin/net, GND DC 경로가 없는 voltage island, open voltage source, 아무 핀에도 연결되지 않은 배선, 한 핀에만 연결된 고립 배선을 ERC로 경고한다.
+- 부품별 simulation support, voltage/current 제한, driver/current-limit 요구사항을 metadata로 관리한다.
+- DC solver는 구조화된 오류와 KCL residual, dissipating/supplying power role을 제공한다.
+- inspector는 부품 model/support, 핀별 net/전압, wire net/current/open 상태를 표시한다.
+- ESP/Pico GPIO 5V, GPIO 직접 부하, relay flyback diode, I2C pull-up 누락을 ERC로 경고한다.
+- 한 polyline 안에서 분기 전류가 달라지면 잘못된 단일 전류 화살표를 표시하지 않는다.
+- 정상 ESP32/Arduino I2C 예제는 4.7k SDA/SCL pull-up을 포함한다.
 
 향후 시뮬레이션 방향:
 - 핀 역할(VCC/GND/SDA/SCL/GPIO)을 구조화한다.
@@ -160,6 +166,8 @@ Notes:
 - export 결과는 배경이 투명/흰색일 때 모두 읽을 수 있어야 한다.
 - 문서 삽입을 위해 적절한 viewBox, 여백, 텍스트 크기를 유지한다.
 - PNG export를 추가할 때도 SVG export 품질을 떨어뜨리지 않는다.
+- SPICE `.cir`, BOM CSV, Arduino starter sketch export는 회귀 테스트로 검증한다.
+- README 예제 이미지는 앱의 SVG exporter로 재생성할 수 있어야 한다.
 
 ## Release Readiness
 
@@ -169,6 +177,7 @@ Notes:
 - 기본 예제 회로 또는 샘플 파일이 최신 저장 포맷으로 열리는지 확인한다.
 - 릴리즈 노트에 사용자에게 보이는 변경, breaking change, 알려진 제한을 남길 수 있게 변경 내용을 정리한다.
 - 새 dependency는 라이선스, 유지보수 상태, binary size, offline build 영향을 검토한 뒤 추가한다.
+- `v*` 태그 릴리스는 Linux/macOS/Windows 바이너리 압축 파일을 생성한다.
 
 ## Roadmap
 
@@ -179,7 +188,7 @@ Notes:
 4. 작업 속도 개선: 복제, 정렬, 그룹 이동, 키보드 단축키, undo/redo
 5. PNG 내보내기: SVG 유지 + raster export 옵션
 6. 부품 라이브러리 확장: Arduino, Raspberry Pi Pico, 릴레이, 모터, 브레드보드
-7. 샘플 회로와 템플릿: 일부 완료 - 앱 내 Lessons/Examples에 Lesson Check 패널, 전류 흐름 예제(LED, 스위치 LED, 병렬 LED, 램프, Ohm/측정기, 릴레이 모터), 문제 찾기 예제(open switch, DC capacitor block, missing return, reversed LED, short circuit, GPIO motor warning), ESP32/OLED/Sensor, Arduino LED, 모터 드라이버 예제 포함
+7. 샘플 회로와 템플릿: 일부 완료 - 앱 내 Lessons/Examples에 Lesson Check 패널, 전류 흐름 예제(LED, 스위치 LED, 병렬 LED, 램프, Ohm/측정기, 릴레이 모터), 문제 찾기 예제(open switch, DC capacitor block, missing return, reversed LED, short circuit, GPIO motor warning), ESP32/OLED/Sensor, Arduino LED/OLED, 모터 드라이버 예제 포함
 
 ## Definition Of Done
 

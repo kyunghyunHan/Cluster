@@ -32,8 +32,45 @@ pub struct DcResult {
     pub wire_voltage: HashMap<u64, f64>,
     /// wire_id → conventional current along the stored wire point order (A)
     pub wire_current: HashMap<u64, f64>,
+    /// Wires whose single displayed current is valid across the whole polyline.
+    pub wire_current_known: HashSet<u64>,
+    /// component_id → whether the component dissipates or supplies power
+    pub component_power_role: HashMap<u64, ComponentPowerRole>,
+    /// Maximum absolute KCL residual across solved non-ground nodes (A)
+    pub max_kcl_residual: f64,
     /// Maximum absolute voltage seen anywhere in the circuit (for display scaling)
     pub vmax: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComponentPowerRole {
+    Dissipating,
+    Supplying,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SimulationError {
+    NoGround,
+    SingularMatrix,
+    FloatingNode,
+    VoltageSourceConflict,
+    ShortCircuit,
+    UnsupportedComponent,
+}
+
+impl std::fmt::Display for SimulationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            SimulationError::NoGround => "No GND reference",
+            SimulationError::SingularMatrix => "Singular circuit matrix",
+            SimulationError::FloatingNode => "Floating node or empty DC network",
+            SimulationError::VoltageSourceConflict => "Conflicting ideal voltage sources",
+            SimulationError::ShortCircuit => "Ideal source short circuit",
+            SimulationError::UnsupportedComponent => "Unsupported component model",
+        };
+        f.write_str(message)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,6 +137,9 @@ fn numeric_end(s: &str) -> usize {
 }
 
 fn strip_unit(s: &str) -> &str {
+    if let Some(stripped) = s.strip_suffix('Ω') {
+        return stripped.trim_end();
+    }
     let up = s.to_uppercase();
     for unit in &["OHMS", "OHM", "HZ", "VAC", "VDC", "AC", "DC"] {
         if up.ends_with(unit) && s.len() > unit.len() {
@@ -205,21 +245,34 @@ impl Mna {
     /// Output current = `gm` × (V_ctrl_p − V_ctrl_n), flows INTO `pos`, OUT OF `neg`.
     fn stamp_vccs(&mut self, pos: usize, neg: usize, ctrl_p: usize, ctrl_n: usize, gm: f64) {
         if pos > 0 {
-            if ctrl_p > 0 { self.a[pos - 1][ctrl_p - 1] += gm; }
-            if ctrl_n > 0 { self.a[pos - 1][ctrl_n - 1] -= gm; }
+            if ctrl_p > 0 {
+                self.a[pos - 1][ctrl_p - 1] += gm;
+            }
+            if ctrl_n > 0 {
+                self.a[pos - 1][ctrl_n - 1] -= gm;
+            }
         }
         if neg > 0 {
-            if ctrl_p > 0 { self.a[neg - 1][ctrl_p - 1] -= gm; }
-            if ctrl_n > 0 { self.a[neg - 1][ctrl_n - 1] += gm; }
+            if ctrl_p > 0 {
+                self.a[neg - 1][ctrl_p - 1] -= gm;
+            }
+            if ctrl_n > 0 {
+                self.a[neg - 1][ctrl_n - 1] += gm;
+            }
         }
     }
 
     /// Solve A·x = z with Gaussian elimination + partial pivoting.
-    fn solve(self) -> Option<Vec<f64>> {
+    fn solve(self) -> Result<SolveSolution, SimulationError> {
         let sz = self.n + self.m;
         if sz == 0 {
-            return Some(vec![]);
+            return Ok(SolveSolution {
+                x: vec![],
+                max_kcl_residual: 0.0,
+            });
         }
+        let original_a = self.a.clone();
+        let original_z = self.z.clone();
         let mut a = self.a;
         let mut b = self.z;
 
@@ -232,7 +285,7 @@ impl Mna {
                 }
             }
             if a[prow][col].abs() < 1e-12 {
-                return None; // singular
+                return Err(SimulationError::SingularMatrix);
             }
             a.swap(col, prow);
             b.swap(col, prow);
@@ -257,12 +310,26 @@ impl Mna {
                 x[i] -= a[i][j] * x[j];
             }
             if a[i][i].abs() < 1e-12 {
-                return None;
+                return Err(SimulationError::SingularMatrix);
             }
             x[i] /= a[i][i];
         }
-        Some(x)
+        let max_kcl_residual = original_a
+            .iter()
+            .take(self.n)
+            .zip(&original_z)
+            .map(|(row, rhs)| (row.iter().zip(&x).map(|(a, x)| a * x).sum::<f64>() - rhs).abs())
+            .fold(0.0_f64, f64::max);
+        Ok(SolveSolution {
+            x,
+            max_kcl_residual,
+        })
     }
+}
+
+struct SolveSolution {
+    x: Vec<f64>,
+    max_kcl_residual: f64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -369,6 +436,13 @@ struct BjtEntry {
 /// Returns `None` when the circuit has no GND, is open, or the matrix is
 /// singular (floating sub-network, etc.).
 pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
+    solve_dc_detailed(components, wires).ok()
+}
+
+pub fn solve_dc_detailed(
+    components: &[Component],
+    wires: &[Wire],
+) -> Result<DcResult, SimulationError> {
     // ── 1. Build net map ─────────────────────────────────────────────────
     let mut nm = NetMap::new();
 
@@ -461,7 +535,7 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         }
     }
     if gnd_roots.is_empty() {
-        return None;
+        return Err(SimulationError::NoGround);
     }
 
     // ── 3. Assign MNA node numbers (GND=0, others 1..N) ─────────────────
@@ -606,39 +680,83 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
             }
             // ── BJT transistors: VBE diode + CCCS for Ic = hFE·Ib ──────────
             ComponentKind::NpnTransistor => {
-                let b_n = pins.iter().find(|p| p.label == "B")
+                let b_n = pins
+                    .iter()
+                    .find(|p| p.label == "B")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let c_n = pins.iter().find(|p| p.label == "C")
+                let c_n = pins
+                    .iter()
+                    .find(|p| p.label == "C")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let e_n = pins.iter().find(|p| p.label == "E")
+                let e_n = pins
+                    .iter()
+                    .find(|p| p.label == "E")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(b), Some(c), Some(e)) = (b_n, c_n, e_n) {
-                    bjt_entries.push(BjtEntry { id: comp.id, b, c, e,
-                        vbe: 0.65, rb_be: 10.0, h_fe: 100.0, npn: true });
+                    bjt_entries.push(BjtEntry {
+                        id: comp.id,
+                        b,
+                        c,
+                        e,
+                        vbe: 0.65,
+                        rb_be: 10.0,
+                        h_fe: 100.0,
+                        npn: true,
+                    });
                     // Leakage Rce to prevent open-circuit singularity
-                    res.push(ResEntry { id: comp.id, a: c, b: e, r: 100_000.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a: c,
+                        b: e,
+                        r: 100_000.0,
+                    });
                 }
             }
             ComponentKind::PnpTransistor => {
-                let b_n = pins.iter().find(|p| p.label == "B")
+                let b_n = pins
+                    .iter()
+                    .find(|p| p.label == "B")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let c_n = pins.iter().find(|p| p.label == "C")
+                let c_n = pins
+                    .iter()
+                    .find(|p| p.label == "C")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let e_n = pins.iter().find(|p| p.label == "E")
+                let e_n = pins
+                    .iter()
+                    .find(|p| p.label == "E")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(b), Some(c), Some(e)) = (b_n, c_n, e_n) {
-                    bjt_entries.push(BjtEntry { id: comp.id, b, c, e,
-                        vbe: 0.65, rb_be: 10.0, h_fe: 100.0, npn: false });
-                    res.push(ResEntry { id: comp.id, a: e, b: c, r: 100_000.0 });
+                    bjt_entries.push(BjtEntry {
+                        id: comp.id,
+                        b,
+                        c,
+                        e,
+                        vbe: 0.65,
+                        rb_be: 10.0,
+                        h_fe: 100.0,
+                        npn: false,
+                    });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a: e,
+                        b: c,
+                        r: 100_000.0,
+                    });
                 }
             }
             // ── MOSFETs: VCCS (transconductance) model + leakage Rds ────────
             ComponentKind::Nmosfet => {
-                let g_n = pins.iter().find(|p| p.label == "G")
+                let g_n = pins
+                    .iter()
+                    .find(|p| p.label == "G")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let d_n = pins.iter().find(|p| p.label == "D")
+                let d_n = pins
+                    .iter()
+                    .find(|p| p.label == "D")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let s_n = pins.iter().find(|p| p.label == "S")
+                let s_n = pins
+                    .iter()
+                    .find(|p| p.label == "S")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(g), Some(d), Some(s)) = (g_n, d_n, s_n) {
                     mos_entries.push(MosEntry {
@@ -654,11 +772,17 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
                 }
             }
             ComponentKind::Pmosfet => {
-                let g_n = pins.iter().find(|p| p.label == "G")
+                let g_n = pins
+                    .iter()
+                    .find(|p| p.label == "G")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let d_n = pins.iter().find(|p| p.label == "D")
+                let d_n = pins
+                    .iter()
+                    .find(|p| p.label == "D")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let s_n = pins.iter().find(|p| p.label == "S")
+                let s_n = pins
+                    .iter()
+                    .find(|p| p.label == "S")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(g), Some(d), Some(s)) = (g_n, d_n, s_n) {
                     mos_entries.push(MosEntry {
@@ -826,24 +950,6 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
                     });
                 }
             }
-            ComponentKind::Timer555 => {
-                let vcc_n = pins
-                    .iter()
-                    .find(|p| p.label == "VCC")
-                    .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                let gnd_n = pins
-                    .iter()
-                    .find(|p| p.label == "GND" || p.role == PinRole::Ground)
-                    .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
-                if let (Some(v), Some(g)) = (vcc_n, gnd_n) {
-                    res.push(ResEntry {
-                        id: comp.id,
-                        a: v,
-                        b: g,
-                        r: 500.0,
-                    });
-                }
-            }
             // ── Capacitor: open in DC; Inductor: short (handled above) ─
             ComponentKind::Capacitor
             | ComponentKind::Inductor
@@ -875,17 +981,28 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
             | ComponentKind::MotorDriver
             | ComponentKind::Optocoupler
             | ComponentKind::GenericIc
+            | ComponentKind::Timer555
             | ComponentKind::TextNote => {}
             // ── Voltmeter: ideal → 1 MΩ probe (barely loads circuit) ────────
             ComponentKind::Voltmeter => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 1_000_000.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 1_000_000.0,
+                    });
                 }
             }
             // ── Ammeter: ideal → 1 mΩ series resistor ────────────────────
             ComponentKind::Ammeter => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 0.001 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 0.001,
+                    });
                 }
             }
         }
@@ -900,12 +1017,32 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         let mid = bjt_start_node + bi;
         if bjt.npn {
             // NPN: Vbe between B(+) and mid(-), then Rb_be from mid to E
-            vs.push(VsEntry { id: bjt.id, pos: bjt.b, neg: mid, v: bjt.vbe });
-            res.push(ResEntry { id: bjt.id, a: mid, b: bjt.e, r: bjt.rb_be });
+            vs.push(VsEntry {
+                id: bjt.id,
+                pos: bjt.b,
+                neg: mid,
+                v: bjt.vbe,
+            });
+            res.push(ResEntry {
+                id: bjt.id,
+                a: mid,
+                b: bjt.e,
+                r: bjt.rb_be,
+            });
         } else {
             // PNP: Veb between E(+) and mid(-), then Rb_eb from mid to B
-            vs.push(VsEntry { id: bjt.id, pos: bjt.e, neg: mid, v: bjt.vbe });
-            res.push(ResEntry { id: bjt.id, a: mid, b: bjt.b, r: bjt.rb_be });
+            vs.push(VsEntry {
+                id: bjt.id,
+                pos: bjt.e,
+                neg: mid,
+                v: bjt.vbe,
+            });
+            res.push(ResEntry {
+                id: bjt.id,
+                a: mid,
+                b: bjt.b,
+                r: bjt.rb_be,
+            });
         }
     }
     let total_nodes = num_nodes + bjt_entries.len();
@@ -913,56 +1050,54 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
     // ── 6. Build MNA matrix ──────────────────────────────────────────────
     let m = vs.len();
     if total_nodes == 0 {
-        return None;
+        return Err(SimulationError::FloatingNode);
     }
-    let solve_with_states = |diode_on: &[bool], mos_on: &[bool]| -> Option<Vec<f64>> {
-        let mut mat = Mna::new(total_nodes, m);
-        for re in &res {
-            mat.stamp_r(re.a, re.b, re.r);
-        }
-        for (index, diode) in diode_entries.iter().enumerate() {
-            if diode_on.get(index).copied().unwrap_or(false) {
-                mat.stamp_r(diode.anode, diode.cathode, diode.rb);
-                mat.stamp_is(
-                    diode.anode,
-                    diode.cathode,
-                    diode.vf / diode.rb,
-                );
-            } else {
-                mat.stamp_r(diode.anode, diode.cathode, 1.0e9);
+    let solve_with_states =
+        |diode_on: &[bool], mos_on: &[bool]| -> Result<SolveSolution, SimulationError> {
+            let mut mat = Mna::new(total_nodes, m);
+            for re in &res {
+                mat.stamp_r(re.a, re.b, re.r);
             }
-        }
-        for (index, mos) in mos_entries.iter().enumerate() {
-            mat.stamp_r(
-                mos.drain,
-                mos.source,
-                if mos_on.get(index).copied().unwrap_or(false) {
-                    mos.r_on
+            for (index, diode) in diode_entries.iter().enumerate() {
+                if diode_on.get(index).copied().unwrap_or(false) {
+                    mat.stamp_r(diode.anode, diode.cathode, diode.rb);
+                    mat.stamp_is(diode.anode, diode.cathode, diode.vf / diode.rb);
                 } else {
-                    mos.r_off
-                },
-            );
-        }
-        for (k, v_src) in vs.iter().enumerate() {
-            mat.stamp_vs(k, v_src.pos, v_src.neg, v_src.v);
-        }
-        for (bi, bjt) in bjt_entries.iter().enumerate() {
-            let k_vbe = bjt_vs_start + bi;
-            if bjt.npn {
-                mat.stamp_cccs(bjt.c, bjt.e, k_vbe, bjt.h_fe);
-            } else {
-                mat.stamp_cccs(bjt.c, bjt.e, k_vbe, -bjt.h_fe);
+                    mat.stamp_r(diode.anode, diode.cathode, 1.0e9);
+                }
             }
-        }
-        for i_src in &is_src {
-            mat.stamp_is(i_src.pos, i_src.neg, i_src.i);
-        }
-        mat.solve()
-    };
+            for (index, mos) in mos_entries.iter().enumerate() {
+                mat.stamp_r(
+                    mos.drain,
+                    mos.source,
+                    if mos_on.get(index).copied().unwrap_or(false) {
+                        mos.r_on
+                    } else {
+                        mos.r_off
+                    },
+                );
+            }
+            for (k, v_src) in vs.iter().enumerate() {
+                mat.stamp_vs(k, v_src.pos, v_src.neg, v_src.v);
+            }
+            for (bi, bjt) in bjt_entries.iter().enumerate() {
+                let k_vbe = bjt_vs_start + bi;
+                if bjt.npn {
+                    mat.stamp_cccs(bjt.c, bjt.e, k_vbe, bjt.h_fe);
+                } else {
+                    mat.stamp_cccs(bjt.c, bjt.e, k_vbe, -bjt.h_fe);
+                }
+            }
+            for i_src in &is_src {
+                mat.stamp_is(i_src.pos, i_src.neg, i_src.i);
+            }
+            mat.solve()
+        };
 
     let initial_diode_states = vec![false; diode_entries.len()];
     let initial_mos_states = vec![false; mos_entries.len()];
-    let initial = solve_with_states(&initial_diode_states, &initial_mos_states)?;
+    let initial_solution = solve_with_states(&initial_diode_states, &initial_mos_states)?;
+    let initial = &initial_solution.x;
     let initial_voltage = |mna_idx: usize| -> f64 {
         if mna_idx == 0 {
             0.0
@@ -984,7 +1119,8 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
             }
         })
         .collect::<Vec<_>>();
-    let x = solve_with_states(&diode_states, &mos_states)?;
+    let solution = solve_with_states(&diode_states, &mos_states)?;
+    let x = &solution.x;
 
     // ── 8. Decode results ─────────────────────────────────────────────────
     let vnode = |mna_idx: usize| -> f64 {
@@ -1003,6 +1139,7 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
     let mut component_voltage: HashMap<u64, f64> = HashMap::new();
     let mut branch_current: HashMap<u64, f64> = HashMap::new();
     let mut component_power: HashMap<u64, f64> = HashMap::new();
+    let mut component_power_role: HashMap<u64, ComponentPowerRole> = HashMap::new();
 
     for re in &res {
         let va = vnode(re.a);
@@ -1012,6 +1149,9 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         component_voltage.entry(re.id).or_insert(vd);
         branch_current.entry(re.id).or_insert(i_r);
         component_power.entry(re.id).or_insert((vd * i_r).abs());
+        component_power_role
+            .entry(re.id)
+            .or_insert(ComponentPowerRole::Dissipating);
     }
 
     for (k, v_src) in vs.iter().enumerate() {
@@ -1024,6 +1164,16 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         component_voltage.entry(v_src.id).or_insert(vd);
         branch_current.entry(v_src.id).or_insert(i_vs);
         component_power.entry(v_src.id).or_insert((vd * i_vs).abs());
+        component_power_role.insert(
+            v_src.id,
+            if vd * i_vs < -1e-12 {
+                ComponentPowerRole::Supplying
+            } else if vd * i_vs > 1e-12 {
+                ComponentPowerRole::Dissipating
+            } else {
+                ComponentPowerRole::Unknown
+            },
+        );
     }
 
     // For diodes: override with the anode→cathode total voltage drop
@@ -1043,6 +1193,7 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         };
         branch_current.insert(de.id, current);
         component_power.insert(de.id, (vd * current).abs());
+        component_power_role.insert(de.id, ComponentPowerRole::Dissipating);
     }
 
     for (index, mos) in mos_entries.iter().enumerate() {
@@ -1056,6 +1207,7 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         component_voltage.insert(mos.id, vd);
         branch_current.insert(mos.id, current);
         component_power.insert(mos.id, (vd * current).abs());
+        component_power_role.insert(mos.id, ComponentPowerRole::Dissipating);
     }
 
     // For BJTs: override with Vce voltage and total Ic current
@@ -1069,6 +1221,7 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         component_voltage.insert(bjt.id, vce);
         branch_current.insert(bjt.id, ic.abs());
         component_power.insert(bjt.id, (vce * ic).abs());
+        component_power_role.insert(bjt.id, ComponentPowerRole::Dissipating);
     }
 
     for i_src in &is_src {
@@ -1078,6 +1231,16 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         component_voltage.insert(i_src.id, vd);
         branch_current.insert(i_src.id, i_src.i);
         component_power.insert(i_src.id, (vd * i_src.i).abs());
+        component_power_role.insert(
+            i_src.id,
+            if -vd * i_src.i < -1e-12 {
+                ComponentPowerRole::Supplying
+            } else if -vd * i_src.i > 1e-12 {
+                ComponentPowerRole::Dissipating
+            } else {
+                ComponentPowerRole::Unknown
+            },
+        );
     }
 
     // Wire voltages: average of MNA voltages at all wire-point nodes
@@ -1099,29 +1262,24 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
     }
 
     let mut wire_current = HashMap::new();
-    let mut wire_roots = HashMap::new();
+    let mut wire_current_known = HashSet::new();
     for wire in wires {
-        if let Some(root) = wire.points.first().and_then(|point| nm.root_of(*point)) {
-            wire_roots.insert(wire.id, root);
-        }
-        let mut strongest: Option<f64> = None;
+        let mut candidates = Vec::new();
         for component in components {
             let Some(&current) = branch_current.get(&component.id) else {
                 continue;
             };
             let pins = component_pin_defs(component);
             for (pin_index, pin) in pins.iter().enumerate() {
-                if !wire.points.windows(2).any(|segment| {
-                    point_touches_wire_segment(pin.pos, segment[0], segment[1])
-                }) {
+                if !wire
+                    .points
+                    .windows(2)
+                    .any(|segment| point_touches_wire_segment(pin.pos, segment[0], segment[1]))
+                {
                     continue;
                 }
-                let terminal_current = terminal_current_into_component(
-                    component.kind,
-                    pin,
-                    pin_index,
-                    current,
-                );
+                let terminal_current =
+                    terminal_current_into_component(component.kind, pin, pin_index, current);
                 let Some(distance) = distance_along_wire(&wire.points, pin.pos) else {
                     continue;
                 };
@@ -1131,32 +1289,29 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
                     1.0
                 };
                 let candidate = terminal_current * toward_pin_sign;
-                if strongest.is_none_or(|value| candidate.abs() > value.abs()) {
-                    strongest = Some(candidate);
-                }
+                candidates.push(candidate);
             }
         }
-        wire_current.insert(wire.id, strongest.unwrap_or(0.0));
-    }
-    let mut net_current = HashMap::<usize, f64>::new();
-    for (&wire_id, &current) in &wire_current {
-        let Some(&root) = wire_roots.get(&wire_id) else {
-            continue;
-        };
-        let entry = net_current.entry(root).or_insert(current);
-        if current.abs() > entry.abs() {
-            *entry = current;
-        }
-    }
-    for (&wire_id, current) in &mut wire_current {
-        if current.abs() > 1.0e-12 {
-            continue;
-        }
-        if let Some(net_value) = wire_roots
-            .get(&wire_id)
-            .and_then(|root| net_current.get(root))
-        {
-            *current = *net_value;
+
+        let representative = candidates
+            .iter()
+            .copied()
+            .max_by(|a, b| a.abs().total_cmp(&b.abs()))
+            .unwrap_or(0.0);
+        wire_current.insert(wire.id, representative);
+
+        // A polyline can only have one meaningful displayed current when every
+        // attached terminal agrees. Mid-wire branches can carry different
+        // currents on either side, so suppress their direction rather than
+        // showing a physically false net-wide value.
+        if !candidates.is_empty() {
+            let tolerance = representative.abs().max(1.0) * 1.0e-9;
+            if candidates
+                .iter()
+                .all(|candidate| (*candidate - representative).abs() <= tolerance)
+            {
+                wire_current_known.insert(wire.id);
+            }
         }
     }
 
@@ -1165,13 +1320,16 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
         .map(|v| v.abs())
         .fold(0.0_f64, f64::max);
 
-    Some(DcResult {
+    Ok(DcResult {
         net_voltages,
         component_voltage,
         branch_current,
         component_power,
         wire_voltage,
         wire_current,
+        wire_current_known,
+        component_power_role,
+        max_kcl_residual: solution.max_kcl_residual,
         vmax: vmax.max(0.1),
     })
 }
@@ -1394,10 +1552,14 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
     let mut nm = NetMap::new();
     for wire in wires {
         let indices: Vec<usize> = wire.points.iter().map(|&p| nm.reg(p)).collect();
-        for w in indices.windows(2) { nm.join(w[0], w[1]); }
+        for w in indices.windows(2) {
+            nm.join(w[0], w[1]);
+        }
     }
     for comp in components {
-        for pin in component_pin_defs(comp) { nm.reg(pin.pos); }
+        for pin in component_pin_defs(comp) {
+            nm.reg(pin.pos);
+        }
     }
     for contact in wire_contact_points(components, wires) {
         let ci = nm.reg(contact);
@@ -1418,7 +1580,9 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
         for comp in components {
             if comp.kind == ComponentKind::NetLabel {
                 let lbl = comp.value.trim().to_ascii_lowercase();
-                if lbl.is_empty() { continue; }
+                if lbl.is_empty() {
+                    continue;
+                }
                 for pin in component_pin_defs(comp) {
                     let idx = nm.reg(pin.pos);
                     label_nodes.entry(lbl.clone()).or_default().push(idx);
@@ -1426,7 +1590,9 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
             }
         }
         for (_, nodes) in &label_nodes {
-            for w in nodes.windows(2) { nm.join(w[0], w[1]); }
+            for w in nodes.windows(2) {
+                nm.join(w[0], w[1]);
+            }
         }
     }
 
@@ -1436,20 +1602,26 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
         match comp.kind {
             ComponentKind::Ground => {
                 for pin in component_pin_defs(comp) {
-                    if let Some(r) = nm.root_of(pin.pos) { gnd_roots.insert(r); }
+                    if let Some(r) = nm.root_of(pin.pos) {
+                        gnd_roots.insert(r);
+                    }
                 }
             }
             ComponentKind::VSource | ComponentKind::Battery | ComponentKind::ISource => {
                 for pin in component_pin_defs(comp) {
                     if pin.role == PinRole::Ground {
-                        if let Some(r) = nm.root_of(pin.pos) { gnd_roots.insert(r); }
+                        if let Some(r) = nm.root_of(pin.pos) {
+                            gnd_roots.insert(r);
+                        }
                     }
                 }
             }
             _ => {}
         }
     }
-    if gnd_roots.is_empty() { return None; }
+    if gnd_roots.is_empty() {
+        return None;
+    }
 
     // ── Assign MNA node numbers ───────────────────────────────────────────
     let node_count = nm.nodes.positions.len();
@@ -1457,15 +1629,22 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
     let mut mna_of: HashMap<usize, usize> = HashMap::new();
     let mut next_node = 1usize;
     for &root in &all_roots {
-        if gnd_roots.contains(&root) { mna_of.insert(root, 0); }
-        else { mna_of.insert(root, next_node); next_node += 1; }
+        if gnd_roots.contains(&root) {
+            mna_of.insert(root, 0);
+        } else {
+            mna_of.insert(root, next_node);
+            next_node += 1;
+        }
     }
     let n = next_node - 1;
-    if n == 0 { return None; }
+    if n == 0 {
+        return None;
+    }
 
-    let mna_node_ac = |pos: Pos2, nm: &mut NetMap, mna_of: &HashMap<usize, usize>| -> Option<usize> {
-        nm.root_of(pos).and_then(|r| mna_of.get(&r).copied())
-    };
+    let mna_node_ac =
+        |pos: Pos2, nm: &mut NetMap, mna_of: &HashMap<usize, usize>| -> Option<usize> {
+            nm.root_of(pos).and_then(|r| mna_of.get(&r).copied())
+        };
 
     // ── Complex admittance matrix (re + j*im stored as flat 2D) ──────────
     // We build a 2n × 2n real system by interleaving real/imag rows:
@@ -1478,12 +1657,16 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
     let mut vs_count = 0usize;
     for comp in components {
         match comp.kind {
-            ComponentKind::VSource | ComponentKind::Battery => { vs_count += 1; }
+            ComponentKind::VSource | ComponentKind::Battery => {
+                vs_count += 1;
+            }
             _ => {}
         }
     }
     let sz = 2 * n + vs_count;
-    if sz == 0 { return None; }
+    if sz == 0 {
+        return None;
+    }
 
     let mut a_mat = vec![vec![0.0f64; sz]; sz];
     let mut z_vec = vec![0.0f64; sz];
@@ -1491,41 +1674,45 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
     // Helper: stamp complex admittance (g_re + j*g_im) between nodes a and b
     let stamp_y = |a_mat: &mut Vec<Vec<f64>>, a: usize, b: usize, g_re: f64, g_im: f64| {
         if a > 0 {
-            a_mat[2*(a-1)][2*(a-1)] += g_re;
-            a_mat[2*(a-1)+1][2*(a-1)+1] += g_re;
-            a_mat[2*(a-1)][2*(a-1)+1] -= g_im;
-            a_mat[2*(a-1)+1][2*(a-1)] += g_im;
+            a_mat[2 * (a - 1)][2 * (a - 1)] += g_re;
+            a_mat[2 * (a - 1) + 1][2 * (a - 1) + 1] += g_re;
+            a_mat[2 * (a - 1)][2 * (a - 1) + 1] -= g_im;
+            a_mat[2 * (a - 1) + 1][2 * (a - 1)] += g_im;
         }
         if b > 0 {
-            a_mat[2*(b-1)][2*(b-1)] += g_re;
-            a_mat[2*(b-1)+1][2*(b-1)+1] += g_re;
-            a_mat[2*(b-1)][2*(b-1)+1] -= g_im;
-            a_mat[2*(b-1)+1][2*(b-1)] += g_im;
+            a_mat[2 * (b - 1)][2 * (b - 1)] += g_re;
+            a_mat[2 * (b - 1) + 1][2 * (b - 1) + 1] += g_re;
+            a_mat[2 * (b - 1)][2 * (b - 1) + 1] -= g_im;
+            a_mat[2 * (b - 1) + 1][2 * (b - 1)] += g_im;
         }
         if a > 0 && b > 0 {
-            a_mat[2*(a-1)][2*(b-1)] -= g_re;
-            a_mat[2*(a-1)+1][2*(b-1)+1] -= g_re;
-            a_mat[2*(a-1)][2*(b-1)+1] += g_im;
-            a_mat[2*(a-1)+1][2*(b-1)] -= g_im;
+            a_mat[2 * (a - 1)][2 * (b - 1)] -= g_re;
+            a_mat[2 * (a - 1) + 1][2 * (b - 1) + 1] -= g_re;
+            a_mat[2 * (a - 1)][2 * (b - 1) + 1] += g_im;
+            a_mat[2 * (a - 1) + 1][2 * (b - 1)] -= g_im;
 
-            a_mat[2*(b-1)][2*(a-1)] -= g_re;
-            a_mat[2*(b-1)+1][2*(a-1)+1] -= g_re;
-            a_mat[2*(b-1)][2*(a-1)+1] += g_im;
-            a_mat[2*(b-1)+1][2*(a-1)] -= g_im;
+            a_mat[2 * (b - 1)][2 * (a - 1)] -= g_re;
+            a_mat[2 * (b - 1) + 1][2 * (a - 1) + 1] -= g_re;
+            a_mat[2 * (b - 1)][2 * (a - 1) + 1] += g_im;
+            a_mat[2 * (b - 1) + 1][2 * (a - 1)] -= g_im;
         }
     };
 
     // Helper: stamp VS row (index k, zero-based) for V_pos - V_neg = v (real)
-    let stamp_vs_ac = |a_mat: &mut Vec<Vec<f64>>, z_vec: &mut Vec<f64>,
-                       k: usize, pos: usize, neg: usize, v: f64| {
+    let stamp_vs_ac = |a_mat: &mut Vec<Vec<f64>>,
+                       z_vec: &mut Vec<f64>,
+                       k: usize,
+                       pos: usize,
+                       neg: usize,
+                       v: f64| {
         let ki = 2 * n + k;
         if pos > 0 {
-            a_mat[ki][2*(pos-1)] += 1.0;
-            a_mat[2*(pos-1)][ki] += 1.0;
+            a_mat[ki][2 * (pos - 1)] += 1.0;
+            a_mat[2 * (pos - 1)][ki] += 1.0;
         }
         if neg > 0 {
-            a_mat[ki][2*(neg-1)] -= 1.0;
-            a_mat[2*(neg-1)][ki] -= 1.0;
+            a_mat[ki][2 * (neg - 1)] -= 1.0;
+            a_mat[2 * (neg - 1)][ki] -= 1.0;
         }
         z_vec[ki] += v;
     };
@@ -1535,15 +1722,21 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
 
     for comp in components {
         let pins = component_pin_defs(comp);
-        let p0 = pins.get(0).and_then(|p| mna_node_ac(p.pos, &mut nm, &mna_of));
-        let p1 = pins.get(1).and_then(|p| mna_node_ac(p.pos, &mut nm, &mna_of));
+        let p0 = pins
+            .get(0)
+            .and_then(|p| mna_node_ac(p.pos, &mut nm, &mna_of));
+        let p1 = pins
+            .get(1)
+            .and_then(|p| mna_node_ac(p.pos, &mut nm, &mna_of));
 
         match comp.kind {
-            ComponentKind::Resistor | ComponentKind::Potentiometer | ComponentKind::Thermistor
+            ComponentKind::Resistor
+            | ComponentKind::Potentiometer
+            | ComponentKind::Thermistor
             | ComponentKind::Varistor => {
                 let r = parse_metric_value(&comp.value, "ohm").unwrap_or(10_000.0) as f64;
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    stamp_y(&mut a_mat, a, b, 1.0/r, 0.0);
+                    stamp_y(&mut a_mat, a, b, 1.0 / r, 0.0);
                     comp_impedance.insert(comp.id, r);
                 }
             }
@@ -1569,33 +1762,41 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
             }
             ComponentKind::VSource | ComponentKind::Battery => {
                 let v = parse_metric_value(&comp.value, "v").unwrap_or(5.0) as f64;
-                let pos_n = pins.iter().find(|p| p.role == PinRole::Positive || p.label == "+")
-                    .and_then(|p| mna_node_ac(p.pos, &mut nm, &mna_of)).unwrap_or(0);
-                let neg_n = pins.iter().find(|p| p.role == PinRole::Ground || p.label == "-")
-                    .and_then(|p| mna_node_ac(p.pos, &mut nm, &mna_of)).unwrap_or(0);
+                let pos_n = pins
+                    .iter()
+                    .find(|p| p.role == PinRole::Positive || p.label == "+")
+                    .and_then(|p| mna_node_ac(p.pos, &mut nm, &mna_of))
+                    .unwrap_or(0);
+                let neg_n = pins
+                    .iter()
+                    .find(|p| p.role == PinRole::Ground || p.label == "-")
+                    .and_then(|p| mna_node_ac(p.pos, &mut nm, &mna_of))
+                    .unwrap_or(0);
                 stamp_vs_ac(&mut a_mat, &mut z_vec, vs_k, pos_n, neg_n, v);
                 vs_k += 1;
             }
             // Treat other components as resistive stubs
             ComponentKind::Fuse | ComponentKind::Lamp | ComponentKind::DcMotor => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    stamp_y(&mut a_mat, a, b, 1.0/10.0, 0.0);
+                    stamp_y(&mut a_mat, a, b, 1.0 / 10.0, 0.0);
                 }
             }
-            ComponentKind::Diode | ComponentKind::Led | ComponentKind::SchottkyDiode
+            ComponentKind::Diode
+            | ComponentKind::Led
+            | ComponentKind::SchottkyDiode
             | ComponentKind::ZenerDiode => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    stamp_y(&mut a_mat, a, b, 1.0/20.0, 0.0);
+                    stamp_y(&mut a_mat, a, b, 1.0 / 20.0, 0.0);
                 }
             }
             ComponentKind::Voltmeter => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    stamp_y(&mut a_mat, a, b, 1.0/1_000_000.0, 0.0);
+                    stamp_y(&mut a_mat, a, b, 1.0 / 1_000_000.0, 0.0);
                 }
             }
             ComponentKind::Ammeter => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    stamp_y(&mut a_mat, a, b, 1.0/0.001, 0.0);
+                    stamp_y(&mut a_mat, a, b, 1.0 / 0.001, 0.0);
                 }
             }
             _ => {}
@@ -1606,34 +1807,47 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
     let n_eq = sz;
     for col in 0..n_eq {
         let mut prow = col;
-        for row in (col+1)..n_eq {
-            if a_mat[row][col].abs() > a_mat[prow][col].abs() { prow = row; }
+        for row in (col + 1)..n_eq {
+            if a_mat[row][col].abs() > a_mat[prow][col].abs() {
+                prow = row;
+            }
         }
-        if a_mat[prow][col].abs() < 1e-14 { return None; }
+        if a_mat[prow][col].abs() < 1e-14 {
+            return None;
+        }
         a_mat.swap(col, prow);
         z_vec.swap(col, prow);
         let piv = a_mat[col][col];
-        for row in (col+1)..n_eq {
+        for row in (col + 1)..n_eq {
             let f = a_mat[row][col] / piv;
-            if f.abs() < 1e-20 { continue; }
+            if f.abs() < 1e-20 {
+                continue;
+            }
             z_vec[row] -= f * z_vec[col];
-            for j in col..n_eq { a_mat[row][j] -= f * a_mat[col][j]; }
+            for j in col..n_eq {
+                a_mat[row][j] -= f * a_mat[col][j];
+            }
         }
     }
     let mut x = vec![0.0f64; n_eq];
     for i in (0..n_eq).rev() {
         x[i] = z_vec[i];
-        for j in (i+1)..n_eq { x[i] -= a_mat[i][j] * x[j]; }
-        if a_mat[i][i].abs() < 1e-14 { return None; }
+        for j in (i + 1)..n_eq {
+            x[i] -= a_mat[i][j] * x[j];
+        }
+        if a_mat[i][i].abs() < 1e-14 {
+            return None;
+        }
         x[i] /= a_mat[i][i];
     }
 
     // ── Extract node voltages (re, im) ────────────────────────────────────
     let vnode_c = |mna_idx: usize| -> (f64, f64) {
-        if mna_idx == 0 { (0.0, 0.0) }
-        else {
-            let re = x.get(2*(mna_idx-1)).copied().unwrap_or(0.0);
-            let im = x.get(2*(mna_idx-1)+1).copied().unwrap_or(0.0);
+        if mna_idx == 0 {
+            (0.0, 0.0)
+        } else {
+            let re = x.get(2 * (mna_idx - 1)).copied().unwrap_or(0.0);
+            let im = x.get(2 * (mna_idx - 1) + 1).copied().unwrap_or(0.0);
             (re, im)
         }
     };
@@ -1663,15 +1877,16 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
         if cnt > 0 {
             let re = sum_re / cnt as f64;
             let im = sum_im / cnt as f64;
-            let mag = (re*re + im*im).sqrt();
+            let mag = (re * re + im * im).sqrt();
             let phase = im.atan2(re).to_degrees();
             wire_voltage_mag.insert(wire.id, mag);
             wire_voltage_phase.insert(wire.id, phase);
         }
     }
 
-    let vmax = node_voltages.values()
-        .map(|(re, im)| (re*re + im*im).sqrt())
+    let vmax = node_voltages
+        .values()
+        .map(|(re, im)| (re * re + im * im).sqrt())
         .fold(0.1_f64, f64::max);
 
     Some(AcResult {
@@ -1693,7 +1908,14 @@ mod tests {
     use egui::Pos2;
 
     fn comp(id: u64, kind: ComponentKind, pos: Pos2, label: &str, value: &str) -> Component {
-        Component { id, kind, pos, rotation: 0, label: label.to_string(), value: value.to_string() }
+        Component {
+            id,
+            kind,
+            pos,
+            rotation: 0,
+            label: label.to_string(),
+            value: value.to_string(),
+        }
     }
 
     // Helper: multi-point wire.
@@ -1704,7 +1926,10 @@ mod tests {
     // Build an L-shaped wire from point a to b via a corner at (b.x, a.y).
     fn l_wire(id: u64, a: Pos2, b: Pos2) -> Wire {
         let corner = Pos2::new(b.x, a.y);
-        Wire { id, points: vec![a, corner, b] }
+        Wire {
+            id,
+            points: vec![a, corner, b],
+        }
     }
 
     // ── Single resistor across a battery ─────────────────────────────────
@@ -1717,31 +1942,65 @@ mod tests {
         // Resistor at (200, 0): A at (164,0), B at (236,0)
         // Ground at (0, 120):  pin at (0, 100)
         let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
-        let r = comp(2, ComponentKind::Resistor, Pos2::new(200.0, 0.0), "R1", "1k");
-        let gnd = comp(3, ComponentKind::Ground, Pos2::new(0.0, 120.0), "GND1", "0V");
+        let r = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(200.0, 0.0),
+            "R1",
+            "1k",
+        );
+        let gnd = comp(
+            3,
+            ComponentKind::Ground,
+            Pos2::new(0.0, 120.0),
+            "GND1",
+            "0V",
+        );
 
         let bat_pins = component_pin_defs(&bat);
         let r_pins = component_pin_defs(&r);
         let gnd_pins = component_pin_defs(&gnd);
 
-        let bat_p = bat_pins.iter().find(|p| p.role == PinRole::Positive).unwrap().pos; // (32, 0)
-        let bat_n = bat_pins.iter().find(|p| p.role == PinRole::Ground).unwrap().pos;   // (-32, 0)
-        let r_a = r_pins.iter().find(|p| p.label == "A").unwrap().pos;                  // (164, 0)
-        let r_b = r_pins.iter().find(|p| p.label == "B").unwrap().pos;                  // (236, 0)
-        let gnd_p = gnd_pins[0].pos;                                                      // (0, 100)
+        let bat_p = bat_pins
+            .iter()
+            .find(|p| p.role == PinRole::Positive)
+            .unwrap()
+            .pos; // (32, 0)
+        let bat_n = bat_pins
+            .iter()
+            .find(|p| p.role == PinRole::Ground)
+            .unwrap()
+            .pos; // (-32, 0)
+        let r_a = r_pins.iter().find(|p| p.label == "A").unwrap().pos; // (164, 0)
+        let r_b = r_pins.iter().find(|p| p.label == "B").unwrap().pos; // (236, 0)
+        let gnd_p = gnd_pins[0].pos; // (0, 100)
 
         // Use L-shaped wires so no endpoint lies collinear on another segment.
         // W10: bat+ (32,0) → up to (32,-40) → right to (164,-40) → down to r_a (164,0)
         // W11: r_b (236,0) → down to (236,60) → left to (-32,60) → up to bat- (-32,0)
         // W12: bat- (-32,0) → diagonal to gnd (0,100)   [not collinear with W10/W11]
         let wires = vec![
-            lseg(10, vec![bat_p, Pos2::new(bat_p.x, -40.0), Pos2::new(r_a.x, -40.0), r_a]),
-            lseg(11, vec![r_b,  Pos2::new(r_b.x,  60.0), Pos2::new(bat_n.x, 60.0), bat_n]),
+            lseg(
+                10,
+                vec![
+                    bat_p,
+                    Pos2::new(bat_p.x, -40.0),
+                    Pos2::new(r_a.x, -40.0),
+                    r_a,
+                ],
+            ),
+            lseg(
+                11,
+                vec![r_b, Pos2::new(r_b.x, 60.0), Pos2::new(bat_n.x, 60.0), bat_n],
+            ),
             lseg(12, vec![bat_n, gnd_p]),
         ];
 
         let result = solve_dc(&[bat, r, gnd], &wires);
-        assert!(result.is_some(), "Should converge for simple resistive circuit");
+        assert!(
+            result.is_some(),
+            "Should converge for simple resistive circuit"
+        );
         let dc = result.unwrap();
 
         // Battery branch current ≈ 9 mA (9V / 1kΩ).
@@ -1751,7 +2010,9 @@ mod tests {
             "Expected ~9 mA, got {bat_i:.4} A"
         );
         assert!(
-            dc.wire_current.values().any(|current| current.abs() > 0.008),
+            dc.wire_current
+                .values()
+                .any(|current| current.abs() > 0.008),
             "Wire current should be derived from solved branch current"
         );
     }
@@ -1792,12 +2053,7 @@ mod tests {
             ),
             lseg(
                 11,
-                vec![
-                    r_b,
-                    Pos2::new(r_b.x, 40.0),
-                    Pos2::new(bat_n.x, 40.0),
-                    bat_n,
-                ],
+                vec![r_b, Pos2::new(r_b.x, 40.0), Pos2::new(bat_n.x, 40.0), bat_n],
             ),
         ];
 
@@ -1822,10 +2078,55 @@ mod tests {
             vec![positive, Pos2::new(positive.x + 120.0, positive.y)],
         );
 
-        let dc = solve_dc(&[bat], &[wire]).expect("open voltage source should have an operating point");
+        let dc =
+            solve_dc(&[bat], &[wire]).expect("open voltage source should have an operating point");
         assert!((dc.wire_voltage[&10] - 5.0).abs() < 1.0e-9);
         assert!(dc.wire_current[&10].abs() < 1.0e-12);
+        assert!(dc.wire_current_known.contains(&10));
         assert!(dc.branch_current[&1].abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn branched_polyline_does_not_claim_one_current_for_all_segments() {
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "5V");
+        let r1 = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(300.0, 0.0),
+            "R1",
+            "1k",
+        );
+        let mut r2 = comp(
+            3,
+            ComponentKind::Resistor,
+            Pos2::new(164.0, 36.0),
+            "R2",
+            "1k",
+        );
+        r2.rotation = 90;
+        let bat_pins = component_pin_defs(&bat);
+        let r1_pins = component_pin_defs(&r1);
+        let r2_pins = component_pin_defs(&r2);
+        let bat_p = bat_pins.iter().find(|pin| pin.label == "+").unwrap().pos;
+        let bat_n = bat_pins.iter().find(|pin| pin.label == "-").unwrap().pos;
+        let r1_a = r1_pins.iter().find(|pin| pin.label == "A").unwrap().pos;
+        let r1_b = r1_pins.iter().find(|pin| pin.label == "B").unwrap().pos;
+        let r2_a = r2_pins.iter().find(|pin| pin.label == "A").unwrap().pos;
+        let r2_b = r2_pins.iter().find(|pin| pin.label == "B").unwrap().pos;
+        let wires = vec![
+            lseg(10, vec![bat_p, r2_a, r1_a]),
+            lseg(11, vec![r1_b, Pos2::new(r1_b.x, 80.0), bat_n]),
+            lseg(12, vec![r2_b, Pos2::new(r2_b.x, 120.0), bat_n]),
+        ];
+
+        let dc = solve_dc(&[bat, r1, r2], &wires).expect("parallel load should solve");
+
+        assert!((dc.branch_current[&2].abs() - 0.005).abs() < 1.0e-9);
+        assert!((dc.branch_current[&3].abs() - 0.005).abs() < 1.0e-9);
+        assert!(
+            !dc.wire_current_known.contains(&10),
+            "A midpoint branch has different current on each side of one polyline"
+        );
     }
 
     // ── No GND → solver returns None ─────────────────────────────────────
@@ -1833,7 +2134,13 @@ mod tests {
     #[test]
     fn no_gnd_returns_none() {
         let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
-        let r = comp(2, ComponentKind::Resistor, Pos2::new(100.0, 0.0), "R1", "1k");
+        let r = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(100.0, 0.0),
+            "R1",
+            "1k",
+        );
         // No ground and no wires → battery negative isn't marked GND either.
         let result = solve_dc(&[bat, r], &[]);
         assert!(result.is_none(), "Circuit without GND must not converge");
@@ -1846,17 +2153,43 @@ mod tests {
         // If solve_dc returns Some, the resistor current must be ≈ 0.
         // If it returns None (singular), that's also acceptable.
         let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
-        let sw = comp(2, ComponentKind::Switch, Pos2::new(0.0, -120.0), "SW1", "open");
-        let r = comp(3, ComponentKind::Resistor, Pos2::new(200.0, -120.0), "R1", "1k");
-        let gnd = comp(4, ComponentKind::Ground, Pos2::new(0.0, 120.0), "GND1", "0V");
+        let sw = comp(
+            2,
+            ComponentKind::Switch,
+            Pos2::new(0.0, -120.0),
+            "SW1",
+            "open",
+        );
+        let r = comp(
+            3,
+            ComponentKind::Resistor,
+            Pos2::new(200.0, -120.0),
+            "R1",
+            "1k",
+        );
+        let gnd = comp(
+            4,
+            ComponentKind::Ground,
+            Pos2::new(0.0, 120.0),
+            "GND1",
+            "0V",
+        );
 
         let bat_pins = component_pin_defs(&bat);
         let sw_pins = component_pin_defs(&sw);
         let r_pins = component_pin_defs(&r);
         let gnd_pins = component_pin_defs(&gnd);
 
-        let bat_p = bat_pins.iter().find(|p| p.role == PinRole::Positive).unwrap().pos;
-        let bat_n = bat_pins.iter().find(|p| p.role == PinRole::Ground).unwrap().pos;
+        let bat_p = bat_pins
+            .iter()
+            .find(|p| p.role == PinRole::Positive)
+            .unwrap()
+            .pos;
+        let bat_n = bat_pins
+            .iter()
+            .find(|p| p.role == PinRole::Ground)
+            .unwrap()
+            .pos;
 
         let wires = vec![
             l_wire(10, bat_p, sw_pins[0].pos),
@@ -1868,7 +2201,10 @@ mod tests {
         let result = solve_dc(&[bat, sw, r, gnd], &wires);
         if let Some(dc) = result {
             let r_i = dc.branch_current.get(&3).copied().unwrap_or(0.0);
-            assert!(r_i.abs() < 1e-6, "Open switch should block current, got {r_i}");
+            assert!(
+                r_i.abs() < 1e-6,
+                "Open switch should block current, got {r_i}"
+            );
         }
         // None (singular matrix) is also acceptable for an open circuit.
     }
@@ -1922,7 +2258,13 @@ mod tests {
             "R1",
             "330",
         );
-        let led = comp(3, ComponentKind::Led, Pos2::new(320.0, -80.0), "LED1", "red");
+        let led = comp(
+            3,
+            ComponentKind::Led,
+            Pos2::new(320.0, -80.0),
+            "LED1",
+            "red",
+        );
         let bat_pins = component_pin_defs(&bat);
         let resistor_pins = component_pin_defs(&resistor);
         let led_pins = component_pin_defs(&led);
@@ -1973,15 +2315,35 @@ mod tests {
 
     fn mosfet_switch_circuit(gate_high: bool) -> (Vec<Component>, Vec<Wire>, u64) {
         let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "5V");
-        let resistor = comp(2, ComponentKind::Resistor, Pos2::new(160.0, -100.0), "R1", "1k");
-        let mos = comp(3, ComponentKind::Nmosfet, Pos2::new(300.0, 0.0), "Q1", "2N7000");
+        let resistor = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(160.0, -100.0),
+            "R1",
+            "1k",
+        );
+        let mos = comp(
+            3,
+            ComponentKind::Nmosfet,
+            Pos2::new(300.0, 0.0),
+            "Q1",
+            "2N7000",
+        );
         let bat_pins = component_pin_defs(&bat);
         let resistor_pins = component_pin_defs(&resistor);
         let mos_pins = component_pin_defs(&mos);
         let bat_p = bat_pins.iter().find(|pin| pin.label == "+").unwrap().pos;
         let bat_n = bat_pins.iter().find(|pin| pin.label == "-").unwrap().pos;
-        let r_a = resistor_pins.iter().find(|pin| pin.label == "A").unwrap().pos;
-        let r_b = resistor_pins.iter().find(|pin| pin.label == "B").unwrap().pos;
+        let r_a = resistor_pins
+            .iter()
+            .find(|pin| pin.label == "A")
+            .unwrap()
+            .pos;
+        let r_b = resistor_pins
+            .iter()
+            .find(|pin| pin.label == "B")
+            .unwrap()
+            .pos;
         let gate = mos_pins.iter().find(|pin| pin.label == "G").unwrap().pos;
         let drain = mos_pins.iter().find(|pin| pin.label == "D").unwrap().pos;
         let source = mos_pins.iter().find(|pin| pin.label == "S").unwrap().pos;
@@ -2003,7 +2365,10 @@ mod tests {
         let (components, wires, mos_id) = mosfet_switch_circuit(false);
         let dc = solve_dc(&components, &wires).expect("NMOS off circuit should solve");
         let current = dc.branch_current.get(&mos_id).copied().unwrap_or(0.0);
-        assert!(current.abs() < 1.0e-6, "NMOS should be OFF, got {current} A");
+        assert!(
+            current.abs() < 1.0e-6,
+            "NMOS should be OFF, got {current} A"
+        );
     }
 
     #[test]
@@ -2028,30 +2393,72 @@ mod tests {
         // R2 at (220, -80):    A at (184,-80), B at (256,-80)  [1kΩ]
         // Ground at (0, 120):  pin at (0,100)
         let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
-        let r1  = comp(2, ComponentKind::Resistor, Pos2::new(100.0, -80.0), "R1", "2k");
-        let r2  = comp(3, ComponentKind::Resistor, Pos2::new(220.0, -80.0), "R2", "1k");
-        let gnd = comp(4, ComponentKind::Ground, Pos2::new(0.0, 120.0), "GND1", "0V");
+        let r1 = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(100.0, -80.0),
+            "R1",
+            "2k",
+        );
+        let r2 = comp(
+            3,
+            ComponentKind::Resistor,
+            Pos2::new(220.0, -80.0),
+            "R2",
+            "1k",
+        );
+        let gnd = comp(
+            4,
+            ComponentKind::Ground,
+            Pos2::new(0.0, 120.0),
+            "GND1",
+            "0V",
+        );
 
         let bat_pins = component_pin_defs(&bat);
-        let r1_pins  = component_pin_defs(&r1);
-        let r2_pins  = component_pin_defs(&r2);
+        let r1_pins = component_pin_defs(&r1);
+        let r2_pins = component_pin_defs(&r2);
         let gnd_pins = component_pin_defs(&gnd);
 
-        let bat_p = bat_pins.iter().find(|p| p.role == PinRole::Positive).unwrap().pos; // (32,0)
-        let bat_n = bat_pins.iter().find(|p| p.role == PinRole::Ground).unwrap().pos;   // (-32,0)
-        let r1_a  = r1_pins.iter().find(|p| p.label == "A").unwrap().pos;               // (64,-80)
-        let r1_b  = r1_pins.iter().find(|p| p.label == "B").unwrap().pos;               // (136,-80)
-        let r2_a  = r2_pins.iter().find(|p| p.label == "A").unwrap().pos;               // (184,-80)
-        let r2_b  = r2_pins.iter().find(|p| p.label == "B").unwrap().pos;               // (256,-80)
-        let gnd_p = gnd_pins[0].pos;                                                      // (0,100)
+        let bat_p = bat_pins
+            .iter()
+            .find(|p| p.role == PinRole::Positive)
+            .unwrap()
+            .pos; // (32,0)
+        let bat_n = bat_pins
+            .iter()
+            .find(|p| p.role == PinRole::Ground)
+            .unwrap()
+            .pos; // (-32,0)
+        let r1_a = r1_pins.iter().find(|p| p.label == "A").unwrap().pos; // (64,-80)
+        let r1_b = r1_pins.iter().find(|p| p.label == "B").unwrap().pos; // (136,-80)
+        let r2_a = r2_pins.iter().find(|p| p.label == "A").unwrap().pos; // (184,-80)
+        let r2_b = r2_pins.iter().find(|p| p.label == "B").unwrap().pos; // (256,-80)
+        let gnd_p = gnd_pins[0].pos; // (0,100)
 
         let wires = vec![
             // bat+ → r1_a via L-shape going above y=0
-            lseg(10, vec![bat_p, Pos2::new(bat_p.x, -120.0), Pos2::new(r1_a.x, -120.0), r1_a]),
+            lseg(
+                10,
+                vec![
+                    bat_p,
+                    Pos2::new(bat_p.x, -120.0),
+                    Pos2::new(r1_a.x, -120.0),
+                    r1_a,
+                ],
+            ),
             // r1_b → r2_a straight (same y, no other contacts at y=-80 in this range)
             lseg(11, vec![r1_b, r2_a]),
             // r2_b → bat_n via L-shape going below
-            lseg(12, vec![r2_b, Pos2::new(r2_b.x, 60.0), Pos2::new(bat_n.x, 60.0), bat_n]),
+            lseg(
+                12,
+                vec![
+                    r2_b,
+                    Pos2::new(r2_b.x, 60.0),
+                    Pos2::new(bat_n.x, 60.0),
+                    bat_n,
+                ],
+            ),
             // bat- → GND
             lseg(13, vec![bat_n, gnd_p]),
         ];
@@ -2073,11 +2480,81 @@ mod tests {
     #[test]
     fn parse_si_value_handles_common_cases() {
         assert!((parse_si_value("10k").unwrap() - 10_000.0).abs() < 0.1);
+        assert!((parse_si_value("1K").unwrap() - 1_000.0).abs() < 0.1);
+        assert!((parse_si_value("10kΩ").unwrap() - 10_000.0).abs() < 0.1);
+        assert!((parse_si_value("4.7k").unwrap() - 4_700.0).abs() < 0.1);
+        // SPICE-compatible: bare M means milli; use Meg for mega.
+        assert!((parse_si_value("1M").unwrap() - 0.001).abs() < 1e-12);
         assert!((parse_si_value("100nF").unwrap() - 100e-9).abs() < 1e-12);
+        assert!((parse_si_value("100u").unwrap() - 100e-6).abs() < 1e-12);
+        assert!((parse_si_value("100µ").unwrap() - 100e-6).abs() < 1e-12);
+        assert!((parse_si_value("100μ").unwrap() - 100e-6).abs() < 1e-12);
+        assert!((parse_si_value("10uF").unwrap() - 10e-6).abs() < 1e-12);
         assert!((parse_si_value("3.3V").unwrap() - 3.3).abs() < 0.001);
         assert!((parse_si_value("1Meg").unwrap() - 1_000_000.0).abs() < 1.0);
         assert!((parse_si_value("10mA").unwrap() - 0.01).abs() < 0.0001);
+        assert!((parse_si_value("20mA").unwrap() - 0.02).abs() < 0.0001);
         assert!(parse_si_value("").is_none());
         assert!(parse_si_value("abc").is_none());
+    }
+
+    #[test]
+    fn detailed_solver_reports_missing_ground() {
+        let resistor = comp(
+            1,
+            ComponentKind::Resistor,
+            Pos2::new(100.0, 100.0),
+            "R1",
+            "1k",
+        );
+        assert!(matches!(
+            solve_dc_detailed(&[resistor], &[]),
+            Err(SimulationError::NoGround)
+        ));
+    }
+
+    #[test]
+    fn solved_resistor_obeys_kcl_and_power_roles() {
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "5V");
+        let resistor = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(200.0, 0.0),
+            "R1",
+            "1k",
+        );
+        let bat_pins = component_pin_defs(&bat);
+        let resistor_pins = component_pin_defs(&resistor);
+        let bat_p = bat_pins.iter().find(|pin| pin.label == "+").unwrap().pos;
+        let bat_n = bat_pins.iter().find(|pin| pin.label == "-").unwrap().pos;
+        let r_a = resistor_pins
+            .iter()
+            .find(|pin| pin.label == "A")
+            .unwrap()
+            .pos;
+        let r_b = resistor_pins
+            .iter()
+            .find(|pin| pin.label == "B")
+            .unwrap()
+            .pos;
+        let wires = vec![
+            lseg(
+                10,
+                vec![
+                    bat_p,
+                    Pos2::new(bat_p.x, -40.0),
+                    Pos2::new(r_a.x, -40.0),
+                    r_a,
+                ],
+            ),
+            lseg(
+                11,
+                vec![r_b, Pos2::new(r_b.x, 40.0), Pos2::new(bat_n.x, 40.0), bat_n],
+            ),
+        ];
+        let dc = solve_dc_detailed(&[bat, resistor], &wires).unwrap();
+        assert!(dc.max_kcl_residual < 1e-12);
+        assert_eq!(dc.component_power_role[&2], ComponentPowerRole::Dissipating);
+        assert_eq!(dc.component_power_role[&1], ComponentPowerRole::Supplying);
     }
 }
