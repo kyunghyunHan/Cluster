@@ -343,6 +343,24 @@ mod tests {
     }
 
     #[test]
+    fn crossing_wires_without_contact_point_stay_separate() {
+        let horizontal = wire(
+            1,
+            vec![Pos2::new(0.0, 100.0), Pos2::new(200.0, 100.0)],
+        );
+        let vertical = wire(
+            2,
+            vec![Pos2::new(100.0, 0.0), Pos2::new(100.0, 200.0)],
+        );
+
+        let netlist = build_circuit_netlist(&[], &[horizontal, vertical]);
+        assert_ne!(
+            netlist.wire_nets[&1], netlist.wire_nets[&2],
+            "Interior wire crossings must not connect without an explicit contact point"
+        );
+    }
+
+    #[test]
     fn component_pin_touching_wire_midpoint_joins_wire_net() {
         let resistor = comp(
             10,

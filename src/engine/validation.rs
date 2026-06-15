@@ -1,5 +1,6 @@
 use crate::model::*;
 use crate::parse_metric_value;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ErcSeverity {
@@ -30,6 +31,8 @@ pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolat
     check_oled_sda_scl_swap(netlist, &mut v);
     check_missing_values(netlist, &mut v);
     check_floating_pins(netlist, &mut v);
+    check_floating_dc_nets(netlist, &mut v);
+    check_open_voltage_sources(netlist, &mut v);
 
     v
 }
@@ -436,6 +439,225 @@ fn check_floating_pins(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
     }
 }
 
+fn check_floating_dc_nets(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let ground_nets = netlist
+        .pins
+        .iter()
+        .filter(|pin| {
+            pin.electrical_type == ElectricalType::Ground
+                || pin.component_kind == ComponentKind::Ground
+        })
+        .map(|pin| pin.net_id)
+        .chain(
+            netlist
+                .nets
+                .iter()
+                .filter(|net| net.name.eq_ignore_ascii_case("GND"))
+                .map(|net| net.id),
+        )
+        .collect::<HashSet<_>>();
+    if ground_nets.is_empty() {
+        return;
+    }
+
+    let graph = dc_net_graph(netlist, true);
+    let referenced = reachable_net_ids(&graph, ground_nets.iter().copied());
+    let wired_nets = netlist.wire_nets.values().copied().collect::<HashSet<_>>();
+
+    for net in &netlist.nets {
+        let pins_on_net = netlist
+            .pins
+            .iter()
+            .filter(|pin| pin.net_id == net.id)
+            .collect::<Vec<_>>();
+        if referenced.contains(&net.id)
+            || !wired_nets.contains(&net.id)
+            || pins_on_net.is_empty()
+        {
+            continue;
+        }
+        let wire_id = netlist
+            .wire_nets
+            .iter()
+            .filter(|(_, net_id)| **net_id == net.id)
+            .map(|(wire_id, _)| *wire_id)
+            .min();
+        v.push(ErcViolation {
+            severity: ErcSeverity::Warning,
+            component_id: pins_on_net.first().map(|pin| pin.component_id),
+            wire_id,
+            message: format!(
+                "{} is a floating DC island with no conductive path to GND.",
+                net.name
+            ),
+        });
+    }
+}
+
+fn check_open_voltage_sources(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let load_graph = dc_net_graph(netlist, false);
+    let mut source_ids = netlist
+        .pins
+        .iter()
+        .filter(|pin| {
+            matches!(
+                pin.component_kind,
+                ComponentKind::Battery | ComponentKind::VSource
+            )
+        })
+        .map(|pin| pin.component_id)
+        .collect::<Vec<_>>();
+    source_ids.sort_unstable();
+    source_ids.dedup();
+
+    for source_id in source_ids {
+        let source_pins = netlist
+            .pins
+            .iter()
+            .filter(|pin| pin.component_id == source_id)
+            .collect::<Vec<_>>();
+        let positive = source_pins
+            .iter()
+            .find(|pin| pin_is_power_positive(pin))
+            .map(|pin| pin.net_id);
+        let negative = source_pins
+            .iter()
+            .find(|pin| pin.electrical_type == ElectricalType::Ground || pin.pin_name == "-")
+            .map(|pin| pin.net_id);
+        let (Some(positive), Some(negative)) = (positive, negative) else {
+            continue;
+        };
+        if reachable_net_ids(&load_graph, [positive]).contains(&negative) {
+            continue;
+        }
+        let source = source_pins[0];
+        let wire_id = netlist
+            .wire_nets
+            .iter()
+            .filter(|(_, net_id)| **net_id == positive)
+            .map(|(wire_id, _)| *wire_id)
+            .min();
+        v.push(ErcViolation {
+            severity: ErcSeverity::Warning,
+            component_id: Some(source_id),
+            wire_id,
+            message: format!(
+                "{} {} has no closed DC load path; source current is 0 A.",
+                component_kind_short(source.component_kind),
+                source.component_label
+            ),
+        });
+    }
+}
+
+fn dc_net_graph(netlist: &CircuitNetlist, include_voltage_sources: bool) -> HashMap<usize, HashSet<usize>> {
+    let mut component_pins: HashMap<u64, Vec<&NetlistPin>> = HashMap::new();
+    for pin in &netlist.pins {
+        component_pins.entry(pin.component_id).or_default().push(pin);
+    }
+
+    let mut graph: HashMap<usize, HashSet<usize>> = HashMap::new();
+    for pins in component_pins.values() {
+        let Some(first) = pins.first() else {
+            continue;
+        };
+        if !component_can_form_dc_path(first.component_kind, &first.component_value, include_voltage_sources)
+        {
+            continue;
+        }
+        let Some((a, b)) = dc_terminal_nets(pins) else {
+            continue;
+        };
+        if a == b {
+            continue;
+        }
+        graph.entry(a).or_default().insert(b);
+        graph.entry(b).or_default().insert(a);
+    }
+    graph
+}
+
+fn component_can_form_dc_path(
+    kind: ComponentKind,
+    value: &str,
+    include_voltage_sources: bool,
+) -> bool {
+    match kind {
+        ComponentKind::Battery | ComponentKind::VSource => include_voltage_sources,
+        ComponentKind::Switch | ComponentKind::PushButton | ComponentKind::SlideSwitch => {
+            let value = value.to_ascii_lowercase();
+            !value.contains("open") && !value.contains("off")
+        }
+        ComponentKind::Resistor
+        | ComponentKind::Inductor
+        | ComponentKind::Diode
+        | ComponentKind::Led
+        | ComponentKind::ZenerDiode
+        | ComponentKind::Lamp
+        | ComponentKind::Potentiometer
+        | ComponentKind::NpnTransistor
+        | ComponentKind::PnpTransistor
+        | ComponentKind::Nmosfet
+        | ComponentKind::Pmosfet
+        | ComponentKind::VoltageReg
+        | ComponentKind::Fuse
+        | ComponentKind::Relay
+        | ComponentKind::DcMotor
+        | ComponentKind::Transformer
+        | ComponentKind::Thermistor
+        | ComponentKind::Varistor
+        | ComponentKind::SchottkyDiode
+        | ComponentKind::TvsDiode
+        | ComponentKind::Phototransistor
+        | ComponentKind::Ammeter => true,
+        _ => false,
+    }
+}
+
+fn dc_terminal_nets(pins: &[&NetlistPin]) -> Option<(usize, usize)> {
+    let by_name = |name: &str| {
+        pins.iter()
+            .find(|pin| pin.pin_name == name)
+            .map(|pin| pin.net_id)
+    };
+    match pins.first()?.component_kind {
+        ComponentKind::NpnTransistor | ComponentKind::PnpTransistor => {
+            Some((by_name("C")?, by_name("E")?))
+        }
+        ComponentKind::Nmosfet | ComponentKind::Pmosfet => {
+            Some((by_name("D")?, by_name("S")?))
+        }
+        ComponentKind::Relay => Some((by_name("COIL+")?, by_name("COIL-")?)),
+        ComponentKind::Battery | ComponentKind::VSource => {
+            Some((by_name("+")?, by_name("-")?))
+        }
+        _ => Some((pins.first()?.net_id, pins.get(1)?.net_id)),
+    }
+}
+
+fn reachable_net_ids(
+    graph: &HashMap<usize, HashSet<usize>>,
+    starts: impl IntoIterator<Item = usize>,
+) -> HashSet<usize> {
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::new();
+    for start in starts {
+        if seen.insert(start) {
+            queue.push_back(start);
+        }
+    }
+    while let Some(net) = queue.pop_front() {
+        if let Some(neighbors) = graph.get(&net) {
+            for &neighbor in neighbors {
+                if seen.insert(neighbor) {
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+    }
+    seen
+}
+
 // ─── Helper predicates ───────────────────────────────────────────────────────
 
 fn pin_is_power_positive(pin: &NetlistPin) -> bool {
@@ -698,6 +920,74 @@ mod tests {
         nl.floating_wires.push(42);
         let v = validate_beginner_rules(&nl);
         assert!(v.iter().any(|e| e.wire_id == Some(42)));
+    }
+
+    #[test]
+    fn reports_floating_dc_island() {
+        let mut gnd = make_pin(
+            1,
+            "GND1",
+            ComponentKind::Ground,
+            "0V",
+            "GND",
+            0,
+            true,
+        );
+        gnd.electrical_type = ElectricalType::Ground;
+        let nl = CircuitNetlist {
+            nets: vec![make_net(0, "GND"), make_net(1, "FLOAT")],
+            pins: vec![
+                gnd,
+                make_pin(2, "R1", ComponentKind::Resistor, "1k", "A", 1, true),
+            ],
+            wire_nets: [(10, 0), (11, 1)].into_iter().collect(),
+            floating_wires: Vec::new(),
+            isolated_wires: Vec::new(),
+        };
+
+        let violations = validate_beginner_rules(&nl);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.message.contains("floating DC island"))
+        );
+    }
+
+    #[test]
+    fn reports_voltage_source_without_closed_load_path() {
+        let mut positive = make_pin(
+            1,
+            "BAT1",
+            ComponentKind::Battery,
+            "5V",
+            "+",
+            1,
+            true,
+        );
+        positive.electrical_type = ElectricalType::PowerIn;
+        let mut negative = make_pin(
+            1,
+            "BAT1",
+            ComponentKind::Battery,
+            "5V",
+            "-",
+            0,
+            false,
+        );
+        negative.electrical_type = ElectricalType::Ground;
+        let nl = CircuitNetlist {
+            nets: vec![make_net(0, "GND"), make_net(1, "VCC")],
+            pins: vec![positive, negative],
+            wire_nets: [(10, 1)].into_iter().collect(),
+            floating_wires: Vec::new(),
+            isolated_wires: vec![10],
+        };
+
+        let violations = validate_beginner_rules(&nl);
+        assert!(violations.iter().any(|violation| {
+            violation.message.contains("no closed DC load path")
+                && violation.message.contains("0 A")
+        }));
     }
 
     // ── OLED SDA/SCL swap ────────────────────────────────────────────────

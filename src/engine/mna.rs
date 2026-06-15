@@ -1756,6 +1756,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn five_volts_across_one_kilohm_matches_ohms_law_and_power() {
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "5V");
+        let resistor = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(200.0, 0.0),
+            "R1",
+            "1k",
+        );
+        let bat_pins = component_pin_defs(&bat);
+        let resistor_pins = component_pin_defs(&resistor);
+        let bat_p = bat_pins.iter().find(|pin| pin.label == "+").unwrap().pos;
+        let bat_n = bat_pins.iter().find(|pin| pin.label == "-").unwrap().pos;
+        let r_a = resistor_pins
+            .iter()
+            .find(|pin| pin.label == "A")
+            .unwrap()
+            .pos;
+        let r_b = resistor_pins
+            .iter()
+            .find(|pin| pin.label == "B")
+            .unwrap()
+            .pos;
+        let wires = vec![
+            lseg(
+                10,
+                vec![
+                    bat_p,
+                    Pos2::new(bat_p.x, -40.0),
+                    Pos2::new(r_a.x, -40.0),
+                    r_a,
+                ],
+            ),
+            lseg(
+                11,
+                vec![
+                    r_b,
+                    Pos2::new(r_b.x, 40.0),
+                    Pos2::new(bat_n.x, 40.0),
+                    bat_n,
+                ],
+            ),
+        ];
+
+        let dc = solve_dc(&[bat, resistor], &wires).expect("resistive circuit should solve");
+        let voltage = dc.component_voltage[&2];
+        let current = dc.branch_current[&2];
+        let power = dc.component_power[&2];
+        assert!((voltage.abs() - 5.0).abs() < 1.0e-9);
+        assert!((current.abs() - 0.005).abs() < 1.0e-9);
+        assert!((power - 0.025).abs() < 1.0e-9);
+        assert!((power - voltage.powi(2) / 1_000.0).abs() < 1.0e-9);
+        assert!((power - current.powi(2) * 1_000.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn open_source_wire_has_voltage_but_zero_current() {
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "5V");
+        let pins = component_pin_defs(&bat);
+        let positive = pins.iter().find(|pin| pin.label == "+").unwrap().pos;
+        let wire = lseg(
+            10,
+            vec![positive, Pos2::new(positive.x + 120.0, positive.y)],
+        );
+
+        let dc = solve_dc(&[bat], &[wire]).expect("open voltage source should have an operating point");
+        assert!((dc.wire_voltage[&10] - 5.0).abs() < 1.0e-9);
+        assert!(dc.wire_current[&10].abs() < 1.0e-12);
+        assert!(dc.branch_current[&1].abs() < 1.0e-12);
+    }
+
     // ── No GND → solver returns None ─────────────────────────────────────
 
     #[test]
@@ -1837,6 +1909,65 @@ mod tests {
         assert!(
             current.abs() < 1.0e-6,
             "Reverse-biased LED should be nearly open, got {current} A"
+        );
+    }
+
+    #[test]
+    fn forward_led_current_matches_piecewise_model() {
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "5V");
+        let resistor = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(160.0, -80.0),
+            "R1",
+            "330",
+        );
+        let led = comp(3, ComponentKind::Led, Pos2::new(320.0, -80.0), "LED1", "red");
+        let bat_pins = component_pin_defs(&bat);
+        let resistor_pins = component_pin_defs(&resistor);
+        let led_pins = component_pin_defs(&led);
+        let bat_p = bat_pins.iter().find(|pin| pin.label == "+").unwrap().pos;
+        let bat_n = bat_pins.iter().find(|pin| pin.label == "-").unwrap().pos;
+        let r_a = resistor_pins
+            .iter()
+            .find(|pin| pin.label == "A")
+            .unwrap()
+            .pos;
+        let r_b = resistor_pins
+            .iter()
+            .find(|pin| pin.label == "B")
+            .unwrap()
+            .pos;
+        let led_a = led_pins.iter().find(|pin| pin.label == "A").unwrap().pos;
+        let led_k = led_pins.iter().find(|pin| pin.label == "B").unwrap().pos;
+        let wires = vec![
+            lseg(
+                10,
+                vec![
+                    bat_p,
+                    Pos2::new(bat_p.x, -140.0),
+                    Pos2::new(r_a.x, -140.0),
+                    r_a,
+                ],
+            ),
+            lseg(11, vec![r_b, led_a]),
+            lseg(
+                12,
+                vec![
+                    led_k,
+                    Pos2::new(led_k.x, 60.0),
+                    Pos2::new(bat_n.x, 60.0),
+                    bat_n,
+                ],
+            ),
+        ];
+
+        let dc = solve_dc(&[bat, resistor, led], &wires).expect("forward LED circuit should solve");
+        let current = dc.branch_current[&3].abs();
+        let expected = (5.0 - 2.0) / (330.0 + 20.0);
+        assert!(
+            (current - expected).abs() < 0.0002,
+            "Expected about {expected} A, got {current} A"
         );
     }
 

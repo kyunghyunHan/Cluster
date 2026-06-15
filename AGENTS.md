@@ -136,7 +136,7 @@ Notes:
 - DC MNA 분기 전류에서 배선 전류 크기와 방향을 계산해 표시한다.
 - 다이오드/LED는 역바이어스에서 누설 수준으로 처리하고 순방향 전압 강하를 적용한다.
 - NMOS/PMOS는 Vgs/Vsg 임계전압에 따라 ON/OFF 저항을 전환한다.
-- floating pin/net, 아무 핀에도 연결되지 않은 배선, 한 핀에만 연결된 고립 배선을 ERC로 경고한다.
+- floating pin/net, GND DC 경로가 없는 voltage island, open voltage source, 아무 핀에도 연결되지 않은 배선, 한 핀에만 연결된 고립 배선을 ERC로 경고한다.
 
 향후 시뮬레이션 방향:
 - 핀 역할(VCC/GND/SDA/SCL/GPIO)을 구조화한다.
