@@ -5,11 +5,13 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Default, Clone)]
 pub(crate) struct Simulation {
+    pub(crate) status: SimulationStatus,
     pub(crate) closed: bool,
     pub(crate) shorted: bool,
     pub(crate) energized_components: HashSet<u64>,
     pub(crate) energized_wires: HashSet<u64>,
     pub(crate) summary: String,
+    pub(crate) explanation: String,
     #[allow(dead_code)]
     pub(crate) details: Vec<String>,
     pub(crate) voltage: Option<f32>,
@@ -20,6 +22,14 @@ pub(crate) struct Simulation {
     pub(crate) dc_error: Option<mna::SimulationError>,
     pub(crate) ac: Option<mna::AcResult>,
     pub(crate) erc: Vec<ErcViolation>,
+}
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SimulationStatus {
+    Ok,
+    #[default]
+    Warning,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -139,6 +139,7 @@ Notes:
 - floating pin/net, GND DC 경로가 없는 voltage island, open voltage source, 아무 핀에도 연결되지 않은 배선, 한 핀에만 연결된 고립 배선을 ERC로 경고한다.
 - 부품별 simulation support, voltage/current 제한, driver/current-limit 요구사항을 metadata로 관리한다.
 - DC solver는 구조화된 오류와 KCL residual, dissipating/supplying power role을 제공한다.
+- 시뮬레이션 결과는 OK/Warning/Failed 상태와 초보자용 설명 문장을 포함한다.
 - inspector는 부품 model/support, 핀별 net/전압, wire net/current/open 상태를 표시한다.
 - ESP/Pico GPIO 5V, GPIO 직접 부하, relay flyback diode, I2C pull-up 누락을 ERC로 경고한다.
 - 한 polyline 안에서 분기 전류가 달라지면 잘못된 단일 전류 화살표를 표시하지 않는다.
@@ -168,6 +169,7 @@ Notes:
 - PNG export를 추가할 때도 SVG export 품질을 떨어뜨리지 않는다.
 - SPICE `.cir`, BOM CSV, Arduino starter sketch export는 회귀 테스트로 검증한다.
 - README 예제 이미지는 앱의 SVG exporter로 재생성할 수 있어야 한다.
+- CI는 `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, release build를 실행한다.
 
 ## Release Readiness
 

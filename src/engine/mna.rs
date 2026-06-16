@@ -55,6 +55,7 @@ pub enum SimulationError {
     SingularMatrix,
     FloatingNode,
     VoltageSourceConflict,
+    VoltageSourceLoop,
     ShortCircuit,
     UnsupportedComponent,
 }
@@ -66,6 +67,7 @@ impl std::fmt::Display for SimulationError {
             SimulationError::SingularMatrix => "Singular circuit matrix",
             SimulationError::FloatingNode => "Floating node or empty DC network",
             SimulationError::VoltageSourceConflict => "Conflicting ideal voltage sources",
+            SimulationError::VoltageSourceLoop => "Ideal voltage source loop",
             SimulationError::ShortCircuit => "Ideal source short circuit",
             SimulationError::UnsupportedComponent => "Unsupported component model",
         };
@@ -330,6 +332,38 @@ impl Mna {
 struct SolveSolution {
     x: Vec<f64>,
     max_kcl_residual: f64,
+}
+
+fn validate_voltage_sources(vs: &[VsEntry]) -> Result<(), SimulationError> {
+    let mut constraints: HashMap<(usize, usize), f64> = HashMap::new();
+    for source in vs {
+        if source.pos == source.neg {
+            if source.v.abs() > 1.0e-12 {
+                return Err(SimulationError::VoltageSourceConflict);
+            }
+            continue;
+        }
+
+        let key = if source.pos < source.neg {
+            (source.pos, source.neg)
+        } else {
+            (source.neg, source.pos)
+        };
+        let signed_v = if source.pos < source.neg {
+            source.v
+        } else {
+            -source.v
+        };
+        if let Some(existing) = constraints.get(&key) {
+            if (existing - signed_v).abs() <= 1.0e-9 {
+                return Err(SimulationError::VoltageSourceLoop);
+            }
+            return Err(SimulationError::VoltageSourceConflict);
+        } else {
+            constraints.insert(key, signed_v);
+        }
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -816,7 +850,11 @@ pub fn solve_dc_detailed(
                     .find(|p| p.role == PinRole::Ground || p.label == "-")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of))
                     .unwrap_or(0);
-                if pos_n != neg_n {
+                if pos_n == neg_n {
+                    if vv.abs() > 1.0e-12 {
+                        return Err(SimulationError::VoltageSourceConflict);
+                    }
+                } else {
                     vs.push(VsEntry {
                         id: comp.id,
                         pos: pos_n,
@@ -1045,6 +1083,7 @@ pub fn solve_dc_detailed(
             });
         }
     }
+    validate_voltage_sources(&vs)?;
     let total_nodes = num_nodes + bjt_entries.len();
 
     // ── 6. Build MNA matrix ──────────────────────────────────────────────
@@ -2347,14 +2386,34 @@ mod tests {
         let gate = mos_pins.iter().find(|pin| pin.label == "G").unwrap().pos;
         let drain = mos_pins.iter().find(|pin| pin.label == "D").unwrap().pos;
         let source = mos_pins.iter().find(|pin| pin.label == "S").unwrap().pos;
-        let gate_source = if gate_high { bat_p } else { bat_n };
+        let gate_wire = if gate_high {
+            lseg(
+                13,
+                vec![
+                    bat_p,
+                    Pos2::new(bat_p.x, -80.0),
+                    Pos2::new(gate.x, -80.0),
+                    gate,
+                ],
+            )
+        } else {
+            lseg(
+                13,
+                vec![
+                    bat_n,
+                    Pos2::new(bat_n.x, 80.0),
+                    Pos2::new(gate.x, 80.0),
+                    gate,
+                ],
+            )
+        };
         (
             vec![bat, resistor, mos],
             vec![
                 l_wire(10, bat_p, r_a),
                 l_wire(11, r_b, drain),
                 l_wire(12, source, bat_n),
-                l_wire(13, gate_source, gate),
+                gate_wire,
             ],
             3,
         )
@@ -2363,7 +2422,8 @@ mod tests {
     #[test]
     fn nmos_gate_low_is_off() {
         let (components, wires, mos_id) = mosfet_switch_circuit(false);
-        let dc = solve_dc(&components, &wires).expect("NMOS off circuit should solve");
+        let dc = solve_dc_detailed(&components, &wires)
+            .expect("NMOS off circuit should solve with leakage resistance");
         let current = dc.branch_current.get(&mos_id).copied().unwrap_or(0.0);
         assert!(
             current.abs() < 1.0e-6,
@@ -2473,6 +2533,151 @@ mod tests {
             (r2_v - 3.0).abs() < 0.2,
             "Expected R2 voltage ≈ 3V, got {r2_v:.3}V"
         );
+    }
+
+    #[test]
+    fn current_source_into_one_kilohm_sets_ohms_law_voltage() {
+        let src = comp(1, ComponentKind::ISource, Pos2::new(0.0, 0.0), "I1", "10mA");
+        let resistor = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(200.0, 0.0),
+            "R1",
+            "1k",
+        );
+        let src_pins = component_pin_defs(&src);
+        let resistor_pins = component_pin_defs(&resistor);
+        let src_p = src_pins.iter().find(|pin| pin.label == "+").unwrap().pos;
+        let src_n = src_pins.iter().find(|pin| pin.label == "-").unwrap().pos;
+        let r_a = resistor_pins
+            .iter()
+            .find(|pin| pin.label == "A")
+            .unwrap()
+            .pos;
+        let r_b = resistor_pins
+            .iter()
+            .find(|pin| pin.label == "B")
+            .unwrap()
+            .pos;
+        let wires = vec![
+            lseg(10, vec![src_p, Pos2::new(src_p.x, -40.0), r_a]),
+            lseg(11, vec![r_b, Pos2::new(r_b.x, 40.0), src_n]),
+        ];
+
+        let dc = solve_dc_detailed(&[src, resistor], &wires).unwrap();
+
+        let voltage = dc.component_voltage[&2];
+        let current = dc.branch_current[&2];
+        let power = dc.component_power[&2];
+        assert!(
+            (voltage.abs() - 10.0).abs() < 1.0e-6,
+            "expected 10V across 1k from 10mA source, got {voltage}V"
+        );
+        assert!(
+            (current.abs() - 0.010).abs() < 1.0e-9,
+            "expected 10mA through 1k, got {current}A"
+        );
+        assert!(
+            (power - 0.100).abs() < 1.0e-6,
+            "expected 100mW, got {power}W"
+        );
+    }
+
+    #[test]
+    fn capacitor_is_open_in_dc_operating_point() {
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "5V");
+        let cap = comp(
+            2,
+            ComponentKind::Capacitor,
+            Pos2::new(180.0, 0.0),
+            "C1",
+            "100nF",
+        );
+        let bat_pins = component_pin_defs(&bat);
+        let cap_pins = component_pin_defs(&cap);
+        let bat_p = bat_pins.iter().find(|pin| pin.label == "+").unwrap().pos;
+        let bat_n = bat_pins.iter().find(|pin| pin.label == "-").unwrap().pos;
+        let c_a = cap_pins.iter().find(|pin| pin.label == "A").unwrap().pos;
+        let c_b = cap_pins.iter().find(|pin| pin.label == "B").unwrap().pos;
+        let wires = vec![
+            lseg(10, vec![bat_p, Pos2::new(bat_p.x, -40.0), c_a]),
+            lseg(11, vec![c_b, Pos2::new(c_b.x, 40.0), bat_n]),
+        ];
+
+        let dc = solve_dc_detailed(&[bat, cap], &wires).unwrap();
+
+        assert!(dc.branch_current.get(&2).is_none());
+        assert!(dc.branch_current[&1].abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn inductor_is_short_in_dc_operating_point() {
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "5V");
+        let inductor = comp(
+            2,
+            ComponentKind::Inductor,
+            Pos2::new(160.0, -80.0),
+            "L1",
+            "10uH",
+        );
+        let resistor = comp(
+            3,
+            ComponentKind::Resistor,
+            Pos2::new(320.0, -80.0),
+            "R1",
+            "1k",
+        );
+        let bat_pins = component_pin_defs(&bat);
+        let ind_pins = component_pin_defs(&inductor);
+        let resistor_pins = component_pin_defs(&resistor);
+        let bat_p = bat_pins.iter().find(|pin| pin.label == "+").unwrap().pos;
+        let bat_n = bat_pins.iter().find(|pin| pin.label == "-").unwrap().pos;
+        let l_a = ind_pins.iter().find(|pin| pin.label == "A").unwrap().pos;
+        let l_b = ind_pins.iter().find(|pin| pin.label == "B").unwrap().pos;
+        let r_a = resistor_pins
+            .iter()
+            .find(|pin| pin.label == "A")
+            .unwrap()
+            .pos;
+        let r_b = resistor_pins
+            .iter()
+            .find(|pin| pin.label == "B")
+            .unwrap()
+            .pos;
+        let wires = vec![
+            lseg(10, vec![bat_p, Pos2::new(bat_p.x, -140.0), l_a]),
+            lseg(11, vec![l_b, r_a]),
+            lseg(12, vec![r_b, Pos2::new(r_b.x, 60.0), bat_n]),
+        ];
+
+        let dc = solve_dc_detailed(&[bat, inductor, resistor], &wires).unwrap();
+
+        assert!((dc.branch_current[&3].abs() - 0.005).abs() < 1.0e-9);
+        assert!((dc.component_voltage[&3].abs() - 5.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn conflicting_parallel_voltage_sources_are_reported() {
+        let bat1 = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "5V");
+        let bat2 = comp(
+            2,
+            ComponentKind::Battery,
+            Pos2::new(180.0, 0.0),
+            "BAT2",
+            "9V",
+        );
+        let b1_pins = component_pin_defs(&bat1);
+        let b2_pins = component_pin_defs(&bat2);
+        let b1_p = b1_pins.iter().find(|pin| pin.label == "+").unwrap().pos;
+        let b1_n = b1_pins.iter().find(|pin| pin.label == "-").unwrap().pos;
+        let b2_p = b2_pins.iter().find(|pin| pin.label == "+").unwrap().pos;
+        let b2_n = b2_pins.iter().find(|pin| pin.label == "-").unwrap().pos;
+        let wires = vec![lseg(10, vec![b1_p, b2_p]), lseg(11, vec![b1_n, b2_n])];
+
+        assert!(matches!(
+            solve_dc_detailed(&[bat1, bat2], &wires),
+            Err(SimulationError::VoltageSourceConflict)
+        ));
     }
 
     // ── SI value parser ───────────────────────────────────────────────────

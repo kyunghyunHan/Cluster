@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use super::pin::{NetlistPin, PinRef};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Net {

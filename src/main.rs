@@ -1,3 +1,18 @@
+#![allow(
+    clippy::collapsible_else_if,
+    clippy::collapsible_if,
+    clippy::for_kv_map,
+    clippy::get_first,
+    clippy::if_same_then_else,
+    clippy::iter_cloned_collect,
+    clippy::needless_borrow,
+    clippy::needless_range_loop,
+    clippy::redundant_closure,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::wrong_self_convention
+)]
+
 mod engine;
 mod export;
 mod model;
@@ -9,7 +24,7 @@ use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use engine::mna;
 use engine::netlist::build_circuit_netlist;
 use engine::simulation as simulation_engine;
-use engine::simulation::{Conductance, Simulation};
+use engine::simulation::{Conductance, Simulation, SimulationStatus};
 use engine::validation::{
     ErcSeverity, ErcViolation, pin_is_controller_scl, pin_is_controller_sda, pin_is_i2c_named,
     pin_is_microcontroller_gpio, validate_beginner_rules,
@@ -2485,6 +2500,14 @@ impl eframe::App for CircuitApp {
                             if self.simulate {
                                 ui.add_space(4.0);
                                 status_pill(ui, &simulation.summary, simulation_tone(&simulation));
+                                metric_row(ui, "Confidence", simulation_status_label(simulation.status));
+                                if !simulation.explanation.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&simulation.explanation)
+                                            .size(10.5)
+                                            .color(Color32::from_rgb(156, 166, 176)),
+                                    );
+                                }
                                 ui.add_space(4.0);
                                 // DC operating point from MNA
                                 if let Some(dc) = &simulation.dc {
@@ -5289,8 +5312,8 @@ fn closest_point_on_segment(p: Pos2, a: Pos2, b: Pos2) -> Pos2 {
 #[derive(Debug, Clone, Copy)]
 enum StatusTone {
     Neutral,
-    Muted,
     Live,
+    Warning,
     Error,
 }
 
@@ -5398,15 +5421,15 @@ fn status_pill(ui: &mut egui::Ui, text: &str, tone: StatusTone) {
             Color32::from_rgb(58, 68, 78),
             Color32::from_rgb(210, 218, 226),
         ),
-        StatusTone::Muted => (
-            Color32::from_rgb(28, 31, 36),
-            Color32::from_rgb(62, 68, 76),
-            Color32::from_rgb(152, 162, 172),
-        ),
         StatusTone::Live => (
             Color32::from_rgb(54, 42, 22),
             Color32::from_rgb(132, 92, 34),
             Color32::from_rgb(255, 198, 92),
+        ),
+        StatusTone::Warning => (
+            Color32::from_rgb(54, 45, 22),
+            Color32::from_rgb(150, 115, 38),
+            Color32::from_rgb(255, 215, 110),
         ),
         StatusTone::Error => (
             Color32::from_rgb(58, 30, 30),
@@ -5431,10 +5454,33 @@ fn simulation_tone(simulation: &Simulation) -> StatusTone {
         .any(|e| e.severity == ErcSeverity::Error);
     if simulation.shorted || has_erc_error {
         StatusTone::Error
-    } else if simulation.closed {
-        StatusTone::Live
     } else {
-        StatusTone::Muted
+        match simulation.status {
+            SimulationStatus::Ok => StatusTone::Live,
+            SimulationStatus::Warning => StatusTone::Warning,
+            SimulationStatus::Failed => StatusTone::Error,
+        }
+    }
+}
+
+fn simulation_status_label(status: SimulationStatus) -> &'static str {
+    match status {
+        SimulationStatus::Ok => "OK",
+        SimulationStatus::Warning => "Warning",
+        SimulationStatus::Failed => "Failed",
+    }
+}
+
+fn simulation_status_from_solver(
+    shorted: bool,
+    dc_error: Option<&mna::SimulationError>,
+) -> SimulationStatus {
+    if shorted {
+        SimulationStatus::Failed
+    } else if dc_error.is_some() {
+        SimulationStatus::Warning
+    } else {
+        SimulationStatus::Ok
     }
 }
 
@@ -5442,7 +5488,8 @@ fn simulation_text_color(simulation: &Simulation) -> Color32 {
     match simulation_tone(simulation) {
         StatusTone::Error => Color32::from_rgb(255, 128, 112),
         StatusTone::Live => Color32::from_rgb(255, 198, 92),
-        StatusTone::Neutral | StatusTone::Muted => Color32::from_rgb(152, 162, 172),
+        StatusTone::Warning => Color32::from_rgb(255, 215, 110),
+        StatusTone::Neutral => Color32::from_rgb(152, 162, 172),
     }
 }
 
@@ -6270,7 +6317,11 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
             Err(error) => (None, Some(error)),
         };
         return Simulation {
+            status: SimulationStatus::Warning,
             summary: "No source or return".to_string(),
+            explanation:
+                "Add a voltage/current source and a return path to GND before DC current can flow."
+                    .to_string(),
             details,
             component_warnings,
             dc,
@@ -6289,7 +6340,11 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
             Err(error) => (None, Some(error)),
         };
         return Simulation {
+            status: SimulationStatus::Warning,
             summary: "Open circuit".to_string(),
+            explanation:
+                "Voltage can exist on open nodes, but current is 0 A until a closed path reaches the return/GND node."
+                    .to_string(),
             details,
             component_warnings,
             dc,
@@ -6473,6 +6528,7 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
     }
 
     Simulation {
+        status: simulation_status_from_solver(shorted, dc_error.as_ref()),
         closed: true,
         shorted,
         energized_components,
@@ -6481,6 +6537,13 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
             "Short circuit".to_string()
         } else {
             "Current flowing".to_string()
+        },
+        explanation: if shorted {
+            "Source positive reaches return/GND without enough load resistance, so the circuit is unsafe and current arrows are suppressed.".to_string()
+        } else if dc_error.is_some() {
+            "Connectivity shows a closed path, but the DC solver could not fully trust the numeric operating point. Check floating nodes or ideal-source conflicts.".to_string()
+        } else {
+            "A closed path exists from the source through at least one load and back to return/GND, so DC current can flow.".to_string()
         },
         details,
         voltage,
@@ -7960,6 +8023,10 @@ fn draw_sim_summary(
         if simulation.shorted {
             v.push("⚡ SHORT CIRCUIT".to_string());
         } else if simulation.closed {
+            v.push(format!(
+                "Status: {}",
+                simulation_status_label(simulation.status)
+            ));
             if let Some(dc) = &simulation.dc {
                 let total_p: f64 = dc.component_power.values().sum();
                 if total_p > 1e-12 {
@@ -7979,6 +8046,9 @@ fn draw_sim_summary(
             }
         } else {
             v.push("Sim: open circuit".to_string());
+            if !simulation.explanation.is_empty() {
+                v.push(simulation.explanation.clone());
+            }
         }
         v
     };
@@ -8007,8 +8077,10 @@ fn draw_sim_summary(
             1.0,
             if simulation.shorted {
                 Color32::from_rgb(220, 60, 60)
-            } else if simulation.closed {
+            } else if simulation.status == SimulationStatus::Ok {
                 Color32::from_rgb(60, 180, 100)
+            } else if simulation.status == SimulationStatus::Warning {
+                Color32::from_rgb(220, 170, 70)
             } else {
                 Color32::from_rgb(80, 90, 100)
             },
@@ -8025,8 +8097,10 @@ fn draw_sim_summary(
             font.clone(),
             if simulation.shorted {
                 Color32::from_rgb(255, 100, 100)
-            } else if simulation.closed {
+            } else if simulation.status == SimulationStatus::Ok {
                 Color32::from_rgb(130, 230, 160)
+            } else if simulation.status == SimulationStatus::Warning {
+                Color32::from_rgb(255, 210, 100)
             } else {
                 Color32::from_rgb(140, 150, 165)
             },
@@ -8119,7 +8193,11 @@ fn draw_title_block(
     };
     mono(
         53.0,
-        format!("Status  {}", simulation.summary),
+        format!(
+            "Status  {} / {}",
+            simulation.summary,
+            simulation_status_label(simulation.status)
+        ),
         status_color,
     );
 
@@ -13989,6 +14067,8 @@ mod tests {
         let sim = analyze_circuit(&app.components, &app.wires);
 
         assert_eq!(sim.summary, "Current flowing", "{:?}", sim.details);
+        assert_eq!(sim.status, SimulationStatus::Ok);
+        assert!(sim.explanation.contains("closed path"));
         assert!(sim.energized_components.contains(&resistor));
         assert!(sim.energized_components.contains(&led));
         assert_eq!(sim.energized_wires.len(), app.wires.len());
@@ -14094,6 +14174,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(sim.summary, "Open circuit", "{:?}", sim.details);
+        assert_eq!(sim.status, SimulationStatus::Warning);
+        assert!(sim.explanation.contains("0 A"));
         assert!(!sim.energized_components.contains(&led_id));
     }
 
@@ -14141,6 +14223,8 @@ mod tests {
 
         assert!(sim.shorted, "{:?}", sim.details);
         assert_eq!(sim.summary, "Short circuit");
+        assert_eq!(sim.status, SimulationStatus::Failed);
+        assert!(sim.explanation.contains("unsafe"));
         assert!(sim.erc.iter().any(|violation| {
             violation.severity == ErcSeverity::Error
                 && (violation.message.contains("Short")

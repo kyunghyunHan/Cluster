@@ -67,7 +67,10 @@ pub(crate) fn repair_saved_page(
             id = repair_id;
             repair_id += 1;
             used_ids.insert(id);
-            load_notes.push(format!("Reassigned duplicate component id for {}.", sc.label));
+            load_notes.push(format!(
+                "Reassigned duplicate component id for {}.",
+                sc.label
+            ));
         }
         components.push(Component {
             id,

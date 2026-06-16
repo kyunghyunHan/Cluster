@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use egui::Vec2;
 use super::component::{Component, ComponentKind};
 use super::wire::Wire;
+use egui::Vec2;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct Counters {

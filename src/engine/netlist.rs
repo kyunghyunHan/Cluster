@@ -281,8 +281,20 @@ mod tests {
 
     #[test]
     fn builds_net_from_wire_and_component_pins() {
-        let r1 = comp(1, ComponentKind::Resistor, Pos2::new(100.0, 100.0), "R1", "1k");
-        let led = comp(2, ComponentKind::Led, Pos2::new(220.0, 100.0), "LED1", "red");
+        let r1 = comp(
+            1,
+            ComponentKind::Resistor,
+            Pos2::new(100.0, 100.0),
+            "R1",
+            "1k",
+        );
+        let led = comp(
+            2,
+            ComponentKind::Led,
+            Pos2::new(220.0, 100.0),
+            "LED1",
+            "red",
+        );
         let r1_b_pos = component_pin_defs(&r1)
             .into_iter()
             .find(|pin| pin.label == "B")
@@ -296,8 +308,16 @@ mod tests {
         let w = wire(3, vec![r1_b_pos, led_a_pos]);
 
         let netlist = build_circuit_netlist(&[r1, led], &[w]);
-        let r1_b = netlist.pins.iter().find(|p| p.component_label == "R1" && p.pin_name == "B").unwrap();
-        let led_a = netlist.pins.iter().find(|p| p.component_label == "LED1" && p.pin_name == "A").unwrap();
+        let r1_b = netlist
+            .pins
+            .iter()
+            .find(|p| p.component_label == "R1" && p.pin_name == "B")
+            .unwrap();
+        let led_a = netlist
+            .pins
+            .iter()
+            .find(|p| p.component_label == "LED1" && p.pin_name == "A")
+            .unwrap();
 
         assert_eq!(r1_b.net_id, led_a.net_id);
         assert_eq!(netlist.wire_nets.len(), 1);
@@ -307,7 +327,13 @@ mod tests {
 
     #[test]
     fn ground_symbol_names_net_gnd() {
-        let gnd = comp(1, ComponentKind::Ground, Pos2::new(100.0, 200.0), "GND1", "0V");
+        let gnd = comp(
+            1,
+            ComponentKind::Ground,
+            Pos2::new(100.0, 200.0),
+            "GND1",
+            "0V",
+        );
         let netlist = build_circuit_netlist(&[gnd], &[]);
         assert!(netlist.nets.iter().any(|net| net.name == "GND"));
     }
@@ -316,12 +342,32 @@ mod tests {
 
     #[test]
     fn isolated_components_have_separate_nets() {
-        let r1 = comp(1, ComponentKind::Resistor, Pos2::new(100.0, 100.0), "R1", "1k");
-        let r2 = comp(2, ComponentKind::Resistor, Pos2::new(400.0, 100.0), "R2", "2k");
+        let r1 = comp(
+            1,
+            ComponentKind::Resistor,
+            Pos2::new(100.0, 100.0),
+            "R1",
+            "1k",
+        );
+        let r2 = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(400.0, 100.0),
+            "R2",
+            "2k",
+        );
         let netlist = build_circuit_netlist(&[r1, r2], &[]);
 
-        let r1_a = netlist.pins.iter().find(|p| p.component_label == "R1" && p.pin_name == "A").unwrap();
-        let r2_a = netlist.pins.iter().find(|p| p.component_label == "R2" && p.pin_name == "A").unwrap();
+        let r1_a = netlist
+            .pins
+            .iter()
+            .find(|p| p.component_label == "R1" && p.pin_name == "A")
+            .unwrap();
+        let r2_a = netlist
+            .pins
+            .iter()
+            .find(|p| p.component_label == "R2" && p.pin_name == "A")
+            .unwrap();
 
         assert_ne!(r1_a.net_id, r2_a.net_id);
     }
@@ -344,14 +390,8 @@ mod tests {
 
     #[test]
     fn crossing_wires_without_contact_point_stay_separate() {
-        let horizontal = wire(
-            1,
-            vec![Pos2::new(0.0, 100.0), Pos2::new(200.0, 100.0)],
-        );
-        let vertical = wire(
-            2,
-            vec![Pos2::new(100.0, 0.0), Pos2::new(100.0, 200.0)],
-        );
+        let horizontal = wire(1, vec![Pos2::new(0.0, 100.0), Pos2::new(200.0, 100.0)]);
+        let vertical = wire(2, vec![Pos2::new(100.0, 0.0), Pos2::new(100.0, 200.0)]);
 
         let netlist = build_circuit_netlist(&[], &[horizontal, vertical]);
         assert_ne!(
@@ -398,7 +438,10 @@ mod tests {
     fn floating_wire_detected() {
         let w = wire(99, vec![Pos2::new(500.0, 500.0), Pos2::new(600.0, 500.0)]);
         let netlist = build_circuit_netlist(&[], &[w]);
-        assert!(netlist.floating_wires.contains(&99), "Free-standing wire should be floating");
+        assert!(
+            netlist.floating_wires.contains(&99),
+            "Free-standing wire should be floating"
+        );
     }
 
     #[test]
@@ -425,8 +468,20 @@ mod tests {
 
     #[test]
     fn two_gnd_symbols_share_net() {
-        let gnd1 = comp(1, ComponentKind::Ground, Pos2::new(100.0, 200.0), "GND1", "0V");
-        let gnd2 = comp(2, ComponentKind::Ground, Pos2::new(300.0, 200.0), "GND2", "0V");
+        let gnd1 = comp(
+            1,
+            ComponentKind::Ground,
+            Pos2::new(100.0, 200.0),
+            "GND1",
+            "0V",
+        );
+        let gnd2 = comp(
+            2,
+            ComponentKind::Ground,
+            Pos2::new(300.0, 200.0),
+            "GND2",
+            "0V",
+        );
         // Connect them with a wire
         // GND pin is typically at component pos offset; use a wire near (100,200)→(300,200)
         // to force the same net.  Without a wire they'd be isolated but both named GND.
@@ -440,7 +495,13 @@ mod tests {
 
     #[test]
     fn net_label_names_net() {
-        let label = comp(1, ComponentKind::NetLabel, Pos2::new(100.0, 100.0), "VCC_LBL", "VCC");
+        let label = comp(
+            1,
+            ComponentKind::NetLabel,
+            Pos2::new(100.0, 100.0),
+            "VCC_LBL",
+            "VCC",
+        );
         let netlist = build_circuit_netlist(&[label], &[]);
         assert!(netlist.nets.iter().any(|n| n.name == "VCC"));
     }

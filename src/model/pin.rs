@@ -1,5 +1,5 @@
-use egui::Pos2;
 use super::component::ComponentKind;
+use egui::Pos2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ElectricalType {
