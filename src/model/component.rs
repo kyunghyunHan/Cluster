@@ -74,8 +74,35 @@ pub(crate) struct Component {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SimulationSupport {
     DcMna,
+    DcApproximate,
     ConnectivityOnly,
     Symbolic,
+}
+
+impl SimulationSupport {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            SimulationSupport::DcMna => "DC MNA",
+            SimulationSupport::DcApproximate => "Approximate DC",
+            SimulationSupport::ConnectivityOnly => "ERC / connectivity only",
+            SimulationSupport::Symbolic => "Visual / metadata only",
+        }
+    }
+
+    pub(crate) fn warning(self) -> Option<&'static str> {
+        match self {
+            SimulationSupport::DcMna => None,
+            SimulationSupport::DcApproximate => {
+                Some("Values are educational approximations. Export SPICE for sign-off analysis.")
+            }
+            SimulationSupport::ConnectivityOnly => Some(
+                "Cluster checks wiring and ERC, but does not compute physical behavior for this part.",
+            ),
+            SimulationSupport::Symbolic => Some(
+                "This part is not simulated. Do not treat displayed wiring state as an electrical result.",
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,29 +124,29 @@ pub(crate) fn electrical_metadata(kind: ComponentKind) -> ElectricalMetadata {
         Resistor => (Some(2), DcMna, "Linear resistor"),
         Capacitor => (Some(2), DcMna, "Open circuit in DC"),
         Inductor => (Some(2), DcMna, "Short circuit in DC"),
-        Diode => (Some(2), DcMna, "Piecewise silicon diode"),
-        Led => (Some(2), DcMna, "Piecewise LED"),
-        ZenerDiode => (Some(2), DcMna, "Zener breakdown approximation"),
-        SchottkyDiode => (Some(2), DcMna, "Piecewise Schottky diode"),
-        TvsDiode => (Some(2), ConnectivityOnly, "DC clamp approximation"),
+        Diode => (Some(2), DcApproximate, "Piecewise silicon diode"),
+        Led => (Some(2), DcApproximate, "Piecewise LED"),
+        ZenerDiode => (Some(2), DcApproximate, "Zener breakdown approximation"),
+        SchottkyDiode => (Some(2), DcApproximate, "Piecewise Schottky diode"),
+        TvsDiode => (Some(2), DcApproximate, "DC clamp approximation"),
         Switch | PushButton | SlideSwitch => (Some(2), DcMna, "Ideal open/closed switch"),
         Ground => (Some(1), DcMna, "0 V reference"),
         VSource | Battery => (Some(2), DcMna, "Ideal DC voltage source"),
         ISource => (Some(2), DcMna, "Ideal DC current source"),
         Lamp => (Some(2), DcMna, "Fixed resistance load"),
         Potentiometer => (Some(3), DcMna, "Fixed wiper approximation"),
-        NpnTransistor | PnpTransistor => (Some(3), DcMna, "Linearized BJT"),
-        Nmosfet | Pmosfet => (Some(3), DcMna, "Threshold switch MOSFET"),
+        NpnTransistor | PnpTransistor => (Some(3), DcApproximate, "Linearized BJT"),
+        Nmosfet | Pmosfet => (Some(3), DcApproximate, "Threshold switch MOSFET"),
         VoltageReg => (
             Some(3),
             ConnectivityOnly,
             "Pass-through regulator approximation",
         ),
         Fuse => (Some(2), DcMna, "Low resistance fuse"),
-        Relay => (Some(5), ConnectivityOnly, "Coil + ideal contact"),
-        DcMotor => (Some(2), ConnectivityOnly, "Fixed resistance motor load"),
-        Thermistor | Varistor => (Some(2), DcMna, "Fixed resistance approximation"),
-        Phototransistor => (Some(2), ConnectivityOnly, "Fixed resistance approximation"),
+        Relay => (Some(5), DcApproximate, "Coil + ideal contact"),
+        DcMotor => (Some(2), DcApproximate, "Fixed resistance motor load"),
+        Thermistor | Varistor => (Some(2), DcApproximate, "Fixed resistance approximation"),
+        Phototransistor => (Some(2), DcApproximate, "Fixed resistance approximation"),
         Voltmeter => (Some(2), DcMna, "1 Mohm voltmeter"),
         Ammeter => (Some(2), DcMna, "1 milliohm ammeter"),
         Timer555 => (Some(8), Symbolic, "Symbolic in DC simulation"),
@@ -175,6 +202,17 @@ mod tests {
         assert_eq!(
             electrical_metadata(ComponentKind::Timer555).simulation,
             SimulationSupport::Symbolic
+        );
+        assert_eq!(
+            electrical_metadata(ComponentKind::Led).simulation,
+            SimulationSupport::DcApproximate
+        );
+        assert!(
+            electrical_metadata(ComponentKind::Led)
+                .simulation
+                .warning()
+                .unwrap()
+                .contains("approximations")
         );
     }
 }

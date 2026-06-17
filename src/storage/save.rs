@@ -3,6 +3,8 @@ use crate::model::{
     Component, ComponentKind, Counters, SavedComponent, SavedPoint, SavedWire, Wire,
 };
 use egui::Pos2;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 pub(crate) const SCHEMA_VERSION: u32 = 2;
 
@@ -146,14 +148,76 @@ fn component_kind_short_label(kind: ComponentKind) -> &'static str {
 }
 
 /// Write JSON to a file, creating a backup of the existing file first.
+///
+/// Data is written to a sibling temporary file, flushed, then atomically
+/// renamed over the target so a partial write does not corrupt the save file.
 pub(crate) fn write_with_backup(path: &str, content: &str) -> Result<(), String> {
+    let target = Path::new(path);
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.exists() {
+        return Err(format!("Save folder does not exist: {}", parent.display()));
+    }
+
     // Back up existing file before overwrite so data is never lost.
-    if std::path::Path::new(path).exists() {
+    if target.exists() {
         let backup_path = format!("{path}.bak");
         if let Err(e) = std::fs::copy(path, &backup_path) {
             // Non-fatal: log but continue.
             eprintln!("Warning: could not create backup {backup_path}: {e}");
         }
     }
-    std::fs::write(path, content).map_err(|e| e.to_string())
+
+    let tmp_path = temporary_path_for(target);
+    let result = (|| -> Result<(), String> {
+        let mut file = std::fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+        file.write_all(content.as_bytes())
+            .map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp_path, target).map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    result
+}
+
+fn temporary_path_for(target: &Path) -> PathBuf {
+    let mut tmp_path = target.to_path_buf();
+    let extension = target
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!("{extension}.tmp"))
+        .unwrap_or_else(|| "tmp".to_string());
+    tmp_path.set_extension(extension);
+    tmp_path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn write_with_backup_replaces_file_and_keeps_previous_copy() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("cluster-save-test-{unique}.json"));
+        let backup = PathBuf::from(format!("{}.bak", path.display()));
+        let tmp = temporary_path_for(&path);
+
+        write_with_backup(path.to_str().unwrap(), "old").unwrap();
+        write_with_backup(path.to_str().unwrap(), "new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "old");
+        assert!(!tmp.exists());
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(backup);
+    }
 }

@@ -2031,6 +2031,10 @@ fn repair_saved_page(
 impl eframe::App for CircuitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_app_style(ctx);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+            "Cluster Circuits{}",
+            if self.dirty { " *" } else { "" }
+        )));
 
         // ── Handle screenshot events ──────────────────────────────────────
         if self.screenshot_pending {
@@ -2806,17 +2810,14 @@ impl eframe::App for CircuitApp {
                             ui.add_space(8.0);
                             section_title(ui, "Electrical Model");
                             metric_row(ui, "Model", metadata.model_name);
-                            metric_row(
-                                ui,
-                                "Simulation",
-                                match metadata.simulation {
-                                    SimulationSupport::DcMna => "DC MNA",
-                                    SimulationSupport::ConnectivityOnly => {
-                                        "Connectivity / approximation"
-                                    }
-                                    SimulationSupport::Symbolic => "Not simulated",
-                                },
-                            );
+                            metric_row(ui, "Simulation", metadata.simulation.label());
+                            if let Some(warning) = metadata.simulation.warning() {
+                                ui.label(
+                                    egui::RichText::new(warning)
+                                        .size(10.5)
+                                        .color(Color32::from_rgb(230, 170, 90)),
+                                );
+                            }
                             if let Some(pin_count) = metadata.pin_count {
                                 metric_row(ui, "Pins", pin_count.to_string());
                             }

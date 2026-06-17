@@ -1,18 +1,18 @@
 {
   "schema_version": 2,
-  "next_id": 13,
+  "next_id": 11,
   "counters": {
-    "resistor": 0,
+    "resistor": 1,
     "capacitor": 0,
     "inductor": 0,
     "diode": 0,
-    "led": 0,
+    "led": 1,
     "zener": 0,
-    "switch": 1,
+    "switch": 0,
     "ground": 1,
-    "vsource": 0,
+    "vsource": 1,
     "isource": 0,
-    "battery": 1,
+    "battery": 0,
     "opamp": 0,
     "lamp": 0,
     "pot": 0,
@@ -21,13 +21,13 @@
     "mosfet": 0,
     "vreg": 0,
     "fuse": 0,
-    "logic_gate": 0,
+    "logic_gate": 2,
     "esp32": 0,
     "arduino": 0,
     "pico": 0,
     "breadboard": 0,
-    "relay": 1,
-    "motor": 1,
+    "relay": 0,
+    "motor": 0,
     "servo": 0,
     "oled": 0,
     "sensor": 0,
@@ -36,45 +36,54 @@
   "components": [
     {
       "id": 1,
-      "kind": "Battery",
-      "x": 170.0,
-      "y": 380.0,
+      "kind": "VSource",
+      "x": 160.0,
+      "y": 300.0,
       "rotation": 0,
-      "label": "BAT1",
-      "value": "9V"
+      "label": "V1",
+      "value": "5V"
     },
     {
       "id": 2,
-      "kind": "PushButton",
+      "kind": "LogicNot",
       "x": 360.0,
-      "y": 470.0,
+      "y": 260.0,
       "rotation": 0,
-      "label": "SW1",
-      "value": "open"
+      "label": "INV1",
+      "value": "74HC04"
     },
     {
       "id": 3,
-      "kind": "Relay",
-      "x": 560.0,
-      "y": 360.0,
+      "kind": "LogicNot",
+      "x": 500.0,
+      "y": 260.0,
       "rotation": 0,
-      "label": "K1",
-      "value": "5V coil"
+      "label": "INV2",
+      "value": "74HC04"
     },
     {
       "id": 4,
-      "kind": "DcMotor",
-      "x": 780.0,
-      "y": 280.0,
+      "kind": "Led",
+      "x": 660.0,
+      "y": 260.0,
       "rotation": 0,
-      "label": "M1",
-      "value": "6V DC"
+      "label": "LED1",
+      "value": "red"
     },
     {
       "id": 5,
+      "kind": "Resistor",
+      "x": 580.0,
+      "y": 260.0,
+      "rotation": 0,
+      "label": "R1",
+      "value": "10k"
+    },
+    {
+      "id": 6,
       "kind": "Ground",
-      "x": 780.0,
-      "y": 500.0,
+      "x": 760.0,
+      "y": 360.0,
       "rotation": 0,
       "label": "GND",
       "value": "0V"
@@ -82,36 +91,19 @@
   ],
   "wires": [
     {
-      "id": 6,
-      "points": [
-        {
-          "x": 210.0,
-          "y": 380.0
-        },
-        {
-          "x": 210.0,
-          "y": 342.0
-        },
-        {
-          "x": 520.0,
-          "y": 342.0
-        }
-      ]
-    },
-    {
       "id": 7,
       "points": [
         {
-          "x": 520.0,
-          "y": 378.0
+          "x": 200.0,
+          "y": 300.0
         },
         {
           "x": 320.0,
-          "y": 378.0
+          "y": 300.0
         },
         {
           "x": 320.0,
-          "y": 470.0
+          "y": 260.0
         }
       ]
     },
@@ -120,15 +112,11 @@
       "points": [
         {
           "x": 400.0,
-          "y": 470.0
+          "y": 260.0
         },
         {
-          "x": 780.0,
-          "y": 470.0
-        },
-        {
-          "x": 780.0,
-          "y": 480.0
+          "x": 460.0,
+          "y": 260.0
         }
       ]
     },
@@ -136,16 +124,16 @@
       "id": 9,
       "points": [
         {
-          "x": 130.0,
-          "y": 380.0
+          "x": 700.0,
+          "y": 260.0
         },
         {
-          "x": 130.0,
-          "y": 480.0
+          "x": 760.0,
+          "y": 260.0
         },
         {
-          "x": 780.0,
-          "y": 480.0
+          "x": 760.0,
+          "y": 340.0
         }
       ]
     },
@@ -153,50 +141,16 @@
       "id": 10,
       "points": [
         {
-          "x": 210.0,
-          "y": 380.0
+          "x": 120.0,
+          "y": 300.0
         },
         {
-          "x": 820.0,
-          "y": 380.0
+          "x": 120.0,
+          "y": 340.0
         },
         {
-          "x": 820.0,
-          "y": 280.0
-        }
-      ]
-    },
-    {
-      "id": 11,
-      "points": [
-        {
-          "x": 740.0,
-          "y": 280.0
-        },
-        {
-          "x": 600.0,
-          "y": 280.0
-        },
-        {
-          "x": 600.0,
-          "y": 339.84
-        }
-      ]
-    },
-    {
-      "id": 12,
-      "points": [
-        {
-          "x": 600.0,
-          "y": 360.0
-        },
-        {
-          "x": 780.0,
-          "y": 360.0
-        },
-        {
-          "x": 780.0,
-          "y": 480.0
+          "x": 760.0,
+          "y": 340.0
         }
       ]
     }
@@ -204,19 +158,19 @@
   "pages": [
     {
       "name": "Page 1",
-      "next_id": 13,
+      "next_id": 11,
       "counters": {
-        "resistor": 0,
+        "resistor": 1,
         "capacitor": 0,
         "inductor": 0,
         "diode": 0,
-        "led": 0,
+        "led": 1,
         "zener": 0,
-        "switch": 1,
+        "switch": 0,
         "ground": 1,
-        "vsource": 0,
+        "vsource": 1,
         "isource": 0,
-        "battery": 1,
+        "battery": 0,
         "opamp": 0,
         "lamp": 0,
         "pot": 0,
@@ -225,13 +179,13 @@
         "mosfet": 0,
         "vreg": 0,
         "fuse": 0,
-        "logic_gate": 0,
+        "logic_gate": 2,
         "esp32": 0,
         "arduino": 0,
         "pico": 0,
         "breadboard": 0,
-        "relay": 1,
-        "motor": 1,
+        "relay": 0,
+        "motor": 0,
         "servo": 0,
         "oled": 0,
         "sensor": 0,
@@ -240,45 +194,54 @@
       "components": [
         {
           "id": 1,
-          "kind": "Battery",
-          "x": 170.0,
-          "y": 380.0,
+          "kind": "VSource",
+          "x": 160.0,
+          "y": 300.0,
           "rotation": 0,
-          "label": "BAT1",
-          "value": "9V"
+          "label": "V1",
+          "value": "5V"
         },
         {
           "id": 2,
-          "kind": "PushButton",
+          "kind": "LogicNot",
           "x": 360.0,
-          "y": 470.0,
+          "y": 260.0,
           "rotation": 0,
-          "label": "SW1",
-          "value": "open"
+          "label": "INV1",
+          "value": "74HC04"
         },
         {
           "id": 3,
-          "kind": "Relay",
-          "x": 560.0,
-          "y": 360.0,
+          "kind": "LogicNot",
+          "x": 500.0,
+          "y": 260.0,
           "rotation": 0,
-          "label": "K1",
-          "value": "5V coil"
+          "label": "INV2",
+          "value": "74HC04"
         },
         {
           "id": 4,
-          "kind": "DcMotor",
-          "x": 780.0,
-          "y": 280.0,
+          "kind": "Led",
+          "x": 660.0,
+          "y": 260.0,
           "rotation": 0,
-          "label": "M1",
-          "value": "6V DC"
+          "label": "LED1",
+          "value": "red"
         },
         {
           "id": 5,
+          "kind": "Resistor",
+          "x": 580.0,
+          "y": 260.0,
+          "rotation": 0,
+          "label": "R1",
+          "value": "10k"
+        },
+        {
+          "id": 6,
           "kind": "Ground",
-          "x": 780.0,
-          "y": 500.0,
+          "x": 760.0,
+          "y": 360.0,
           "rotation": 0,
           "label": "GND",
           "value": "0V"
@@ -286,36 +249,19 @@
       ],
       "wires": [
         {
-          "id": 6,
-          "points": [
-            {
-              "x": 210.0,
-              "y": 380.0
-            },
-            {
-              "x": 210.0,
-              "y": 342.0
-            },
-            {
-              "x": 520.0,
-              "y": 342.0
-            }
-          ]
-        },
-        {
           "id": 7,
           "points": [
             {
-              "x": 520.0,
-              "y": 378.0
+              "x": 200.0,
+              "y": 300.0
             },
             {
               "x": 320.0,
-              "y": 378.0
+              "y": 300.0
             },
             {
               "x": 320.0,
-              "y": 470.0
+              "y": 260.0
             }
           ]
         },
@@ -324,15 +270,11 @@
           "points": [
             {
               "x": 400.0,
-              "y": 470.0
+              "y": 260.0
             },
             {
-              "x": 780.0,
-              "y": 470.0
-            },
-            {
-              "x": 780.0,
-              "y": 480.0
+              "x": 460.0,
+              "y": 260.0
             }
           ]
         },
@@ -340,16 +282,16 @@
           "id": 9,
           "points": [
             {
-              "x": 130.0,
-              "y": 380.0
+              "x": 700.0,
+              "y": 260.0
             },
             {
-              "x": 130.0,
-              "y": 480.0
+              "x": 760.0,
+              "y": 260.0
             },
             {
-              "x": 780.0,
-              "y": 480.0
+              "x": 760.0,
+              "y": 340.0
             }
           ]
         },
@@ -357,50 +299,16 @@
           "id": 10,
           "points": [
             {
-              "x": 210.0,
-              "y": 380.0
+              "x": 120.0,
+              "y": 300.0
             },
             {
-              "x": 820.0,
-              "y": 380.0
+              "x": 120.0,
+              "y": 340.0
             },
             {
-              "x": 820.0,
-              "y": 280.0
-            }
-          ]
-        },
-        {
-          "id": 11,
-          "points": [
-            {
-              "x": 740.0,
-              "y": 280.0
-            },
-            {
-              "x": 600.0,
-              "y": 280.0
-            },
-            {
-              "x": 600.0,
-              "y": 339.84
-            }
-          ]
-        },
-        {
-          "id": 12,
-          "points": [
-            {
-              "x": 600.0,
-              "y": 360.0
-            },
-            {
-              "x": 780.0,
-              "y": 360.0
-            },
-            {
-              "x": 780.0,
-              "y": 480.0
+              "x": 760.0,
+              "y": 340.0
             }
           ]
         }
