@@ -5,18 +5,20 @@
 
 ## Project Overview
 
-Cluster는 Rust + egui 기반 회로도 편집기다. 목표는 단순한 도형 그리기 앱이 아니라 `전자 회로를 빠르게 설계하고, 연결 상태를 즉시 확인하고, 공유 가능한 이미지로 내보내는 실용적인 회로도 워크벤치`다.
+Cluster는 Rust + egui 기반 ESP32/Arduino 학습 및 프로토타이핑 회로 툴이다. 목표는 KiCad를 범용으로 대체하는 것이 아니라 `Fritzing/Tinkercad처럼 직관적이면서 초보자 실수를 더 정확히 잡아주는 교육용 회로 설계 플랫폼`이다.
 
 현재 방향:
 - 저항, 커패시터, 인덕터, 다이오드, LED, 스위치, 전원, 배터리, OP AMP, 램프 지원
 - ESP32, OLED 같은 실제 전자 모듈 배치 지원
 - ESP32/OLED/Sensor는 핀 이름과 역할(VIN/3V3/GND/SDA/SCL/GPIO 등)을 가진다.
+- Breadboard View는 회로도 netlist를 읽어 ESP32/Arduino I2C 예제의 점퍼 배선을 안내한다.
 - 스냅 그리드, 90도 배선, 핀 표시, 선택/회전/삭제 지원
 - 기본 라이브 시뮬레이션: 닫힌 도통 경로가 있으면 배선과 부품을 강조
 - SVG 이미지 내보내기 지원
 
 좋은 변경의 기준:
 - 회로를 더 빨리 만들 수 있다.
+- 초보자가 실제 브레드보드 배선을 더 빨리 이해할 수 있다.
 - 부품과 핀이 더 명확하게 읽힌다.
 - 연결됨/끊김/전류 흐름 상태가 즉시 보인다.
 - 저장/내보내기 결과가 실제 문서에 쓸 수 있을 만큼 깔끔하다.
@@ -184,13 +186,14 @@ Notes:
 ## Roadmap
 
 우선순위 높은 순서:
-1. 저장/불러오기: schema version이 있는 회로 JSON 저장과 복원
-2. 더 정확한 시뮬레이션: 일부 완료 - 쇼트, 다이오드 방향성, MNA 전류/전압, 배선 전류, MOSFET gate switching 지원. 향후 Shockley/Newton-Raphson 및 MOSFET 선형/포화 영역 추가
-3. I2C/SPI/UART 신호 연결 검증: OLED SDA/SCL이 ESP32 GPIO21/22에 연결됐는지 확인
-4. 작업 속도 개선: 복제, 정렬, 그룹 이동, 키보드 단축키, undo/redo
-5. PNG 내보내기: SVG 유지 + raster export 옵션
-6. 부품 라이브러리 확장: Arduino, Raspberry Pi Pico, 릴레이, 모터, 브레드보드
-7. 샘플 회로와 템플릿: 일부 완료 - 앱 내 Lessons/Examples에 Lesson Check 패널, 전류 흐름 예제(LED, 스위치 LED, 병렬 LED, 램프, Ohm/측정기, 릴레이 모터), 문제 찾기 예제(open switch, DC capacitor block, missing return, reversed LED, short circuit, GPIO motor warning), ESP32/OLED/Sensor, Arduino LED/OLED, 모터 드라이버 예제 포함
+1. Breadboard View: 일부 완료 - ESP32/Arduino + OLED/Sensor I2C 예제의 VCC/GND/SDA/SCL 점퍼 체크와 schematic net 강조 지원. 향후 실제 점퍼 편집, 전원 레일, 핀 하이라이트, 자동 배선 보조 확장
+2. 초보자 ERC 강화: GPIO 전류 초과, LED 저항 누락, 모터/릴레이 직접 구동, 공통 GND, 입력 전용 GPIO, ADC 과전압, I2C/SPI/UART 배선 실수
+3. 실제 부품 라이브러리: ESP32 DevKit V1, Arduino Uno, Pico, SSD1306 OLED, DHT11/DHT22, PIR, DS3231, Relay Module, L298N, SG90, buzzer 등 한국어/영어 검색 지원
+4. Example Gallery와 Guided Tutorials: 일부 완료 - 앱 내 Lessons/Examples에 Lesson Check 패널, 전류 흐름 예제, 문제 찾기 예제, ESP32/OLED/Sensor, Arduino LED/OLED, 모터 드라이버 예제 포함. 향후 코드/설명/단계별 수리 힌트 확장
+5. 프로젝트 관리: `.cluster` 파일, 자동 저장, 복구, 최근 프로젝트, 프로젝트 썸네일
+6. Export: SVG/SPICE/BOM/Arduino 유지 + PNG/PDF, 가격/구매 링크 포함 BOM 확장
+7. 시각적 시뮬레이션: Oscilloscope, voltage/current graph, PWM, servo/relay animation, LED brightness visualization
+8. 고급 시뮬레이션: transient RC/RL, AC/frequency response, 선택적 ngspice 연동
 
 ## Definition Of Done
 

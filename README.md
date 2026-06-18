@@ -2,7 +2,7 @@
 
 **Beginner-friendly ESP32/Arduino circuit design with real validation and DC simulation.**
 
-Cluster is a schematic editor and circuit simulator focused on making electronics accessible to makers, students, and hobbyists who use ESP32 and Arduino boards.
+Cluster is an ESP32/Arduino learning and prototyping tool focused on making electronics accessible to makers, students, and hobbyists. It is not trying to clone KiCad; the goal is a Fritzing/Tinkercad-style workflow with stronger validation, clearer wiring guidance, and local-first project files.
 
 Cluster is designed to work offline. Circuit files stay local unless you choose
 to share or export them.
@@ -37,11 +37,24 @@ Cluster is **easier than KiCad**, **smarter than Fritzing**, and **focused on re
 - Drag-and-drop component palette with search
 - Orthogonal wire routing with T-junction detection
 - Grid snapping and zoom/pan
+- Breadboard View wiring assistant for ESP32/Arduino I2C examples
 - Multi-page schematics
 - Component labels, values, and rotation
 - Undo/redo (80-step history)
 - Copy/paste and group selection
 - Find, align, and distribute components
+
+### Breadboard View
+
+The Breadboard View is a beginner wiring assistant synced from the schematic netlist. It currently recognizes ESP32/Arduino + OLED/Sensor I2C circuits and checks the core jumpers:
+
+- ESP32 GPIO21 -> OLED/Sensor SDA
+- ESP32 GPIO22 -> OLED/Sensor SCL
+- Arduino A4 SDA -> OLED/Sensor SDA
+- Arduino A5 SCL -> OLED/Sensor SCL
+- VCC/3V3/5V and common GND rails
+
+Clicking a guided jumper highlights the matching schematic net so learners can connect the abstract schematic to the physical breadboard wiring.
 
 ### Supported Components
 - **Microcontrollers**: ESP32, ESP32-S3, ESP32-C3, Arduino Uno, Raspberry Pi Pico
@@ -98,6 +111,7 @@ arrow and reports that the current varies at the junction.
 
 ### Built-in ESP32/Arduino Lessons
 
+- Example Gallery entries are available from the left palette.
 - ESP32 + OLED with 4.7k I2C pull-ups
 - ESP32 + I2C sensor with 4.7k pull-ups
 - ESP32 button debounce and LED output
@@ -235,12 +249,16 @@ mathematically impossible, such as an ideal-source conflict.
 
 ## Roadmap
 
-- [ ] Full Arduino sketch generation from schematic
-- [ ] Breadboard view
-- [ ] Component library search by part number
-- [ ] Interactive value sliders in simulation
-- [ ] PCB layout export (KiCad format)
-- [ ] WASM web build
+- [x] Beginner ESP32/Arduino example gallery in the palette
+- [x] First Breadboard View wiring assistant for ESP32/Arduino I2C circuits
+- [ ] Full breadboard placement with jumper editing, power rails, zoom, and pin highlighting
+- [ ] Stronger beginner ERC: input-only GPIO, ADC over-voltage, I2C address conflicts, SPI/UART mistakes
+- [ ] Real part library entries for DHT11/DHT22, PIR, DS3231 RTC, relay modules, L298N, SG90, buzzer
+- [ ] Guided tutorials with step-by-step wiring, code, simulation, and repair hints
+- [ ] `.cluster` project files, recent projects, thumbnails, autosave recovery
+- [ ] PNG/PDF export and richer BOM with estimated price and purchase links
+- [ ] PWM, servo, relay, LED brightness, voltage/current graph visualization
+- [ ] Advanced transient/AC simulation and optional ngspice integration
 
 ---
 
