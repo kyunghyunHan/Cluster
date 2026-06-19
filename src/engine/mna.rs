@@ -1043,6 +1043,23 @@ pub fn solve_dc_detailed(
                     });
                 }
             }
+            // ── Buzzer: resistive load (typical ~150 Ω) ──────────────────
+            ComponentKind::Buzzer => {
+                if let (Some(a), Some(b)) = (p0, p1) {
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 150.0,
+                    });
+                }
+            }
+            // ── New sensors: not simulated in DC MNA ─────────────────────
+            ComponentKind::Dht11
+            | ComponentKind::Dht22
+            | ComponentKind::HcSr04
+            | ComponentKind::NeoPixel
+            | ComponentKind::PirSensor => {}
         }
     }
 

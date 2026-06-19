@@ -35,6 +35,11 @@ pub(crate) struct Counters {
     pub(crate) oled: usize,
     pub(crate) sensor: usize,
     pub(crate) meter: usize,
+    pub(crate) dht: usize,
+    pub(crate) hcsr04: usize,
+    pub(crate) buzzer: usize,
+    pub(crate) neopixel: usize,
+    pub(crate) pir: usize,
 }
 
 #[derive(Debug, Clone)]

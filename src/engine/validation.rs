@@ -33,6 +33,7 @@ pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolat
     check_relay_flyback_diodes(netlist, &mut v);
     check_i2c_pullups(netlist, &mut v);
     check_oled_sda_scl_swap(netlist, &mut v);
+    check_i2c_address_conflict(netlist, &mut v);
     check_missing_values(netlist, &mut v);
     check_floating_pins(netlist, &mut v);
     check_floating_dc_nets(netlist, &mut v);
@@ -624,6 +625,65 @@ fn check_floating_dc_nets(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
                 net.name
             ),
         });
+    }
+}
+
+fn check_i2c_address_conflict(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    // Map I2C address → list of (component_id, label, kind) sharing that address
+    // We identify I2C buses by finding nets that share SDA/SCL pins from the same controller.
+    // For simplicity: if two Oled components are connected to the same SDA net, they conflict (0x3C).
+    // Also check for same-kind I2C devices sharing any I2C net.
+    use std::collections::HashMap as HM;
+
+    // Collect which nets carry I2C signals
+    let mut sda_nets: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for pin in &netlist.pins {
+        if pin_is_i2c_named(&pin.pin_name) && pin.pin_name.to_uppercase().contains("SDA") {
+            sda_nets.insert(pin.net_id);
+        }
+    }
+
+    // For each I2C SDA net, collect I2C peripheral components
+    let mut net_i2c_devices: HM<usize, Vec<(u64, &str, ComponentKind)>> = HM::new();
+    for pin in &netlist.pins {
+        let is_i2c_peripheral = matches!(
+            pin.component_kind,
+            ComponentKind::Oled | ComponentKind::Sensor
+        ) && sda_nets.contains(&pin.net_id);
+        if is_i2c_peripheral {
+            net_i2c_devices
+                .entry(pin.net_id)
+                .or_default()
+                .push((pin.component_id, pin.component_label.as_str(), pin.component_kind));
+        }
+    }
+
+    for (_net_id, devices) in &net_i2c_devices {
+        // Deduplicate by component_id
+        let mut unique: Vec<(u64, &str, ComponentKind)> = Vec::new();
+        for &(id, label, kind) in devices {
+            if !unique.iter().any(|(uid, _, _)| *uid == id) {
+                unique.push((id, label, kind));
+            }
+        }
+        // Check for multiple OLEDs on the same bus (both default to 0x3C)
+        let oled_count = unique.iter().filter(|(_, _, k)| *k == ComponentKind::Oled).count();
+        if oled_count >= 2 {
+            let labels: Vec<&str> = unique
+                .iter()
+                .filter(|(_, _, k)| *k == ComponentKind::Oled)
+                .map(|(_, l, _)| *l)
+                .collect();
+            v.push(ErcViolation {
+                severity: ErcSeverity::Error,
+                component_id: unique.iter().find(|(_, _, k)| *k == ComponentKind::Oled).map(|(id, _, _)| *id),
+                wire_id: None,
+                message: format!(
+                    "I2C address conflict: {} all use default address 0x3C. Add an address jumper or use separate buses.",
+                    labels.join(", ")
+                ),
+            });
+        }
     }
 }
 

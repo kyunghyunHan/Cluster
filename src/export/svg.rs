@@ -222,6 +222,12 @@ fn component_kind_label(kind: ComponentKind) -> &'static str {
         ComponentKind::Voltmeter => "VM",
         ComponentKind::Ammeter => "AM",
         ComponentKind::TextNote => "NOTE",
+        ComponentKind::Dht11 => "DHT11",
+        ComponentKind::Dht22 => "DHT22",
+        ComponentKind::HcSr04 => "US",
+        ComponentKind::Buzzer => "BZ",
+        ComponentKind::NeoPixel => "NP",
+        ComponentKind::PirSensor => "PIR",
     }
 }
 

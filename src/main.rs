@@ -489,6 +489,26 @@ impl CircuitApp {
                 format!("AM{}", self.counters.meter)
             }
             ComponentKind::TextNote => "NOTE".to_string(),
+            ComponentKind::Dht11 | ComponentKind::Dht22 => {
+                self.counters.dht += 1;
+                format!("DHT{}", self.counters.dht)
+            }
+            ComponentKind::HcSr04 => {
+                self.counters.hcsr04 += 1;
+                format!("US{}", self.counters.hcsr04)
+            }
+            ComponentKind::Buzzer => {
+                self.counters.buzzer += 1;
+                format!("BZ{}", self.counters.buzzer)
+            }
+            ComponentKind::NeoPixel => {
+                self.counters.neopixel += 1;
+                format!("NP{}", self.counters.neopixel)
+            }
+            ComponentKind::PirSensor => {
+                self.counters.pir += 1;
+                format!("PIR{}", self.counters.pir)
+            }
         }
     }
 
@@ -550,6 +570,12 @@ impl CircuitApp {
             ComponentKind::Voltmeter => "DC".to_string(),
             ComponentKind::Ammeter => "DC".to_string(),
             ComponentKind::TextNote => "Add your note here".to_string(),
+            ComponentKind::Dht11 => "DHT11".to_string(),
+            ComponentKind::Dht22 => "DHT22".to_string(),
+            ComponentKind::HcSr04 => "HC-SR04".to_string(),
+            ComponentKind::Buzzer => "5V active".to_string(),
+            ComponentKind::NeoPixel => "WS2812B".to_string(),
+            ComponentKind::PirSensor => "HC-SR501".to_string(),
         }
     }
 
@@ -2708,7 +2734,22 @@ impl eframe::App for CircuitApp {
                                 ("Pi Pico", ComponentKind::RaspberryPiPico),
                                 ("Breadboard", ComponentKind::Breadboard),
                                 ("OLED I2C", ComponentKind::Oled),
-                                ("Sensor", ComponentKind::Sensor),
+                                ("Sensor (I2C)", ComponentKind::Sensor),
+                            ],
+                            &filter,
+                        );
+                        part_section(
+                            ui,
+                            self,
+                            "Sensors",
+                            SectionMode::Open,
+                            &[
+                                ("DHT11 Temp/Humidity", ComponentKind::Dht11),
+                                ("DHT22 Temp/Humidity", ComponentKind::Dht22),
+                                ("HC-SR04 Ultrasonic", ComponentKind::HcSr04),
+                                ("PIR Motion Sensor", ComponentKind::PirSensor),
+                                ("Buzzer", ComponentKind::Buzzer),
+                                ("NeoPixel (WS2812)", ComponentKind::NeoPixel),
                             ],
                             &filter,
                         );
@@ -3132,6 +3173,54 @@ impl eframe::App for CircuitApp {
                                 || edit_row(ui, "Value", &mut component.value)
                             {
                                 inspector_changed = true;
+                            }
+                            // ── Value quick-pick presets ──────────────────────────
+                            match component.kind {
+                                ComponentKind::Resistor => {
+                                    ui.label(egui::RichText::new("Quick values:").size(10.5).color(Color32::from_rgb(150,160,170)));
+                                    ui.horizontal_wrapped(|ui| {
+                                        for &v in &["100", "220", "330", "470", "1k", "2.2k", "4.7k", "10k", "22k", "47k", "100k", "1M"] {
+                                            if ui.small_button(v).clicked() {
+                                                component.value = v.to_string();
+                                                inspector_changed = true;
+                                            }
+                                        }
+                                    });
+                                }
+                                ComponentKind::Capacitor => {
+                                    ui.label(egui::RichText::new("Quick values:").size(10.5).color(Color32::from_rgb(150,160,170)));
+                                    ui.horizontal_wrapped(|ui| {
+                                        for &v in &["10pF", "100pF", "1nF", "10nF", "100nF", "1uF", "10uF", "100uF", "1000uF"] {
+                                            if ui.small_button(v).clicked() {
+                                                component.value = v.to_string();
+                                                inspector_changed = true;
+                                            }
+                                        }
+                                    });
+                                }
+                                ComponentKind::Led => {
+                                    ui.label(egui::RichText::new("Color:").size(10.5).color(Color32::from_rgb(150,160,170)));
+                                    ui.horizontal_wrapped(|ui| {
+                                        for &v in &["red", "green", "blue", "yellow", "white", "orange"] {
+                                            if ui.small_button(v).clicked() {
+                                                component.value = v.to_string();
+                                                inspector_changed = true;
+                                            }
+                                        }
+                                    });
+                                }
+                                ComponentKind::Battery | ComponentKind::VSource => {
+                                    ui.label(egui::RichText::new("Voltage:").size(10.5).color(Color32::from_rgb(150,160,170)));
+                                    ui.horizontal_wrapped(|ui| {
+                                        for &v in &["1.5V", "3.3V", "3.7V", "5V", "9V", "12V"] {
+                                            if ui.small_button(v).clicked() {
+                                                component.value = v.to_string();
+                                                inspector_changed = true;
+                                            }
+                                        }
+                                    });
+                                }
+                                _ => {}
                             }
                             if component_is_switch(component.kind) {
                                 let mut closed =
@@ -7974,6 +8063,12 @@ fn component_conductance(component: &Component) -> Conductance {
         ComponentKind::Voltmeter => Conductance::Open,
         ComponentKind::Ammeter => Conductance::Conductor,
         ComponentKind::TextNote => Conductance::Open,
+        ComponentKind::Buzzer => Conductance::Load,
+        ComponentKind::Dht11
+        | ComponentKind::Dht22
+        | ComponentKind::HcSr04
+        | ComponentKind::NeoPixel
+        | ComponentKind::PirSensor => Conductance::Open,
     }
 }
 
@@ -8082,9 +8177,9 @@ fn component_size(component: &Component) -> Vec2 {
         | ComponentKind::LogicNor
         | ComponentKind::LogicXor => (80.0, 52.0),
         ComponentKind::OpAmp => (80.0, 68.0),
-        ComponentKind::Esp32 | ComponentKind::Esp32S3 => (140.0, 160.0),
-        ComponentKind::Esp32C3 => (120.0, 140.0),
-        ComponentKind::ArduinoUno => (160.0, 200.0),
+        ComponentKind::Esp32 | ComponentKind::Esp32S3 => (160.0, 320.0),
+        ComponentKind::Esp32C3 => (120.0, 200.0),
+        ComponentKind::ArduinoUno => (160.0, 300.0),
         ComponentKind::RaspberryPiPico => (120.0, 180.0),
         ComponentKind::Breadboard => (280.0, 160.0),
         ComponentKind::Relay => (80.0, 72.0),
@@ -8101,6 +8196,11 @@ fn component_size(component: &Component) -> Vec2 {
         ComponentKind::Optocoupler => (80.0, 64.0),
         ComponentKind::GenericIc => (80.0, 80.0),
         ComponentKind::Voltmeter | ComponentKind::Ammeter => (80.0, 60.0),
+        ComponentKind::Dht11 | ComponentKind::Dht22 => (80.0, 80.0),
+        ComponentKind::HcSr04 => (100.0, 60.0),
+        ComponentKind::Buzzer => (60.0, 60.0),
+        ComponentKind::NeoPixel => (60.0, 60.0),
+        ComponentKind::PirSensor => (80.0, 80.0),
         ComponentKind::TextNote => {
             let lines = component.value.lines().count().max(1) as f32;
             let longest = component
@@ -9127,13 +9227,35 @@ fn draw_component(
             &[
                 "3V3",
                 "GND",
-                "GPIO23",
+                "GPIO2",
+                "GPIO4",
+                "GPIO15",
+                "GPIO23 MOSI",
                 "GPIO22 SCL",
                 "GPIO21 SDA",
+                "GPIO19 MISO",
+                "GPIO18 SCK",
+                "GPIO5 SS",
                 "TX0",
                 "RX0",
+                "GND",
             ],
-            &["VIN", "GND", "GPIO18", "GPIO19", "GPIO5", "EN", "RST"],
+            &[
+                "VIN",
+                "GND",
+                "GPIO34 ADC",
+                "GPIO35 ADC",
+                "GPIO32",
+                "GPIO33",
+                "GPIO25 DAC",
+                "GPIO26 DAC",
+                "GPIO27",
+                "GPIO14",
+                "GPIO13",
+                "GPIO12",
+                "GPIO0",
+                "EN",
+            ],
         ),
         ComponentKind::Esp32S3 => draw_module(
             painter,
@@ -9176,9 +9298,16 @@ fn draw_component(
             energized,
             component.rotation,
             "ARDUINO UNO",
-            &["VIN", "5V", "3V3", "GND", "GND", "A4 SDA", "A5 SCL"],
             &[
-                "D2", "D3 PWM", "D5 PWM", "D6 PWM", "D9 PWM", "D10", "D11", "D13",
+                "VIN", "5V", "3V3", "GND",
+                "A0", "A1", "A2", "A3",
+                "A4 SDA", "A5 SCL",
+            ],
+            &[
+                "D2", "D3 PWM", "D4", "D5 PWM",
+                "D6 PWM", "D7", "D8", "D9 PWM",
+                "D10", "D11 MOSI", "D12 MISO", "D13 SCK",
+                "TX", "RX",
             ],
         ),
         ComponentKind::RaspberryPiPico => draw_module(
@@ -9334,6 +9463,21 @@ fn draw_component(
                 }
             }
         }
+        ComponentKind::Dht11 => draw_sensor_module(
+            painter, rect, stroke, energized, "DHT11",
+            Color32::from_rgb(30, 100, 180),
+        ),
+        ComponentKind::Dht22 => draw_sensor_module(
+            painter, rect, stroke, energized, "DHT22",
+            Color32::from_rgb(20, 140, 80),
+        ),
+        ComponentKind::HcSr04 => draw_hcsr04(painter, rect, stroke, energized),
+        ComponentKind::Buzzer => draw_buzzer(painter, rect, component.rotation, stroke, energized),
+        ComponentKind::NeoPixel => draw_neopixel(painter, rect, stroke, energized),
+        ComponentKind::PirSensor => draw_sensor_module(
+            painter, rect, stroke, energized, "PIR",
+            Color32::from_rgb(160, 80, 30),
+        ),
     }
 
     if show_pins {
@@ -9882,20 +10026,34 @@ pub(crate) fn component_pin_defs(component: &Component) -> Vec<CircuitPin> {
             &[
                 ("3V3", PinRole::Positive),
                 ("GND", PinRole::Ground),
-                ("GPIO23", PinRole::Digital),
+                ("GPIO2", PinRole::Digital),
+                ("GPIO4", PinRole::Digital),
+                ("GPIO15", PinRole::Digital),
+                ("GPIO23 MOSI", PinRole::Digital),
                 ("GPIO22 SCL", PinRole::I2c),
                 ("GPIO21 SDA", PinRole::I2c),
+                ("GPIO19 MISO", PinRole::Digital),
+                ("GPIO18 SCK", PinRole::Digital),
+                ("GPIO5 SS", PinRole::Digital),
                 ("TX0", PinRole::Digital),
                 ("RX0", PinRole::Digital),
+                ("GND", PinRole::Ground),
             ],
             &[
                 ("VIN", PinRole::Positive),
                 ("GND", PinRole::Ground),
-                ("GPIO18", PinRole::Digital),
-                ("GPIO19", PinRole::Digital),
-                ("GPIO5", PinRole::Digital),
+                ("GPIO34 ADC", PinRole::Digital),
+                ("GPIO35 ADC", PinRole::Digital),
+                ("GPIO32", PinRole::Digital),
+                ("GPIO33", PinRole::Digital),
+                ("GPIO25 DAC", PinRole::Digital),
+                ("GPIO26 DAC", PinRole::Digital),
+                ("GPIO27", PinRole::Digital),
+                ("GPIO14", PinRole::Digital),
+                ("GPIO13", PinRole::Digital),
+                ("GPIO12", PinRole::Digital),
+                ("GPIO0", PinRole::Digital),
                 ("EN", PinRole::Control),
-                ("RST", PinRole::Control),
             ],
         ),
         ComponentKind::Esp32S3 => module_pin_defs(
@@ -9949,19 +10107,28 @@ pub(crate) fn component_pin_defs(component: &Component) -> Vec<CircuitPin> {
                 ("5V", PinRole::Positive),
                 ("3V3", PinRole::Positive),
                 ("GND", PinRole::Ground),
-                ("GND", PinRole::Ground),
+                ("A0", PinRole::Digital),
+                ("A1", PinRole::Digital),
+                ("A2", PinRole::Digital),
+                ("A3", PinRole::Digital),
                 ("A4 SDA", PinRole::I2c),
                 ("A5 SCL", PinRole::I2c),
             ],
             &[
                 ("D2", PinRole::Digital),
                 ("D3 PWM", PinRole::Digital),
+                ("D4", PinRole::Digital),
                 ("D5 PWM", PinRole::Digital),
                 ("D6 PWM", PinRole::Digital),
+                ("D7", PinRole::Digital),
+                ("D8", PinRole::Digital),
                 ("D9 PWM", PinRole::Digital),
                 ("D10", PinRole::Digital),
-                ("D11", PinRole::Digital),
-                ("D13", PinRole::Digital),
+                ("D11 MOSI", PinRole::Digital),
+                ("D12 MISO", PinRole::Digital),
+                ("D13 SCK", PinRole::Digital),
+                ("TX", PinRole::Digital),
+                ("RX", PinRole::Digital),
             ],
         ),
         ComponentKind::RaspberryPiPico => module_pin_defs(
@@ -10394,6 +10561,39 @@ pub(crate) fn component_pin_defs(component: &Component) -> Vec<CircuitPin> {
                 role: PinRole::Passive,
                 pos: Pos2::new(rect.right(), center.y),
             },
+        ],
+        ComponentKind::Dht11 | ComponentKind::Dht22 => vec![
+            module_pin(rect, "VCC", PinRole::Positive, false, 3, 0),
+            module_pin(rect, "DATA", PinRole::Digital, false, 3, 1),
+            module_pin(rect, "GND", PinRole::Ground, false, 3, 2),
+        ],
+        ComponentKind::HcSr04 => vec![
+            module_pin(rect, "VCC", PinRole::Positive, false, 4, 0),
+            module_pin(rect, "TRIG", PinRole::Digital, false, 4, 1),
+            module_pin(rect, "ECHO", PinRole::Digital, false, 4, 2),
+            module_pin(rect, "GND", PinRole::Ground, false, 4, 3),
+        ],
+        ComponentKind::Buzzer => vec![
+            CircuitPin {
+                label: "+",
+                role: PinRole::Positive,
+                pos: Pos2::new(rect.left(), center.y),
+            },
+            CircuitPin {
+                label: "-",
+                role: PinRole::Ground,
+                pos: Pos2::new(rect.right(), center.y),
+            },
+        ],
+        ComponentKind::NeoPixel => vec![
+            module_pin(rect, "VCC", PinRole::Positive, false, 3, 0),
+            module_pin(rect, "DIN", PinRole::Digital, false, 3, 1),
+            module_pin(rect, "GND", PinRole::Ground, false, 3, 2),
+        ],
+        ComponentKind::PirSensor => vec![
+            module_pin(rect, "VCC", PinRole::Positive, false, 3, 0),
+            module_pin(rect, "OUT", PinRole::Output, false, 3, 1),
+            module_pin(rect, "GND", PinRole::Ground, false, 3, 2),
         ],
         ComponentKind::TextNote => vec![], // no electrical pins
         _ => vec![
@@ -13608,6 +13808,12 @@ fn component_kind_label(kind: ComponentKind) -> &'static str {
         ComponentKind::Voltmeter => "Voltmeter",
         ComponentKind::Ammeter => "Ammeter",
         ComponentKind::TextNote => "Text Note",
+        ComponentKind::Dht11 => "DHT11",
+        ComponentKind::Dht22 => "DHT22",
+        ComponentKind::HcSr04 => "HC-SR04",
+        ComponentKind::Buzzer => "Buzzer",
+        ComponentKind::NeoPixel => "NeoPixel",
+        ComponentKind::PirSensor => "PIR Sensor",
     }
 }
 
@@ -13626,6 +13832,11 @@ fn component_is_module(component: &Component) -> bool {
             | ComponentKind::MotorDriver
             | ComponentKind::Optocoupler
             | ComponentKind::GenericIc
+            | ComponentKind::Dht11
+            | ComponentKind::Dht22
+            | ComponentKind::HcSr04
+            | ComponentKind::NeoPixel
+            | ComponentKind::PirSensor
     )
 }
 
@@ -13635,6 +13846,123 @@ fn escape_xml(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+// ─── New sensor drawing functions ────────────────────────────────────────────
+
+fn draw_sensor_module(
+    painter: &egui::Painter,
+    rect: Rect,
+    stroke: Stroke,
+    energized: bool,
+    label: &str,
+    accent: Color32,
+) {
+    let center = rect.center();
+    let body_fill = if energized {
+        Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 80)
+    } else {
+        Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 35)
+    };
+    painter.rect_filled(rect, 6.0, body_fill);
+    painter.rect_stroke(rect, 6.0, stroke, StrokeKind::Middle);
+    painter.text(
+        center,
+        Align2::CENTER_CENTER,
+        label,
+        egui::FontId::monospace(10.0),
+        if energized { Color32::from_rgb(255, 230, 150) } else { Color32::from_rgb(200, 215, 230) },
+    );
+}
+
+fn draw_hcsr04(
+    painter: &egui::Painter,
+    rect: Rect,
+    stroke: Stroke,
+    energized: bool,
+) {
+    let center = rect.center();
+    let fill = if energized {
+        Color32::from_rgba_unmultiplied(80, 180, 255, 70)
+    } else {
+        Color32::from_rgba_unmultiplied(60, 120, 200, 35)
+    };
+    painter.rect_filled(rect, 4.0, fill);
+    painter.rect_stroke(rect, 4.0, stroke, StrokeKind::Middle);
+    // Two transducer circles
+    let r = rect.height() * 0.28;
+    let left_cx = rect.center().x - rect.width() * 0.22;
+    let right_cx = rect.center().x + rect.width() * 0.22;
+    painter.circle_stroke(Pos2::new(left_cx, center.y), r, stroke);
+    painter.circle_stroke(Pos2::new(right_cx, center.y), r, stroke);
+    painter.text(
+        Pos2::new(center.x, rect.bottom() - 8.0),
+        Align2::CENTER_CENTER,
+        "HC-SR04",
+        egui::FontId::monospace(8.0),
+        if energized { Color32::from_rgb(160, 220, 255) } else { Color32::from_rgb(150, 170, 200) },
+    );
+}
+
+fn draw_buzzer(
+    painter: &egui::Painter,
+    rect: Rect,
+    _rotation: i32,
+    stroke: Stroke,
+    energized: bool,
+) {
+    let center = rect.center();
+    let r = rect.width().min(rect.height()) * 0.38;
+    let fill = if energized {
+        Color32::from_rgba_unmultiplied(255, 200, 50, 80)
+    } else {
+        Color32::from_rgba_unmultiplied(180, 160, 50, 35)
+    };
+    painter.circle_filled(center, r, fill);
+    painter.circle_stroke(center, r, stroke);
+    // Sound wave arcs
+    let wave_col = if energized { stroke.color } else { Color32::from_rgb(130, 140, 150) };
+    for i in 1..=2u32 {
+        let arc_r = r + i as f32 * 6.0;
+        painter.circle_stroke(center, arc_r, Stroke::new(stroke.width * 0.6, wave_col));
+    }
+    // Plus/minus
+    painter.text(
+        Pos2::new(center.x, center.y),
+        Align2::CENTER_CENTER,
+        "BZ",
+        egui::FontId::monospace(9.0),
+        if energized { Color32::from_rgb(255, 230, 100) } else { Color32::from_rgb(180, 190, 200) },
+    );
+    // Terminal lines left/right
+    painter.line_segment([Pos2::new(rect.left(), center.y), Pos2::new(center.x - r, center.y)], stroke);
+    painter.line_segment([Pos2::new(rect.right(), center.y), Pos2::new(center.x + r, center.y)], stroke);
+}
+
+fn draw_neopixel(
+    painter: &egui::Painter,
+    rect: Rect,
+    stroke: Stroke,
+    energized: bool,
+) {
+    let center = rect.center();
+    let inner_fill = if energized {
+        Color32::from_rgb(255, 80, 200)
+    } else {
+        Color32::from_rgba_unmultiplied(80, 50, 100, 60)
+    };
+    painter.rect_filled(rect, 8.0, Color32::from_rgba_unmultiplied(30, 20, 50, 120));
+    painter.rect_stroke(rect, 8.0, stroke, StrokeKind::Middle);
+    // Inner LED square
+    let inner = Rect::from_center_size(center, Vec2::splat(rect.width().min(rect.height()) * 0.45));
+    painter.rect_filled(inner, 4.0, inner_fill);
+    painter.text(
+        Pos2::new(center.x, rect.bottom() - 7.0),
+        Align2::CENTER_CENTER,
+        "NP",
+        egui::FontId::monospace(8.0),
+        if energized { Color32::from_rgb(255, 180, 255) } else { Color32::from_rgb(160, 140, 180) },
+    );
 }
 
 /// Minimal dependency-free PNG encoder (RGBA8).

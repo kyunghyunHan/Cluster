@@ -59,6 +59,12 @@ pub(crate) enum ComponentKind {
     Voltmeter,
     Ammeter,
     TextNote,
+    Dht11,
+    Dht22,
+    HcSr04,
+    Buzzer,
+    NeoPixel,
+    PirSensor,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +175,12 @@ pub(crate) fn electrical_metadata(kind: ComponentKind) -> ElectricalMetadata {
         GenericIc => (None, Symbolic, "Symbolic generic IC"),
         OpAmp => (Some(3), Symbolic, "Symbolic op amp"),
         TextNote => (Some(0), Symbolic, "Annotation only"),
+        Dht11 => (Some(3), ConnectivityOnly, "1-Wire digital sensor"),
+        Dht22 => (Some(3), ConnectivityOnly, "1-Wire digital sensor"),
+        HcSr04 => (Some(4), ConnectivityOnly, "Ultrasonic distance sensor"),
+        Buzzer => (Some(2), DcApproximate, "Piezo buzzer load"),
+        NeoPixel => (Some(3), ConnectivityOnly, "WS2812 addressable LED"),
+        PirSensor => (Some(3), ConnectivityOnly, "PIR motion sensor"),
     };
 
     let (voltage_range, max_current, needs_current_limit, needs_driver) = match kind {
@@ -177,6 +189,11 @@ pub(crate) fn electrical_metadata(kind: ComponentKind) -> ElectricalMetadata {
         ArduinoUno => (Some((0.0, 5.5)), Some(0.020), false, false),
         RaspberryPiPico => (Some((0.0, 3.6)), Some(0.012), false, false),
         DcMotor | Relay | Servo | Lamp => (None, None, false, true),
+        Dht11 | Dht22 => (Some((3.0, 5.5)), Some(0.002), false, false),
+        HcSr04 => (Some((4.5, 5.5)), None, false, false),
+        Buzzer => (Some((3.0, 5.5)), Some(0.030), false, false),
+        NeoPixel => (Some((4.5, 5.5)), Some(0.060), false, false),
+        PirSensor => (Some((4.5, 12.0)), None, false, false),
         _ => (None, None, false, false),
     };
 
