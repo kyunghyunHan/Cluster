@@ -16,6 +16,7 @@
 mod engine;
 mod export;
 mod model;
+mod pcb;
 mod storage;
 mod ui;
 
@@ -3177,9 +3178,16 @@ impl eframe::App for CircuitApp {
                             // ── Value quick-pick presets ──────────────────────────
                             match component.kind {
                                 ComponentKind::Resistor => {
-                                    ui.label(egui::RichText::new("Quick values:").size(10.5).color(Color32::from_rgb(150,160,170)));
+                                    ui.label(
+                                        egui::RichText::new("Quick values:")
+                                            .size(10.5)
+                                            .color(Color32::from_rgb(150, 160, 170)),
+                                    );
                                     ui.horizontal_wrapped(|ui| {
-                                        for &v in &["100", "220", "330", "470", "1k", "2.2k", "4.7k", "10k", "22k", "47k", "100k", "1M"] {
+                                        for &v in &[
+                                            "100", "220", "330", "470", "1k", "2.2k", "4.7k",
+                                            "10k", "22k", "47k", "100k", "1M",
+                                        ] {
                                             if ui.small_button(v).clicked() {
                                                 component.value = v.to_string();
                                                 inspector_changed = true;
@@ -3188,9 +3196,16 @@ impl eframe::App for CircuitApp {
                                     });
                                 }
                                 ComponentKind::Capacitor => {
-                                    ui.label(egui::RichText::new("Quick values:").size(10.5).color(Color32::from_rgb(150,160,170)));
+                                    ui.label(
+                                        egui::RichText::new("Quick values:")
+                                            .size(10.5)
+                                            .color(Color32::from_rgb(150, 160, 170)),
+                                    );
                                     ui.horizontal_wrapped(|ui| {
-                                        for &v in &["10pF", "100pF", "1nF", "10nF", "100nF", "1uF", "10uF", "100uF", "1000uF"] {
+                                        for &v in &[
+                                            "10pF", "100pF", "1nF", "10nF", "100nF", "1uF", "10uF",
+                                            "100uF", "1000uF",
+                                        ] {
                                             if ui.small_button(v).clicked() {
                                                 component.value = v.to_string();
                                                 inspector_changed = true;
@@ -3199,9 +3214,15 @@ impl eframe::App for CircuitApp {
                                     });
                                 }
                                 ComponentKind::Led => {
-                                    ui.label(egui::RichText::new("Color:").size(10.5).color(Color32::from_rgb(150,160,170)));
+                                    ui.label(
+                                        egui::RichText::new("Color:")
+                                            .size(10.5)
+                                            .color(Color32::from_rgb(150, 160, 170)),
+                                    );
                                     ui.horizontal_wrapped(|ui| {
-                                        for &v in &["red", "green", "blue", "yellow", "white", "orange"] {
+                                        for &v in
+                                            &["red", "green", "blue", "yellow", "white", "orange"]
+                                        {
                                             if ui.small_button(v).clicked() {
                                                 component.value = v.to_string();
                                                 inspector_changed = true;
@@ -3210,7 +3231,11 @@ impl eframe::App for CircuitApp {
                                     });
                                 }
                                 ComponentKind::Battery | ComponentKind::VSource => {
-                                    ui.label(egui::RichText::new("Voltage:").size(10.5).color(Color32::from_rgb(150,160,170)));
+                                    ui.label(
+                                        egui::RichText::new("Voltage:")
+                                            .size(10.5)
+                                            .color(Color32::from_rgb(150, 160, 170)),
+                                    );
                                     ui.horizontal_wrapped(|ui| {
                                         for &v in &["1.5V", "3.3V", "3.7V", "5V", "9V", "12V"] {
                                             if ui.small_button(v).clicked() {
@@ -9299,15 +9324,11 @@ fn draw_component(
             component.rotation,
             "ARDUINO UNO",
             &[
-                "VIN", "5V", "3V3", "GND",
-                "A0", "A1", "A2", "A3",
-                "A4 SDA", "A5 SCL",
+                "VIN", "5V", "3V3", "GND", "A0", "A1", "A2", "A3", "A4 SDA", "A5 SCL",
             ],
             &[
-                "D2", "D3 PWM", "D4", "D5 PWM",
-                "D6 PWM", "D7", "D8", "D9 PWM",
-                "D10", "D11 MOSI", "D12 MISO", "D13 SCK",
-                "TX", "RX",
+                "D2", "D3 PWM", "D4", "D5 PWM", "D6 PWM", "D7", "D8", "D9 PWM", "D10", "D11 MOSI",
+                "D12 MISO", "D13 SCK", "TX", "RX",
             ],
         ),
         ComponentKind::RaspberryPiPico => draw_module(
@@ -9464,18 +9485,30 @@ fn draw_component(
             }
         }
         ComponentKind::Dht11 => draw_sensor_module(
-            painter, rect, stroke, energized, "DHT11",
+            painter,
+            rect,
+            stroke,
+            energized,
+            "DHT11",
             Color32::from_rgb(30, 100, 180),
         ),
         ComponentKind::Dht22 => draw_sensor_module(
-            painter, rect, stroke, energized, "DHT22",
+            painter,
+            rect,
+            stroke,
+            energized,
+            "DHT22",
             Color32::from_rgb(20, 140, 80),
         ),
         ComponentKind::HcSr04 => draw_hcsr04(painter, rect, stroke, energized),
         ComponentKind::Buzzer => draw_buzzer(painter, rect, component.rotation, stroke, energized),
         ComponentKind::NeoPixel => draw_neopixel(painter, rect, stroke, energized),
         ComponentKind::PirSensor => draw_sensor_module(
-            painter, rect, stroke, energized, "PIR",
+            painter,
+            rect,
+            stroke,
+            energized,
+            "PIR",
             Color32::from_rgb(160, 80, 30),
         ),
     }
@@ -13871,16 +13904,15 @@ fn draw_sensor_module(
         Align2::CENTER_CENTER,
         label,
         egui::FontId::monospace(10.0),
-        if energized { Color32::from_rgb(255, 230, 150) } else { Color32::from_rgb(200, 215, 230) },
+        if energized {
+            Color32::from_rgb(255, 230, 150)
+        } else {
+            Color32::from_rgb(200, 215, 230)
+        },
     );
 }
 
-fn draw_hcsr04(
-    painter: &egui::Painter,
-    rect: Rect,
-    stroke: Stroke,
-    energized: bool,
-) {
+fn draw_hcsr04(painter: &egui::Painter, rect: Rect, stroke: Stroke, energized: bool) {
     let center = rect.center();
     let fill = if energized {
         Color32::from_rgba_unmultiplied(80, 180, 255, 70)
@@ -13900,7 +13932,11 @@ fn draw_hcsr04(
         Align2::CENTER_CENTER,
         "HC-SR04",
         egui::FontId::monospace(8.0),
-        if energized { Color32::from_rgb(160, 220, 255) } else { Color32::from_rgb(150, 170, 200) },
+        if energized {
+            Color32::from_rgb(160, 220, 255)
+        } else {
+            Color32::from_rgb(150, 170, 200)
+        },
     );
 }
 
@@ -13921,7 +13957,11 @@ fn draw_buzzer(
     painter.circle_filled(center, r, fill);
     painter.circle_stroke(center, r, stroke);
     // Sound wave arcs
-    let wave_col = if energized { stroke.color } else { Color32::from_rgb(130, 140, 150) };
+    let wave_col = if energized {
+        stroke.color
+    } else {
+        Color32::from_rgb(130, 140, 150)
+    };
     for i in 1..=2u32 {
         let arc_r = r + i as f32 * 6.0;
         painter.circle_stroke(center, arc_r, Stroke::new(stroke.width * 0.6, wave_col));
@@ -13932,19 +13972,30 @@ fn draw_buzzer(
         Align2::CENTER_CENTER,
         "BZ",
         egui::FontId::monospace(9.0),
-        if energized { Color32::from_rgb(255, 230, 100) } else { Color32::from_rgb(180, 190, 200) },
+        if energized {
+            Color32::from_rgb(255, 230, 100)
+        } else {
+            Color32::from_rgb(180, 190, 200)
+        },
     );
     // Terminal lines left/right
-    painter.line_segment([Pos2::new(rect.left(), center.y), Pos2::new(center.x - r, center.y)], stroke);
-    painter.line_segment([Pos2::new(rect.right(), center.y), Pos2::new(center.x + r, center.y)], stroke);
+    painter.line_segment(
+        [
+            Pos2::new(rect.left(), center.y),
+            Pos2::new(center.x - r, center.y),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(rect.right(), center.y),
+            Pos2::new(center.x + r, center.y),
+        ],
+        stroke,
+    );
 }
 
-fn draw_neopixel(
-    painter: &egui::Painter,
-    rect: Rect,
-    stroke: Stroke,
-    energized: bool,
-) {
+fn draw_neopixel(painter: &egui::Painter, rect: Rect, stroke: Stroke, energized: bool) {
     let center = rect.center();
     let inner_fill = if energized {
         Color32::from_rgb(255, 80, 200)
@@ -13961,7 +14012,11 @@ fn draw_neopixel(
         Align2::CENTER_CENTER,
         "NP",
         egui::FontId::monospace(8.0),
-        if energized { Color32::from_rgb(255, 180, 255) } else { Color32::from_rgb(160, 140, 180) },
+        if energized {
+            Color32::from_rgb(255, 180, 255)
+        } else {
+            Color32::from_rgb(160, 140, 180)
+        },
     );
 }
 

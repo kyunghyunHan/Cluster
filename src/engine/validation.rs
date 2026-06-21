@@ -651,10 +651,11 @@ fn check_i2c_address_conflict(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation
             ComponentKind::Oled | ComponentKind::Sensor
         ) && sda_nets.contains(&pin.net_id);
         if is_i2c_peripheral {
-            net_i2c_devices
-                .entry(pin.net_id)
-                .or_default()
-                .push((pin.component_id, pin.component_label.as_str(), pin.component_kind));
+            net_i2c_devices.entry(pin.net_id).or_default().push((
+                pin.component_id,
+                pin.component_label.as_str(),
+                pin.component_kind,
+            ));
         }
     }
 
@@ -667,7 +668,10 @@ fn check_i2c_address_conflict(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation
             }
         }
         // Check for multiple OLEDs on the same bus (both default to 0x3C)
-        let oled_count = unique.iter().filter(|(_, _, k)| *k == ComponentKind::Oled).count();
+        let oled_count = unique
+            .iter()
+            .filter(|(_, _, k)| *k == ComponentKind::Oled)
+            .count();
         if oled_count >= 2 {
             let labels: Vec<&str> = unique
                 .iter()

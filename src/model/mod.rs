@@ -1,3 +1,4 @@
+pub(crate) mod cad;
 pub(crate) mod circuit;
 pub(crate) mod component;
 pub(crate) mod net;

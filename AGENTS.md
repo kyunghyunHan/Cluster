@@ -5,13 +5,14 @@
 
 ## Project Overview
 
-Cluster는 Rust + egui 기반 ESP32/Arduino 학습 및 프로토타이핑 회로 툴이다. 목표는 KiCad를 범용으로 대체하는 것이 아니라 `Fritzing/Tinkercad처럼 직관적이면서 초보자 실수를 더 정확히 잡아주는 교육용 회로 설계 플랫폼`이다.
+Cluster는 Rust + egui 기반 ESP32/Arduino 학습 및 프로토타이핑 회로 툴이다. 목표는 KiCad를 완전히 복제하는 것이 아니라 `Fritzing/Tinkercad처럼 직관적이면서 PCB 제작까지 이어질 수 있는 beginner-friendly KiCad-lite`다.
 
 현재 방향:
 - 저항, 커패시터, 인덕터, 다이오드, LED, 스위치, 전원, 배터리, OP AMP, 램프 지원
 - ESP32, OLED 같은 실제 전자 모듈 배치 지원
 - ESP32/OLED/Sensor는 핀 이름과 역할(VIN/3V3/GND/SDA/SCL/GPIO 등)을 가진다.
 - Breadboard View는 회로도 netlist를 읽어 ESP32/Arduino I2C 예제의 점퍼 배선을 안내한다.
+- CAD 데이터 모델은 schematic symbol과 physical footprint를 분리하고, netlist를 PCB layout/DRC/export와 공유하는 방향으로 확장한다.
 - 스냅 그리드, 90도 배선, 핀 표시, 선택/회전/삭제 지원
 - 기본 라이브 시뮬레이션: 닫힌 도통 경로가 있으면 배선과 부품을 강조
 - SVG 이미지 내보내기 지원
@@ -19,6 +20,7 @@ Cluster는 Rust + egui 기반 ESP32/Arduino 학습 및 프로토타이핑 회로
 좋은 변경의 기준:
 - 회로를 더 빨리 만들 수 있다.
 - 초보자가 실제 브레드보드 배선을 더 빨리 이해할 수 있다.
+- schematic에서 PCB 제작 데이터로 넘어가는 흐름이 명확하다.
 - 부품과 핀이 더 명확하게 읽힌다.
 - 연결됨/끊김/전류 흐름 상태가 즉시 보인다.
 - 저장/내보내기 결과가 실제 문서에 쓸 수 있을 만큼 깔끔하다.
@@ -187,13 +189,15 @@ Notes:
 
 우선순위 높은 순서:
 1. Breadboard View: 일부 완료 - ESP32/Arduino + OLED/Sensor I2C 예제의 VCC/GND/SDA/SCL 점퍼 체크와 schematic net 강조 지원. 향후 실제 점퍼 편집, 전원 레일, 핀 하이라이트, 자동 배선 보조 확장
-2. 초보자 ERC 강화: GPIO 전류 초과, LED 저항 누락, 모터/릴레이 직접 구동, 공통 GND, 입력 전용 GPIO, ADC 과전압, I2C/SPI/UART 배선 실수
-3. 실제 부품 라이브러리: ESP32 DevKit V1, Arduino Uno, Pico, SSD1306 OLED, DHT11/DHT22, PIR, DS3231, Relay Module, L298N, SG90, buzzer 등 한국어/영어 검색 지원
-4. Example Gallery와 Guided Tutorials: 일부 완료 - 앱 내 Lessons/Examples에 Lesson Check 패널, 전류 흐름 예제, 문제 찾기 예제, ESP32/OLED/Sensor, Arduino LED/OLED, 모터 드라이버 예제 포함. 향후 코드/설명/단계별 수리 힌트 확장
-5. 프로젝트 관리: `.cluster` 파일, 자동 저장, 복구, 최근 프로젝트, 프로젝트 썸네일
-6. Export: SVG/SPICE/BOM/Arduino 유지 + PNG/PDF, 가격/구매 링크 포함 BOM 확장
-7. 시각적 시뮬레이션: Oscilloscope, voltage/current graph, PWM, servo/relay animation, LED brightness visualization
-8. 고급 시뮬레이션: transient RC/RL, AC/frequency response, 선택적 ngspice 연동
+2. CAD/PCB 데이터 모델: 일부 완료 - SymbolInstance, Footprint, NetClass, Board, Track, Via, 기본 DRC, Gerber/Excellon scaffold 추가. 향후 기존 Component를 SymbolInstance로 점진 이전
+3. Schematic netlist 안정화: explicit junction, no-connect marker, local/global net label, multi-page net merge
+4. 초보자 ERC 강화: GPIO 전류 초과, LED 저항 누락, 모터/릴레이 직접 구동, 공통 GND, 입력 전용 GPIO, ADC 과전압, I2C/SPI/UART 배선 실수
+5. PCB editor MVP: Update PCB, footprint 배치, ratsnest, manual routing, via, top/bottom copper, board outline
+6. DRC panel: track/pad/via/edge/silkscreen violation을 클릭하면 PCB 위치로 이동
+7. Export: SVG/SPICE/BOM/Arduino 유지 + Gerber RS-274X, Excellon, pick-and-place CSV, 강화 BOM
+8. 실제 부품 라이브러리: ESP32 DevKit V1, Arduino Uno, Pico, SSD1306 OLED, DHT11/DHT22, PIR, DS3231, Relay Module, L298N, SG90, buzzer 등 한국어/영어 검색 지원
+9. 프로젝트 관리: `project.cluster/` 폴더 구조, `.cluster` 파일, 자동 저장, 복구, 최근 프로젝트, 프로젝트 썸네일
+10. 고급 시뮬레이션: internal beginner DC 유지 + 선택적 ngspice export/run/import
 
 ## Definition Of Done
 

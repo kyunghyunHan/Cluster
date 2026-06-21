@@ -1,8 +1,8 @@
 # Cluster
 
-**Beginner-friendly ESP32/Arduino circuit design with real validation and DC simulation.**
+**Beginner-friendly ESP32/Arduino schematic, simulation, and PCB design.**
 
-Cluster is an ESP32/Arduino learning and prototyping tool focused on making electronics accessible to makers, students, and hobbyists. It is not trying to clone KiCad; the goal is a Fritzing/Tinkercad-style workflow with stronger validation, clearer wiring guidance, and local-first project files.
+Cluster is an ESP32/Arduino learning and prototyping tool focused on making electronics accessible to makers, students, and hobbyists. It is not trying to clone all of KiCad; the goal is a beginner-friendly KiCad-lite workflow: easier than KiCad, more electrically aware than Fritzing, and capable of growing from schematic validation into practical two-layer PCB output.
 
 Cluster is designed to work offline. Circuit files stay local unless you choose
 to share or export them.
@@ -38,6 +38,7 @@ Cluster is **easier than KiCad**, **smarter than Fritzing**, and **focused on re
 - Orthogonal wire routing with T-junction detection
 - Grid snapping and zoom/pan
 - Breadboard View wiring assistant for ESP32/Arduino I2C examples
+- CAD data model groundwork for symbols, footprints, net classes, board layers, tracks, vias, and DRC
 - Multi-page schematics
 - Component labels, values, and rotation
 - Undo/redo (80-step history)
@@ -66,6 +67,18 @@ Clicking a guided jumper highlights the matching schematic net so learners can c
 - **ICs**: Op-amp, 555 Timer, Logic gates (AND/OR/NOT/NAND/NOR/XOR), Generic IC, Optocoupler
 - **Peripherals**: OLED display, DC motor, Servo, Sensor, Motor driver, 7-segment display
 - **Misc**: Crystal, Transformer, Fuse, Lamp, Breadboard, Net label
+
+### PCB / Manufacturing Direction
+
+Cluster now has the first internal data model needed for PCB work:
+
+- Schematic `SymbolInstance` data separate from physical `Footprint` data
+- `NetClass` rules for clearance, track width, via diameter, and drill
+- `Board` data with outline, layers, footprints, tracks, vias, zones, and design rules
+- Initial DRC checks for minimum track width and via sizes
+- Gerber/Excellon string generators for future file export
+
+This is groundwork, not a finished PCB editor UI yet. The intended MVP is footprint placement, ratsnest display, manual track drawing, vias, two copper layers, DRC, and Gerber/Excellon export.
 
 ### Validation (ERC)
 
@@ -251,14 +264,16 @@ mathematically impossible, such as an ideal-source conflict.
 
 - [x] Beginner ESP32/Arduino example gallery in the palette
 - [x] First Breadboard View wiring assistant for ESP32/Arduino I2C circuits
+- [x] Phase 1 CAD model groundwork: SymbolInstance, Footprint, NetClass, Board, Track, Via, DRC, Gerber/Excellon scaffolding
+- [ ] Stabilize schematic netlist for PCB: explicit junctions, no-connect markers, local/global net labels, multi-page net merge
+- [ ] Pin-type ERC: output-output conflict, power input not driven, unconnected input, floating net, MCU overvoltage, I2C/SPI/UART mismatch
+- [ ] PCB editor MVP: Update PCB, footprint placement, ratsnest, manual tracks, vias, two-layer board
+- [ ] DRC panel with clickable track/pad/via/edge/silkscreen violations
+- [ ] Gerber RS-274X, Excellon drill, pick-and-place CSV, and strengthened BOM export
+- [ ] JSON/TOML library manager for symbols, footprints, and real parts
 - [ ] Full breadboard placement with jumper editing, power rails, zoom, and pin highlighting
-- [ ] Stronger beginner ERC: input-only GPIO, ADC over-voltage, I2C address conflicts, SPI/UART mistakes
-- [ ] Real part library entries for DHT11/DHT22, PIR, DS3231 RTC, relay modules, L298N, SG90, buzzer
 - [ ] Guided tutorials with step-by-step wiring, code, simulation, and repair hints
-- [ ] `.cluster` project files, recent projects, thumbnails, autosave recovery
-- [ ] PNG/PDF export and richer BOM with estimated price and purchase links
-- [ ] PWM, servo, relay, LED brightness, voltage/current graph visualization
-- [ ] Advanced transient/AC simulation and optional ngspice integration
+- [ ] Optional ngspice export/run/import for advanced simulation
 
 ---
 
