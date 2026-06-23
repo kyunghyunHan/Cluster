@@ -7020,6 +7020,7 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         shorted,
         &mut energized_components,
     );
+    prune_unphysical_energized_wires(dc.as_ref(), &mut energized_wires);
 
     // Append per-component warnings to details after engineering checks.
     for component in components {
@@ -7147,6 +7148,19 @@ fn reachable_nodes(graph: &[HashSet<usize>], starts: &[usize]) -> HashSet<usize>
 
 fn nodes_connected(graph: &[HashSet<usize>], a: usize, b: usize) -> bool {
     reachable_nodes(graph, &[a]).contains(&b)
+}
+
+fn prune_unphysical_energized_wires(dc: Option<&mna::DcResult>, energized_wires: &mut HashSet<u64>) {
+    let Some(dc) = dc else {
+        return;
+    };
+
+    energized_wires.retain(|wire_id| {
+        let Some(&current) = dc.wire_current.get(wire_id) else {
+            return true;
+        };
+        dc.wire_current_known.contains(wire_id) && current.abs() > 1.0e-12
+    });
 }
 
 fn module_pin_can_drive_digital_load(pin: &CircuitPin) -> bool {
@@ -15059,6 +15073,72 @@ mod tests {
         assert!(!led_sim.energized_wires.is_empty());
         assert!(flow_overlay_enabled(&led_sim, true));
         assert!(!flow_overlay_enabled(&led_sim, false));
+    }
+
+    #[test]
+    fn branched_wire_is_not_marked_as_single_energized_current_path() {
+        let bat = Component {
+            id: 1,
+            kind: ComponentKind::Battery,
+            pos: Pos2::new(0.0, 0.0),
+            rotation: 0,
+            label: "BAT1".to_string(),
+            value: "5V".to_string(),
+        };
+        let r1 = Component {
+            id: 2,
+            kind: ComponentKind::Resistor,
+            pos: Pos2::new(300.0, 0.0),
+            rotation: 0,
+            label: "R1".to_string(),
+            value: "1k".to_string(),
+        };
+        let r2 = Component {
+            id: 3,
+            kind: ComponentKind::Resistor,
+            pos: Pos2::new(164.0, 36.0),
+            rotation: 90,
+            label: "R2".to_string(),
+            value: "1k".to_string(),
+        };
+
+        let bat_pins = component_pin_defs(&bat);
+        let r1_pins = component_pin_defs(&r1);
+        let r2_pins = component_pin_defs(&r2);
+        let bat_p = bat_pins.iter().find(|pin| pin.label == "+").unwrap().pos;
+        let bat_n = bat_pins.iter().find(|pin| pin.label == "-").unwrap().pos;
+        let r1_a = r1_pins.iter().find(|pin| pin.label == "A").unwrap().pos;
+        let r1_b = r1_pins.iter().find(|pin| pin.label == "B").unwrap().pos;
+        let r2_a = r2_pins.iter().find(|pin| pin.label == "A").unwrap().pos;
+        let r2_b = r2_pins.iter().find(|pin| pin.label == "B").unwrap().pos;
+        let components = vec![bat, r1, r2];
+        let wires = vec![
+            Wire {
+                id: 10,
+                points: vec![bat_p, r2_a, r1_a],
+            },
+            Wire {
+                id: 11,
+                points: vec![r1_b, Pos2::new(r1_b.x, 80.0), bat_n],
+            },
+            Wire {
+                id: 12,
+                points: vec![r2_b, Pos2::new(r2_b.x, 120.0), bat_n],
+            },
+        ];
+
+        let sim = analyze_circuit(&components, &wires);
+
+        assert_eq!(sim.summary, "Current flowing", "{:?}", sim.details);
+        assert!(
+            !sim.energized_wires.contains(&10),
+            "Branched polyline current differs by segment, so whole-wire current highlight is unsafe"
+        );
+        assert!(
+            sim.dc
+                .as_ref()
+                .is_some_and(|dc| !dc.wire_current_known.contains(&10))
+        );
     }
 
     #[test]
