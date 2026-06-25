@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::model::cad::CadProjectData;
 use crate::model::cad::Point2;
 use crate::pcb::board::Board;
 use crate::pcb::layer::BoardLayer;
@@ -53,6 +54,46 @@ pub(crate) fn excellon_drill(board: &Board) -> String {
     }
     out.push_str("M30\n");
     out
+}
+
+pub(crate) fn bom_csv(project: &CadProjectData) -> String {
+    let mut out = String::from("Reference,Value,Footprint,Manufacturer,MPN\n");
+    for symbol in &project.symbols {
+        out.push_str(&format!(
+            "{},{},{},{},{}\n",
+            csv(&symbol.reference),
+            csv(&symbol.value),
+            csv(symbol.footprint_link.as_deref().unwrap_or("")),
+            csv(symbol.fields.manufacturer.as_deref().unwrap_or("")),
+            csv(symbol.fields.mpn.as_deref().unwrap_or(""))
+        ));
+    }
+    out
+}
+
+pub(crate) fn cpl_csv(project: &CadProjectData) -> String {
+    let mut out = String::from("Designator,Mid X,Mid Y,Layer,Rotation\n");
+    let Some(board) = &project.board else {
+        return out;
+    };
+    for footprint in &board.footprints {
+        out.push_str(&format!(
+            "{},{:.3},{:.3},top,{:.1}\n",
+            csv(&footprint.reference),
+            footprint.position.x,
+            footprint.position.y,
+            footprint.rotation_deg
+        ));
+    }
+    out
+}
+
+fn csv(value: &str) -> String {
+    if value.contains([',', '"', '\n']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
 }
 
 fn write_polyline(out: &mut String, points: &[Point2], aperture: &str) {

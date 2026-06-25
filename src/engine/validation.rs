@@ -21,6 +21,9 @@ pub(crate) struct ErcViolation {
 pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolation> {
     let mut v = Vec::new();
 
+    check_duplicate_references(netlist, &mut v);
+    check_duplicate_named_nets(netlist, &mut v);
+    check_no_connect_pins(netlist, &mut v);
     check_missing_gnd(netlist, &mut v);
     check_power_gnd_short(netlist, &mut v);
     check_led_without_resistor(netlist, &mut v);
@@ -44,6 +47,87 @@ pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolat
 }
 
 // ─── Individual rule implementations ────────────────────────────────────────
+
+fn check_duplicate_references(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let mut refs: HashMap<&str, HashSet<u64>> = HashMap::new();
+    for pin in &netlist.pins {
+        if matches!(
+            pin.component_kind,
+            ComponentKind::NetLabel | ComponentKind::TextNote
+        ) {
+            continue;
+        }
+        refs.entry(pin.component_label.as_str())
+            .or_default()
+            .insert(pin.component_id);
+    }
+    for (reference, ids) in refs {
+        if reference.trim().is_empty() || ids.len() <= 1 {
+            continue;
+        }
+        v.push(ErcViolation {
+            severity: ErcSeverity::Error,
+            component_id: ids.iter().copied().min(),
+            wire_id: None,
+            message: format!(
+                "Duplicate reference {reference}: {} components share the same designator. Rename or re-annotate the schematic.",
+                ids.len()
+            ),
+        });
+    }
+}
+
+fn check_duplicate_named_nets(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let mut names: HashMap<String, Vec<usize>> = HashMap::new();
+    for net in &netlist.nets {
+        if net.name.starts_with("NET_") {
+            continue;
+        }
+        names
+            .entry(net.name.trim().to_ascii_uppercase())
+            .or_default()
+            .push(net.id);
+    }
+    for (name, ids) in names {
+        if name.is_empty() || ids.len() <= 1 {
+            continue;
+        }
+        v.push(ErcViolation {
+            severity: ErcSeverity::Error,
+            component_id: None,
+            wire_id: None,
+            message: format!(
+                "Duplicate net name {name}: the same named net exists on {} disconnected islands. Add a wire/junction or rename one label.",
+                ids.len()
+            ),
+        });
+    }
+}
+
+fn check_no_connect_pins(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    for pin in netlist
+        .pins
+        .iter()
+        .filter(|pin| pin.no_connect && pin.connected_by_wire)
+    {
+        v.push(ErcViolation {
+            severity: ErcSeverity::Error,
+            component_id: Some(pin.component_id),
+            wire_id: None,
+            message: format!(
+                "{} pin {} is marked no-connect but is wired to {}. Remove the wire or remove the no-connect marker.",
+                pin.component_label,
+                pin.pin_name,
+                netlist
+                    .nets
+                    .iter()
+                    .find(|net| net.id == pin.net_id)
+                    .map(|net| net.name.as_str())
+                    .unwrap_or("the net")
+            ),
+        });
+    }
+}
 
 fn check_missing_gnd(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
     if netlist.pins.is_empty() {
@@ -556,6 +640,7 @@ fn check_floating_pins(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
                 ),
             });
         } else if !pin.connected_by_wire
+            && !pin.no_connect
             && matches!(
                 pin.electrical_type,
                 ElectricalType::Digital | ElectricalType::I2c | ElectricalType::Control
@@ -1031,6 +1116,7 @@ mod tests {
             position: egui::Pos2::ZERO,
             net_id,
             connected_by_wire,
+            no_connect: false,
         }
     }
 
@@ -1049,6 +1135,8 @@ mod tests {
             wire_nets: Default::default(),
             floating_wires: Vec::new(),
             isolated_wires: Vec::new(),
+            explicit_junctions: Vec::new(),
+            no_connects: Vec::new(),
         }
     }
 
@@ -1211,6 +1299,8 @@ mod tests {
             wire_nets: [(10, 0), (11, 1)].into_iter().collect(),
             floating_wires: Vec::new(),
             isolated_wires: Vec::new(),
+            explicit_junctions: Vec::new(),
+            no_connects: Vec::new(),
         };
 
         let violations = validate_beginner_rules(&nl);
@@ -1233,6 +1323,8 @@ mod tests {
             wire_nets: [(10, 1)].into_iter().collect(),
             floating_wires: Vec::new(),
             isolated_wires: vec![10],
+            explicit_junctions: Vec::new(),
+            no_connects: Vec::new(),
         };
 
         let violations = validate_beginner_rules(&nl);
@@ -1258,5 +1350,57 @@ mod tests {
             v.iter()
                 .any(|e| e.message.contains("SDA") && e.message.contains("SCL"))
         );
+    }
+
+    #[test]
+    fn reports_duplicate_component_reference_designators() {
+        let nl = netlist(
+            vec![make_net(0, "NET_001"), make_net(1, "NET_002")],
+            vec![
+                make_pin(1, "R1", ComponentKind::Resistor, "1k", "A", 0, false),
+                make_pin(1, "R1", ComponentKind::Resistor, "1k", "B", 1, false),
+                make_pin(2, "R1", ComponentKind::Resistor, "2k", "A", 0, false),
+                make_pin(2, "R1", ComponentKind::Resistor, "2k", "B", 1, false),
+            ],
+        );
+
+        let violations = validate_beginner_rules(&nl);
+
+        assert!(violations.iter().any(|violation| {
+            violation.severity == ErcSeverity::Error
+                && violation.message.contains("Duplicate reference R1")
+        }));
+    }
+
+    #[test]
+    fn reports_duplicate_named_net_islands() {
+        let nl = netlist(
+            vec![make_net(0, "VCC"), make_net(1, "VCC")],
+            vec![
+                make_pin(1, "R1", ComponentKind::Resistor, "1k", "A", 0, true),
+                make_pin(2, "R2", ComponentKind::Resistor, "1k", "A", 1, true),
+            ],
+        );
+
+        let violations = validate_beginner_rules(&nl);
+
+        assert!(violations.iter().any(|violation| {
+            violation.severity == ErcSeverity::Error
+                && violation.message.contains("Duplicate net name VCC")
+        }));
+    }
+
+    #[test]
+    fn reports_connected_no_connect_pin() {
+        let mut pin = make_pin(1, "U1", ComponentKind::GenericIc, "", "NC", 0, true);
+        pin.no_connect = true;
+        let nl = netlist(vec![make_net(0, "NET_001")], vec![pin]);
+
+        let violations = validate_beginner_rules(&nl);
+
+        assert!(violations.iter().any(|violation| {
+            violation.severity == ErcSeverity::Error
+                && violation.message.contains("marked no-connect")
+        }));
     }
 }

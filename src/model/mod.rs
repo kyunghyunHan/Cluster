@@ -1,6 +1,7 @@
 pub(crate) mod cad;
 pub(crate) mod circuit;
 pub(crate) mod component;
+pub(crate) mod library;
 pub(crate) mod net;
 pub(crate) mod pin;
 pub(crate) mod wire;
@@ -10,6 +11,6 @@ pub(crate) use circuit::{
     SavedWire,
 };
 pub(crate) use component::{Component, ComponentKind, SimulationSupport, electrical_metadata};
-pub(crate) use net::{CircuitNetlist, Net};
+pub(crate) use net::{CircuitNetlist, Net, NetlistAnnotations, NoConnectMarker};
 pub(crate) use pin::{CircuitPin, ElectricalType, NetlistPin, PinRef, PinRole};
 pub(crate) use wire::Wire;

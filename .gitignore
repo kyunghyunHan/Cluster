@@ -1,2 +1,8 @@
 /target
 .claude/worktrees/
+cluster_autorecover.json
+cluster_autorecover.json.bak
+*.bak
+*.tmp
+project.cluster/backups/
+project.cluster/exports/

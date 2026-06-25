@@ -6995,7 +6995,10 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
     let (dc, dc_error) = match mna::solve_dc_detailed(components, wires) {
         Ok(dc) => (Some(dc), None),
         Err(error) => {
-            details.push(format!("DC solver: {error}."));
+            details.push(format!(
+                "DC solver: {error}. {}",
+                error.beginner_explanation()
+            ));
             (None, Some(error))
         }
     };
@@ -7150,7 +7153,10 @@ fn nodes_connected(graph: &[HashSet<usize>], a: usize, b: usize) -> bool {
     reachable_nodes(graph, &[a]).contains(&b)
 }
 
-fn prune_unphysical_energized_wires(dc: Option<&mna::DcResult>, energized_wires: &mut HashSet<u64>) {
+fn prune_unphysical_energized_wires(
+    dc: Option<&mna::DcResult>,
+    energized_wires: &mut HashSet<u64>,
+) {
     let Some(dc) = dc else {
         return;
     };

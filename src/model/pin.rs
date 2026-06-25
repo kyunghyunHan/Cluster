@@ -48,4 +48,5 @@ pub(crate) struct NetlistPin {
     pub(crate) position: Pos2,
     pub(crate) net_id: usize,
     pub(crate) connected_by_wire: bool,
+    pub(crate) no_connect: bool,
 }

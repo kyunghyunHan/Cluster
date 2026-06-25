@@ -75,6 +75,34 @@ impl std::fmt::Display for SimulationError {
     }
 }
 
+impl SimulationError {
+    pub(crate) fn beginner_explanation(&self) -> &'static str {
+        match self {
+            SimulationError::NoGround => {
+                "Add exactly one clear GND/reference path before solving voltages."
+            }
+            SimulationError::SingularMatrix => {
+                "The DC equations cannot be solved, usually because a node is floating or only ideal parts constrain it."
+            }
+            SimulationError::FloatingNode => {
+                "At least one voltage island has no DC path back to GND."
+            }
+            SimulationError::VoltageSourceConflict => {
+                "Two ideal voltage sources force incompatible voltages on the same nodes."
+            }
+            SimulationError::VoltageSourceLoop => {
+                "A loop of ideal voltage sources has no resistance, so current is undefined."
+            }
+            SimulationError::ShortCircuit => {
+                "A source is effectively connected across a near-zero resistance path."
+            }
+            SimulationError::UnsupportedComponent => {
+                "One or more parts need a SPICE model or are only checked by ERC in Cluster."
+            }
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  SI / SPICE value parser
 // ─────────────────────────────────────────────────────────────────────────────

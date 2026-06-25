@@ -8,6 +8,45 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const SCHEMA_VERSION: u32 = 2;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectFolderLayout {
+    pub(crate) root: PathBuf,
+    pub(crate) project_json: PathBuf,
+    pub(crate) schematic_json: PathBuf,
+    pub(crate) board_json: PathBuf,
+    pub(crate) libraries_dir: PathBuf,
+    pub(crate) exports_dir: PathBuf,
+    pub(crate) backups_dir: PathBuf,
+}
+
+impl ProjectFolderLayout {
+    pub(crate) fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        Self {
+            project_json: root.join("project.json"),
+            schematic_json: root.join("schematic.json"),
+            board_json: root.join("board.json"),
+            libraries_dir: root.join("libraries"),
+            exports_dir: root.join("exports"),
+            backups_dir: root.join("backups"),
+            root,
+        }
+    }
+
+    pub(crate) fn create_dirs(&self) -> Result<(), String> {
+        for dir in [
+            &self.root,
+            &self.libraries_dir,
+            &self.exports_dir,
+            &self.backups_dir,
+        ] {
+            std::fs::create_dir_all(dir)
+                .map_err(|error| format!("Create {}: {error}", dir.display()))?;
+        }
+        Ok(())
+    }
+}
+
 /// Serialize components into their saved form.
 pub(crate) fn saved_components_from(components: &[Component]) -> Vec<SavedComponent> {
     components
@@ -219,5 +258,29 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(backup);
+    }
+
+    #[test]
+    fn project_folder_layout_matches_cluster_project_structure() {
+        let layout = ProjectFolderLayout::new("project.cluster");
+
+        assert_eq!(
+            layout.project_json,
+            PathBuf::from("project.cluster/project.json")
+        );
+        assert_eq!(
+            layout.schematic_json,
+            PathBuf::from("project.cluster/schematic.json")
+        );
+        assert_eq!(
+            layout.board_json,
+            PathBuf::from("project.cluster/board.json")
+        );
+        assert_eq!(
+            layout.libraries_dir,
+            PathBuf::from("project.cluster/libraries")
+        );
+        assert_eq!(layout.exports_dir, PathBuf::from("project.cluster/exports"));
+        assert_eq!(layout.backups_dir, PathBuf::from("project.cluster/backups"));
     }
 }

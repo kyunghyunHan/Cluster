@@ -52,6 +52,14 @@ impl NetlistUnionFind {
 }
 
 pub(crate) fn build_circuit_netlist(components: &[Component], wires: &[Wire]) -> CircuitNetlist {
+    build_circuit_netlist_with_annotations(components, wires, &NetlistAnnotations::default())
+}
+
+pub(crate) fn build_circuit_netlist_with_annotations(
+    components: &[Component],
+    wires: &[Wire],
+    annotations: &NetlistAnnotations,
+) -> CircuitNetlist {
     let mut nodes = NetlistNodes::default();
     let mut nets = NetlistUnionFind::default();
 
@@ -76,7 +84,10 @@ pub(crate) fn build_circuit_netlist(components: &[Component], wires: &[Wire]) ->
         }
     }
 
-    for contact in wire_contact_points(components, wires) {
+    for contact in wire_contact_points(components, wires)
+        .into_iter()
+        .chain(annotations.junctions.iter().copied())
+    {
         let contact_node = nodes.node_for(contact);
         nets.ensure(contact_node);
         for wire in wires {
@@ -95,6 +106,15 @@ pub(crate) fn build_circuit_netlist(components: &[Component], wires: &[Wire]) ->
 
     let mut label_nodes: HashMap<String, Vec<usize>> = HashMap::new();
     for component in components {
+        if component.kind == ComponentKind::Ground {
+            for pin in component_pin_defs(component) {
+                label_nodes
+                    .entry("gnd".to_string())
+                    .or_default()
+                    .push(nodes.node_for(pin.pos));
+            }
+            continue;
+        }
         if component.kind != ComponentKind::NetLabel {
             continue;
         }
@@ -168,15 +188,16 @@ pub(crate) fn build_circuit_netlist(components: &[Component], wires: &[Wire]) ->
     roots.dedup();
 
     let mut root_to_id = HashMap::new();
-    for root in roots {
+    for root in &roots {
         let next_id = root_to_id.len();
-        root_to_id.insert(root, next_id);
+        root_to_id.insert(*root, next_id);
     }
 
     let mut generated = 1usize;
-    let mut net_rows = root_to_id
+    let net_rows = roots
         .iter()
-        .map(|(&root, &id)| {
+        .map(|&root| {
+            let id = root_to_id[&root];
             let name = root_name_hints.get(&root).cloned().unwrap_or_else(|| {
                 let name = format!("NET_{generated:03}");
                 generated += 1;
@@ -189,11 +210,22 @@ pub(crate) fn build_circuit_netlist(components: &[Component], wires: &[Wire]) ->
             }
         })
         .collect::<Vec<_>>();
-    net_rows.sort_by_key(|net| net.id);
 
+    let mut no_connects = Vec::new();
     let pins = pin_rows
         .into_iter()
         .filter_map(|(root, component, pin)| {
+            let no_connect = annotations
+                .no_connects
+                .iter()
+                .any(|marker| marker.distance(pin.pos) <= 1.0);
+            if no_connect {
+                no_connects.push(NoConnectMarker {
+                    component_id: component.id,
+                    pin_name: pin.label.to_string(),
+                    position: pin.pos,
+                });
+            }
             Some(NetlistPin {
                 component_id: component.id,
                 component_label: component.label.clone(),
@@ -204,6 +236,7 @@ pub(crate) fn build_circuit_netlist(components: &[Component], wires: &[Wire]) ->
                 position: pin.pos,
                 net_id: *root_to_id.get(&root)?,
                 connected_by_wire: root_has_wire.contains(&root),
+                no_connect,
             })
         })
         .collect::<Vec<_>>();
@@ -232,7 +265,31 @@ pub(crate) fn build_circuit_netlist(components: &[Component], wires: &[Wire]) ->
         wire_nets,
         floating_wires,
         isolated_wires,
+        explicit_junctions: annotations.junctions.clone(),
+        no_connects,
     }
+}
+
+#[allow(dead_code)]
+pub(crate) fn build_multi_page_circuit_netlist(
+    pages: &[(&[Component], &[Wire])],
+) -> CircuitNetlist {
+    let mut components = Vec::new();
+    let mut wires = Vec::new();
+    for (page_index, (page_components, page_wires)) in pages.iter().enumerate() {
+        let offset = page_index as f32 * 1_000_000.0;
+        components.extend(page_components.iter().cloned().map(|mut component| {
+            component.pos.x += offset;
+            component
+        }));
+        wires.extend(page_wires.iter().cloned().map(|mut wire| {
+            for point in &mut wire.points {
+                point.x += offset;
+            }
+            wire
+        }));
+    }
+    build_circuit_netlist(&components, &wires)
 }
 
 fn electrical_type_for_role(role: PinRole) -> ElectricalType {
@@ -482,13 +539,16 @@ mod tests {
             "GND2",
             "0V",
         );
-        // Connect them with a wire
-        // GND pin is typically at component pos offset; use a wire near (100,200)→(300,200)
-        // to force the same net.  Without a wire they'd be isolated but both named GND.
         let netlist = build_circuit_netlist(&[gnd1, gnd2], &[]);
         let gnd_nets: Vec<_> = netlist.nets.iter().filter(|n| n.name == "GND").collect();
-        // Each isolated symbol becomes its own GND net
-        assert!(!gnd_nets.is_empty());
+        assert_eq!(gnd_nets.len(), 1);
+        let pin_nets = netlist
+            .pins
+            .iter()
+            .filter(|pin| pin.component_kind == ComponentKind::Ground)
+            .map(|pin| pin.net_id)
+            .collect::<HashSet<_>>();
+        assert_eq!(pin_nets.len(), 1);
     }
 
     // ── NetLabel names the net ───────────────────────────────────────────
@@ -530,5 +590,123 @@ mod tests {
             .map(|pin| pin.net_id)
             .collect::<HashSet<_>>();
         assert_eq!(label_nets.len(), 1);
+    }
+
+    #[test]
+    fn explicit_junction_dot_connects_crossing_wires() {
+        let horizontal = wire(1, vec![Pos2::new(0.0, 100.0), Pos2::new(200.0, 100.0)]);
+        let vertical = wire(2, vec![Pos2::new(100.0, 0.0), Pos2::new(100.0, 200.0)]);
+        let annotations = NetlistAnnotations {
+            junctions: vec![Pos2::new(100.0, 100.0)],
+            no_connects: Vec::new(),
+        };
+
+        let netlist =
+            build_circuit_netlist_with_annotations(&[], &[horizontal, vertical], &annotations);
+
+        assert_eq!(netlist.wire_nets[&1], netlist.wire_nets[&2]);
+        assert_eq!(netlist.explicit_junctions, annotations.junctions);
+    }
+
+    #[test]
+    fn no_connect_marker_marks_intentionally_open_pin() {
+        let resistor = comp(
+            1,
+            ComponentKind::Resistor,
+            Pos2::new(100.0, 100.0),
+            "R1",
+            "1k",
+        );
+        let pin_a = component_pin_defs(&resistor)
+            .into_iter()
+            .find(|pin| pin.label == "A")
+            .unwrap()
+            .pos;
+        let annotations = NetlistAnnotations {
+            junctions: Vec::new(),
+            no_connects: vec![pin_a],
+        };
+
+        let netlist = build_circuit_netlist_with_annotations(&[resistor], &[], &annotations);
+        let pin = netlist
+            .pins
+            .iter()
+            .find(|pin| pin.component_id == 1 && pin.pin_name == "A")
+            .unwrap();
+
+        assert!(pin.no_connect);
+        assert_eq!(netlist.no_connects.len(), 1);
+    }
+
+    #[test]
+    fn identical_net_labels_merge_across_pages_without_geometry_leakage() {
+        let page_a_label = comp(
+            1,
+            ComponentKind::NetLabel,
+            Pos2::new(100.0, 100.0),
+            "SDA_A",
+            "SDA",
+        );
+        let page_b_label = comp(
+            2,
+            ComponentKind::NetLabel,
+            Pos2::new(900.0, 100.0),
+            "SDA_B",
+            "SDA",
+        );
+        let page_a_wire = wire(10, vec![Pos2::new(0.0, 0.0), Pos2::new(20.0, 0.0)]);
+        let page_b_wire = wire(11, vec![Pos2::new(0.0, 0.0), Pos2::new(20.0, 0.0)]);
+
+        let netlist = build_multi_page_circuit_netlist(&[
+            (&[page_a_label][..], &[page_a_wire][..]),
+            (&[page_b_label][..], &[page_b_wire][..]),
+        ]);
+        let label_nets = netlist
+            .pins
+            .iter()
+            .filter(|pin| pin.component_kind == ComponentKind::NetLabel)
+            .map(|pin| pin.net_id)
+            .collect::<HashSet<_>>();
+
+        assert_eq!(label_nets.len(), 1);
+        assert_ne!(
+            netlist.wire_nets[&10], netlist.wire_nets[&11],
+            "Equal coordinates on different schematic pages must not connect unless labels do"
+        );
+    }
+
+    #[test]
+    fn generated_net_ids_and_names_are_deterministic() {
+        let r1 = comp(
+            1,
+            ComponentKind::Resistor,
+            Pos2::new(100.0, 100.0),
+            "R1",
+            "1k",
+        );
+        let r2 = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(300.0, 100.0),
+            "R2",
+            "2k",
+        );
+        let w1 = wire(10, vec![Pos2::new(10.0, 10.0), Pos2::new(20.0, 10.0)]);
+        let w2 = wire(11, vec![Pos2::new(30.0, 10.0), Pos2::new(40.0, 10.0)]);
+
+        let first = build_circuit_netlist(&[r1.clone(), r2.clone()], &[w1.clone(), w2.clone()]);
+        let second = build_circuit_netlist(&[r1, r2], &[w1, w2]);
+
+        let first_rows = first
+            .nets
+            .iter()
+            .map(|net| (net.id, net.name.clone()))
+            .collect::<Vec<_>>();
+        let second_rows = second
+            .nets
+            .iter()
+            .map(|net| (net.id, net.name.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(first_rows, second_rows);
     }
 }
