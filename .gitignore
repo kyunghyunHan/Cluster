@@ -6,3 +6,4 @@ cluster_autorecover.json.bak
 *.tmp
 project.cluster/backups/
 project.cluster/exports/
+.claude

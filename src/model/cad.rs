@@ -44,11 +44,14 @@ impl From<PinRole> for SymbolPinType {
     fn from(role: PinRole) -> Self {
         match role {
             PinRole::Passive => SymbolPinType::Passive,
-            PinRole::Positive => SymbolPinType::PowerIn,
+            PinRole::Positive | PinRole::PowerOutput => SymbolPinType::PowerIn,
             PinRole::Ground => SymbolPinType::PowerIn,
-            PinRole::Digital | PinRole::I2c => SymbolPinType::Bidirectional,
-            PinRole::Control => SymbolPinType::Input,
-            PinRole::Output => SymbolPinType::Output,
+            PinRole::Digital | PinRole::I2c | PinRole::Bidirectional => {
+                SymbolPinType::Bidirectional
+            }
+            PinRole::Control | PinRole::Input => SymbolPinType::Input,
+            PinRole::Output | PinRole::OpenCollector => SymbolPinType::Output,
+            PinRole::NoConnect => SymbolPinType::NoConnect,
         }
     }
 }

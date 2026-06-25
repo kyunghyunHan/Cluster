@@ -296,11 +296,16 @@ fn electrical_type_for_role(role: PinRole) -> ElectricalType {
     match role {
         PinRole::Passive => ElectricalType::Passive,
         PinRole::Positive => ElectricalType::PowerIn,
+        PinRole::PowerOutput => ElectricalType::PowerOutput,
         PinRole::Ground => ElectricalType::Ground,
         PinRole::Digital => ElectricalType::Digital,
         PinRole::I2c => ElectricalType::I2c,
         PinRole::Control => ElectricalType::Control,
         PinRole::Output => ElectricalType::Output,
+        PinRole::Input => ElectricalType::Input,
+        PinRole::Bidirectional => ElectricalType::Bidirectional,
+        PinRole::OpenCollector => ElectricalType::OpenCollector,
+        PinRole::NoConnect => ElectricalType::NoConnect,
     }
 }
 

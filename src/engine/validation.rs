@@ -42,6 +42,9 @@ pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolat
     check_floating_dc_nets(netlist, &mut v);
     check_open_voltage_sources(netlist, &mut v);
     check_symbolic_components(netlist, &mut v);
+    check_output_output_conflict(netlist, &mut v);
+    check_power_input_not_driven(netlist, &mut v);
+    check_unconnected_input_pins(netlist, &mut v);
 
     v
 }
@@ -1011,6 +1014,124 @@ fn net_has_pullup(netlist: &CircuitNetlist, signal_net: usize) -> bool {
                         })
                 })
         })
+}
+
+// ─── New ERC rules ───────────────────────────────────────────────────────────
+
+/// Two driven Output pins on the same net will fight each other; report an error.
+fn check_output_output_conflict(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    for net in &netlist.nets {
+        let drivers: Vec<&NetlistPin> = netlist
+            .pins
+            .iter()
+            .filter(|pin| {
+                pin.net_id == net.id
+                    && pin.connected_by_wire
+                    && pin.electrical_type.is_driver()
+                    // Power supply outputs naturally share rails — only warn on logic outputs
+                    && !matches!(
+                        pin.electrical_type,
+                        ElectricalType::PowerOutput | ElectricalType::OpenCollector
+                    )
+            })
+            .collect();
+
+        if drivers.len() >= 2 {
+            let names: Vec<String> = drivers
+                .iter()
+                .map(|p| format!("{}.{}", p.component_label, p.pin_name))
+                .collect();
+            v.push(ErcViolation {
+                severity: ErcSeverity::Error,
+                component_id: drivers.first().map(|p| p.component_id),
+                wire_id: None,
+                message: format!(
+                    "Output conflict on {}: {} are all driven outputs on the same net. \
+                     Only one driver per net is allowed.",
+                    net.name,
+                    names.join(", ")
+                ),
+            });
+        }
+    }
+}
+
+/// A PowerIn pin that shares a net with no PowerOutput means the rail has no supply.
+fn check_power_input_not_driven(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    for net in &netlist.nets {
+        let pins_here: Vec<&NetlistPin> = netlist
+            .pins
+            .iter()
+            .filter(|p| p.net_id == net.id && p.connected_by_wire)
+            .collect();
+
+        let has_power_in = pins_here
+            .iter()
+            .any(|p| p.electrical_type == ElectricalType::PowerIn);
+        if !has_power_in {
+            continue;
+        }
+
+        let has_supply = pins_here.iter().any(|p| {
+            p.electrical_type == ElectricalType::PowerOutput
+                // Batteries and ideal voltage sources are also valid supplies
+                || matches!(
+                    p.component_kind,
+                    ComponentKind::VSource | ComponentKind::Battery | ComponentKind::VoltageReg
+                )
+                // A named power net (VCC, 3V3, 5V) that has a ground on the same schematic
+                // is acceptable if its name implies a global power rail.
+                || p.pin_name.eq_ignore_ascii_case("VCC")
+                || pin_name_is_3v3(&p.pin_name)
+                || p.pin_name.eq_ignore_ascii_case("5V")
+        });
+
+        if !has_supply {
+            let consumer = pins_here
+                .iter()
+                .find(|p| p.electrical_type == ElectricalType::PowerIn);
+            if let Some(pin) = consumer {
+                v.push(ErcViolation {
+                    severity: ErcSeverity::Warning,
+                    component_id: Some(pin.component_id),
+                    wire_id: None,
+                    message: format!(
+                        "Power-in pin {}.{} on net {} has no power source. \
+                         Add a voltage source, regulator output, or power-flag net label.",
+                        pin.component_label, pin.pin_name, net.name
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// An Input pin with no wire connection has an undefined logic level — ERC warning.
+fn check_unconnected_input_pins(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let mut seen: HashSet<(u64, String)> = HashSet::new();
+    for pin in &netlist.pins {
+        if pin.electrical_type != ElectricalType::Input {
+            continue;
+        }
+        if pin.no_connect || pin.connected_by_wire {
+            continue;
+        }
+        let key = (pin.component_id, pin.pin_name.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+        v.push(ErcViolation {
+            severity: ErcSeverity::Warning,
+            component_id: Some(pin.component_id),
+            wire_id: None,
+            message: format!(
+                "Input pin {}.{} is unconnected. Floating inputs can cause undefined \
+                 behavior. Connect to a signal, pull-up, or pull-down resistor, or add \
+                 a No-Connect marker.",
+                pin.component_label, pin.pin_name
+            ),
+        });
+    }
 }
 
 // ─── Helper predicates ───────────────────────────────────────────────────────
