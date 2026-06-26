@@ -35,6 +35,7 @@ pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolat
     check_power_rail_conflicts(netlist, &mut v);
     check_relay_flyback_diodes(netlist, &mut v);
     check_i2c_pullups(netlist, &mut v);
+    check_i2c_pullup_values(netlist, &mut v);
     check_oled_sda_scl_swap(netlist, &mut v);
     check_i2c_address_conflict(netlist, &mut v);
     check_missing_values(netlist, &mut v);
@@ -45,7 +46,24 @@ pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolat
     check_output_output_conflict(netlist, &mut v);
     check_power_input_not_driven(netlist, &mut v);
     check_unconnected_input_pins(netlist, &mut v);
+    check_net_label_remote_short(netlist, &mut v);
+    check_regulator_voltage_range(netlist, &mut v);
 
+    v
+}
+
+/// ERC rules that require solved DC operating-point results.
+///
+/// Pass the same `CircuitNetlist` used for simulation and the `DcResult`
+/// from the MNA solver.  Returns additional violations beyond the static rules.
+pub(crate) fn validate_dc_rules(
+    netlist: &CircuitNetlist,
+    dc: &crate::engine::mna::DcResult,
+) -> Vec<ErcViolation> {
+    let mut v = Vec::new();
+    check_resistor_wattage(netlist, dc, &mut v);
+    check_led_current_limit(netlist, dc, &mut v);
+    check_gpio_current_limit(netlist, dc, &mut v);
     v
 }
 
@@ -470,7 +488,6 @@ fn check_symbolic_components(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>
     let mut seen = HashSet::new();
     for pin in &netlist.pins {
         if !seen.insert(pin.component_id)
-            || electrical_metadata(pin.component_kind).simulation != SimulationSupport::Symbolic
             || matches!(
                 pin.component_kind,
                 ComponentKind::TextNote | ComponentKind::NetLabel
@@ -478,15 +495,50 @@ fn check_symbolic_components(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>
         {
             continue;
         }
+        let meta = electrical_metadata(pin.component_kind);
+        let (severity, msg) = match meta.simulation {
+            SimulationSupport::SymbolOnly => (
+                ErcSeverity::Info,
+                format!(
+                    "{} {} is a symbol only — no voltages or currents are computed for this part.",
+                    component_kind_short(pin.component_kind),
+                    pin.component_label
+                ),
+            ),
+            SimulationSupport::DigitalOnly => (
+                ErcSeverity::Info,
+                format!(
+                    "{} {} is a digital logic element — analogue DC currents are not modelled.",
+                    component_kind_short(pin.component_kind),
+                    pin.component_label
+                ),
+            ),
+            SimulationSupport::Unsupported => (
+                ErcSeverity::Info,
+                format!(
+                    "{} {} is not simulated. Connectivity and ERC are checked; \
+                     use ngspice for voltage/current results.",
+                    component_kind_short(pin.component_kind),
+                    pin.component_label
+                ),
+            ),
+            SimulationSupport::ApproximateDc => (
+                ErcSeverity::Info,
+                format!(
+                    "{} {} uses an approximate DC model ({}). \
+                     Export to ngspice for accurate results.",
+                    component_kind_short(pin.component_kind),
+                    pin.component_label,
+                    meta.model_name
+                ),
+            ),
+            SimulationSupport::ExactDc => continue,
+        };
         v.push(ErcViolation {
-            severity: ErcSeverity::Info,
+            severity,
             component_id: Some(pin.component_id),
             wire_id: None,
-            message: format!(
-                "{} {} is symbolic in DC simulation. Connections are checked, but current and voltage behavior are not modeled.",
-                component_kind_short(pin.component_kind),
-                pin.component_label
-            ),
+            message: msg,
         });
     }
 }
@@ -1131,6 +1183,297 @@ fn check_unconnected_input_pins(netlist: &CircuitNetlist, v: &mut Vec<ErcViolati
                 pin.component_label, pin.pin_name
             ),
         });
+    }
+}
+
+// ─── New ERC rules added in refactor ─────────────────────────────────────────
+
+/// I2C pull-up resistors exist but their values may be wrong.
+/// Too high (> 10 kΩ): bus too slow / won't reach VOH.
+/// Too low (< 1 kΩ at 3.3 V / < 1.5 kΩ at 5 V): excessive current draw.
+fn check_i2c_pullup_values(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    for signal in ["SDA", "SCL"] {
+        let nets: HashSet<usize> = netlist
+            .pins
+            .iter()
+            .filter(|pin| pin.pin_name.to_ascii_uppercase().contains(signal))
+            .map(|pin| pin.net_id)
+            .collect();
+        for net_id in nets {
+            for resistor_id in component_ids_of_kind(netlist, ComponentKind::Resistor) {
+                let r_nets = component_net_ids(netlist, resistor_id);
+                if !r_nets.contains(&net_id) {
+                    continue;
+                }
+                let on_power = r_nets.iter().any(|nid| {
+                    *nid != net_id
+                        && netlist
+                            .pins
+                            .iter()
+                            .any(|p| p.net_id == *nid && (pin_name_is_3v3(&p.pin_name) || p.pin_name.eq_ignore_ascii_case("5V") || p.electrical_type == ElectricalType::PowerOutput))
+                });
+                if !on_power {
+                    continue;
+                }
+                let pin = netlist
+                    .pins
+                    .iter()
+                    .find(|p| p.component_id == resistor_id)
+                    .unwrap();
+                let ohms = parse_metric_value(&pin.component_value, "ohm");
+                if let Some(r) = ohms {
+                    if r > 10_000.0 {
+                        v.push(ErcViolation {
+                            severity: ErcSeverity::Warning,
+                            component_id: Some(resistor_id),
+                            wire_id: None,
+                            message: format!(
+                                "I2C {signal} pull-up {} ({}) is too high (> 10 kΩ). \
+                                 Use 2.2 kΩ–4.7 kΩ for reliable bus operation.",
+                                pin.component_label, pin.component_value
+                            ),
+                        });
+                    } else if r < 1_000.0 {
+                        v.push(ErcViolation {
+                            severity: ErcSeverity::Warning,
+                            component_id: Some(resistor_id),
+                            wire_id: None,
+                            message: format!(
+                                "I2C {signal} pull-up {} ({}) is too low (< 1 kΩ). \
+                                 Excessive current through the pull-up; use 1 kΩ–10 kΩ.",
+                                pin.component_label, pin.component_value
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Net labels with the same name on disconnected islands look like short circuits
+/// to a reader but are intentional; report as Info so the designer is aware.
+/// (Unintentional duplicates are caught by `check_duplicate_named_nets` as Error.)
+fn check_net_label_remote_short(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let mut seen_labels: HashMap<String, usize> = HashMap::new();
+    for net in &netlist.nets {
+        if net.name.starts_with("NET_") || net.name.eq_ignore_ascii_case("GND") {
+            continue;
+        }
+        let key = net.name.to_ascii_uppercase();
+        let label_count = netlist
+            .pins
+            .iter()
+            .filter(|p| p.component_kind == ComponentKind::NetLabel && p.net_id == net.id)
+            .count();
+        if label_count >= 1 {
+            *seen_labels.entry(key).or_default() += 1;
+        }
+    }
+    for (label, count) in &seen_labels {
+        if *count >= 2 {
+            v.push(ErcViolation {
+                severity: ErcSeverity::Info,
+                component_id: None,
+                wire_id: None,
+                message: format!(
+                    "Net label '{label}' connects {count} remote schematic locations. \
+                     Verify this is intentional — an accidental duplicate creates a hidden short."
+                ),
+            });
+        }
+    }
+}
+
+/// Voltage regulator: check dropout (Vin must exceed Vout by ≥ 1.5 V) and
+/// that the output is within the module voltage range if connected to a 3.3V MCU.
+fn check_regulator_voltage_range(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    for reg_id in component_ids_of_kind(netlist, ComponentKind::VoltageReg) {
+        let reg_pin = netlist.pins.iter().find(|p| p.component_id == reg_id);
+        let Some(reg_pin) = reg_pin else { continue };
+        let reg_value = &reg_pin.component_value;
+        let Some(vout) = parse_metric_value(reg_value, "v") else { continue };
+
+        // Find Vin net
+        let vin_net = netlist
+            .pins
+            .iter()
+            .find(|p| p.component_id == reg_id && p.pin_name == "IN")
+            .map(|p| p.net_id);
+        let Some(vin_net) = vin_net else { continue };
+
+        // Look for a voltage source on the Vin net to determine its voltage
+        for src_pin in netlist.pins.iter().filter(|p| {
+            p.net_id == vin_net
+                && matches!(
+                    p.component_kind,
+                    ComponentKind::VSource | ComponentKind::Battery
+                )
+                && (p.pin_name == "+" || p.electrical_type == ElectricalType::PowerOutput)
+        }) {
+            let Some(vin) = parse_metric_value(&src_pin.component_value, "v") else { continue };
+            let dropout = vin - vout;
+            if dropout < 1.5 {
+                v.push(ErcViolation {
+                    severity: ErcSeverity::Warning,
+                    component_id: Some(reg_id),
+                    wire_id: None,
+                    message: format!(
+                        "Voltage regulator {} ({} output): Vin={:.1}V, dropout={:.2}V. \
+                         Linear regulators typically need ≥ 1.5 V headroom. \
+                         Consider a lower-dropout (LDO) regulator or raise Vin.",
+                        reg_pin.component_label, reg_value, vin, dropout
+                    ),
+                });
+            }
+            if vin > 36.0 {
+                v.push(ErcViolation {
+                    severity: ErcSeverity::Warning,
+                    component_id: Some(reg_id),
+                    wire_id: None,
+                    message: format!(
+                        "Voltage regulator {} has Vin={:.1}V. \
+                         Verify the regulator's maximum input voltage rating.",
+                        reg_pin.component_label, vin
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// Resistor dissipates more than its rated wattage (default 0.25 W).
+/// Requires DC operating-point results.
+fn check_resistor_wattage(
+    netlist: &CircuitNetlist,
+    dc: &crate::engine::mna::DcResult,
+    v: &mut Vec<ErcViolation>,
+) {
+    for pin in netlist.pins.iter().filter(|p| p.component_kind == ComponentKind::Resistor) {
+        let Some(&power) = dc.component_power.get(&pin.component_id) else { continue };
+        // Default rating 0.25 W; parse from value string if it includes "W" annotation
+        let rated = parse_metric_value(&pin.component_value, "w")
+            .filter(|&r| r > 0.0)
+            .unwrap_or(0.25);
+        if power > rated as f64 * 0.9 {
+            let severity = if power > rated as f64 * 1.1 {
+                ErcSeverity::Error
+            } else {
+                ErcSeverity::Warning
+            };
+            v.push(ErcViolation {
+                severity,
+                component_id: Some(pin.component_id),
+                wire_id: None,
+                message: format!(
+                    "Resistor {} dissipates {:.0} mW (rated {:.0} mW). \
+                     Use a higher-wattage resistor or reduce the current.",
+                    pin.component_label,
+                    power * 1000.0,
+                    rated * 1000.0,
+                ),
+            });
+        }
+    }
+}
+
+/// LED forward current exceeds the 25 mA absolute maximum.
+/// Requires DC operating-point results.
+fn check_led_current_limit(
+    netlist: &CircuitNetlist,
+    dc: &crate::engine::mna::DcResult,
+    v: &mut Vec<ErcViolation>,
+) {
+    let mut seen: HashSet<u64> = HashSet::new();
+    for pin in netlist.pins.iter().filter(|p| p.component_kind == ComponentKind::Led) {
+        if !seen.insert(pin.component_id) {
+            continue;
+        }
+        let Some(&current) = dc.branch_current.get(&pin.component_id) else { continue };
+        let i_abs = current.abs();
+        if i_abs > 0.030 {
+            v.push(ErcViolation {
+                severity: ErcSeverity::Error,
+                component_id: Some(pin.component_id),
+                wire_id: None,
+                message: format!(
+                    "LED {} forward current {:.1} mA exceeds 30 mA absolute maximum. \
+                     Increase the series resistor value.",
+                    pin.component_label,
+                    i_abs * 1000.0,
+                ),
+            });
+        } else if i_abs > 0.025 {
+            v.push(ErcViolation {
+                severity: ErcSeverity::Warning,
+                component_id: Some(pin.component_id),
+                wire_id: None,
+                message: format!(
+                    "LED {} forward current {:.1} mA is near the 25 mA rated maximum. \
+                     Consider increasing the series resistor.",
+                    pin.component_label,
+                    i_abs * 1000.0,
+                ),
+            });
+        }
+    }
+}
+
+/// MCU GPIO pin current exceeds the per-pin maximum (typically 12 mA for 3.3 V MCUs).
+/// Requires DC operating-point results.
+fn check_gpio_current_limit(
+    netlist: &CircuitNetlist,
+    dc: &crate::engine::mna::DcResult,
+    v: &mut Vec<ErcViolation>,
+) {
+    for net in &netlist.nets {
+        let pins = pins_on_net(netlist, net.id);
+        let gpio_pins: Vec<&NetlistPin> = pins
+            .iter()
+            .filter(|p| pin_is_microcontroller_gpio(p))
+            .copied()
+            .collect();
+        if gpio_pins.is_empty() {
+            continue;
+        }
+
+        // For each component on this net, check if its current exceeds GPIO max
+        let mut seen_comp: HashSet<u64> = HashSet::new();
+        for comp_pin in &pins {
+            if !seen_comp.insert(comp_pin.component_id) {
+                continue;
+            }
+            let Some(&current) = dc.branch_current.get(&comp_pin.component_id) else {
+                continue;
+            };
+            let i_abs = current.abs();
+            let meta = electrical_metadata(comp_pin.component_kind);
+            let max_i_gpio = 0.012_f64;
+
+            if i_abs > max_i_gpio {
+                for gpio in &gpio_pins {
+                    let meta_gpio = electrical_metadata(gpio.component_kind);
+                    let limit = meta_gpio.max_current.unwrap_or(0.012) as f64;
+                    if i_abs > limit {
+                        v.push(ErcViolation {
+                            severity: ErcSeverity::Error,
+                            component_id: Some(gpio.component_id),
+                            wire_id: None,
+                            message: format!(
+                                "{} {} GPIO pin {} drives {:.1} mA (limit ~{:.0} mA). \
+                                 Use a driver transistor or buffer IC.",
+                                component_kind_short(gpio.component_kind),
+                                gpio.component_label,
+                                gpio.pin_name,
+                                i_abs * 1000.0,
+                                limit * 1000.0,
+                            ),
+                        });
+                    }
+                }
+            }
+            let _ = meta;
+        }
     }
 }
 

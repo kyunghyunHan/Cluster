@@ -24,15 +24,26 @@ pub struct DcResult {
     pub net_voltages: HashMap<usize, f64>,
     /// component_id → voltage across the component (V_a − V_b)
     pub component_voltage: HashMap<u64, f64>,
-    /// component_id → conventional current through the component (A)
+    /// component_id → conventional current through the component (A).
+    /// This is the authoritative current source for visualisation.
     pub branch_current: HashMap<u64, f64>,
     /// component_id → power dissipated (W, always ≥ 0)
     pub component_power: HashMap<u64, f64>,
-    /// wire_id → representative voltage on that wire (V)
+    /// wire_id → net voltage (V).  All points on an ideal wire share the same
+    /// voltage, so one value per wire is correct.
     pub wire_voltage: HashMap<u64, f64>,
-    /// wire_id → conventional current along the stored wire point order (A)
+    /// wire_id → net root index used during netlist construction.
+    /// Allows callers to look up [`net_voltages`] without repeating the
+    /// position → root lookup.
+    pub wire_net_root: HashMap<u64, usize>,
+    /// wire_id → conventional current along the wire (A).
+    ///
+    /// **Only valid when `wire_current_known` contains this wire ID.**
+    /// A wire at a T-junction carries different currents on each sub-segment;
+    /// displaying a single value there would be physically misleading.
+    /// Prefer showing [`branch_current`] on components and voltage colour on wires.
     pub wire_current: HashMap<u64, f64>,
-    /// Wires whose single displayed current is valid across the whole polyline.
+    /// Wires whose single displayed current is unambiguous (no mid-wire branch).
     pub wire_current_known: HashSet<u64>,
     /// component_id → whether the component dissipates or supplies power
     pub component_power_role: HashMap<u64, ComponentPowerRole>,
@@ -1327,21 +1338,24 @@ pub fn solve_dc_detailed(
         );
     }
 
-    // Wire voltages: average of MNA voltages at all wire-point nodes
+    // Wire voltages and net roots.
+    // All points on an ideal wire share the same net root → same voltage.
+    // We record the net root so callers can query net_voltages without
+    // repeating the position→root lookup.
     let mut wire_voltage: HashMap<u64, f64> = HashMap::new();
+    let mut wire_net_root: HashMap<u64, usize> = HashMap::new();
     for wire in wires {
-        let mut sum = 0.0;
-        let mut cnt = 0usize;
-        for &pt in &wire.points {
-            if let Some(root) = nm.root_of(pt) {
-                if let Some(&mna_idx) = mna_of.get(&root) {
-                    sum += vnode(mna_idx);
-                    cnt += 1;
-                }
+        // Use the first point's root as the canonical root for this wire.
+        let wire_root = wire
+            .points
+            .first()
+            .and_then(|&pt| nm.root_of(pt));
+
+        if let Some(root) = wire_root {
+            wire_net_root.insert(wire.id, root);
+            if let Some(&mna_idx) = mna_of.get(&root) {
+                wire_voltage.insert(wire.id, vnode(mna_idx));
             }
-        }
-        if cnt > 0 {
-            wire_voltage.insert(wire.id, sum / cnt as f64);
         }
     }
 
@@ -1410,6 +1424,7 @@ pub fn solve_dc_detailed(
         branch_current,
         component_power,
         wire_voltage,
+        wire_net_root,
         wire_current,
         wire_current_known,
         component_power_role,

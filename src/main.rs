@@ -9641,6 +9641,15 @@ fn draw_component(
     }
 }
 
+/// Draw a single wire polyline.
+///
+/// `dc_current` **must** be `None` when the wire is at a T-junction or
+/// multi-branch net — passing a value there would display a physically
+/// incorrect net-wide current.  Callers are responsible for supplying
+/// `Some(I)` only when `DcResult::wire_current_known` contains the wire ID.
+///
+/// Voltage colour is always shown when `dc_voltage` is `Some`.  Current
+/// arrows and thickness scaling are suppressed when `dc_current` is `None`.
 fn draw_wire(
     painter: &egui::Painter,
     wire: &Wire,
@@ -9658,7 +9667,8 @@ fn draw_wire(
     open_wire: bool,
     view: CanvasView,
 ) {
-    // Wire thickness is based on solved branch current, not energized voltage.
+    // Wire thickness scales with branch current only when it is well-defined.
+    // Never scale by a net-wide average — that would be physically misleading.
     let wire_current = dc_current
         .map(|current| {
             if dc_current_max > 1e-12 {

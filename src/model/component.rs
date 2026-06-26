@@ -79,35 +79,56 @@ pub(crate) struct Component {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SimulationSupport {
-    DcMna,
-    DcApproximate,
-    ConnectivityOnly,
-    Symbolic,
+    /// Full DC operating-point via Modified Nodal Analysis.
+    ExactDc,
+    /// Simplified DC model (piecewise linear, companion model).
+    /// Values are educational approximations — not SPICE sign-off accuracy.
+    ApproximateDc,
+    /// Digital logic only; analogue DC currents are not modelled.
+    DigitalOnly,
+    /// Schematic symbol only; no electrical behaviour is modelled at all.
+    SymbolOnly,
+    /// Connectivity and ERC are checked, but voltages/currents are not computed.
+    Unsupported,
 }
 
 impl SimulationSupport {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            SimulationSupport::DcMna => "DC MNA",
-            SimulationSupport::DcApproximate => "Approximate DC",
-            SimulationSupport::ConnectivityOnly => "ERC / connectivity only",
-            SimulationSupport::Symbolic => "Visual / metadata only",
+            SimulationSupport::ExactDc => "Exact DC (MNA)",
+            SimulationSupport::ApproximateDc => "Approximate DC",
+            SimulationSupport::DigitalOnly => "Digital / logic only",
+            SimulationSupport::SymbolOnly => "Symbol only",
+            SimulationSupport::Unsupported => "Not simulated",
         }
     }
 
     pub(crate) fn warning(self) -> Option<&'static str> {
         match self {
-            SimulationSupport::DcMna => None,
-            SimulationSupport::DcApproximate => {
-                Some("Values are educational approximations. Export SPICE for sign-off analysis.")
-            }
-            SimulationSupport::ConnectivityOnly => Some(
-                "Cluster checks wiring and ERC, but does not compute physical behavior for this part.",
+            SimulationSupport::ExactDc => None,
+            SimulationSupport::ApproximateDc => Some(
+                "Values are educational approximations, not SPICE sign-off accuracy. \
+                 Export to ngspice for precise results.",
             ),
-            SimulationSupport::Symbolic => Some(
-                "This part is not simulated. Do not treat displayed wiring state as an electrical result.",
+            SimulationSupport::DigitalOnly => Some(
+                "This part is treated as a digital element. \
+                 Analogue DC currents and voltages are not modelled.",
+            ),
+            SimulationSupport::SymbolOnly => Some(
+                "This part is a schematic symbol only. \
+                 No electrical behaviour is modelled. Do not trust wiring state as a simulation result.",
+            ),
+            SimulationSupport::Unsupported => Some(
+                "Cluster checks connectivity and ERC for this part but does not \
+                 compute voltages or currents. Use ngspice for simulation.",
             ),
         }
+    }
+
+    /// True if this simulation support level implies the component is approximate
+    /// or unsupported — show a warning in the inspector.
+    pub(crate) fn needs_inspector_warning(self) -> bool {
+        !matches!(self, SimulationSupport::ExactDc)
     }
 }
 
@@ -127,60 +148,60 @@ pub(crate) fn electrical_metadata(kind: ComponentKind) -> ElectricalMetadata {
     use SimulationSupport::*;
 
     let (pin_count, simulation, model_name) = match kind {
-        Resistor => (Some(2), DcMna, "Linear resistor"),
-        Capacitor => (Some(2), DcMna, "Open circuit in DC"),
-        Inductor => (Some(2), DcMna, "Short circuit in DC"),
-        Diode => (Some(2), DcApproximate, "Piecewise silicon diode"),
-        Led => (Some(2), DcApproximate, "Piecewise LED"),
-        ZenerDiode => (Some(2), DcApproximate, "Zener breakdown approximation"),
-        SchottkyDiode => (Some(2), DcApproximate, "Piecewise Schottky diode"),
-        TvsDiode => (Some(2), DcApproximate, "DC clamp approximation"),
-        Switch | PushButton | SlideSwitch => (Some(2), DcMna, "Ideal open/closed switch"),
-        Ground => (Some(1), DcMna, "0 V reference"),
-        VSource | Battery => (Some(2), DcMna, "Ideal DC voltage source"),
-        ISource => (Some(2), DcMna, "Ideal DC current source"),
-        Lamp => (Some(2), DcMna, "Fixed resistance load"),
-        Potentiometer => (Some(3), DcMna, "Fixed wiper approximation"),
-        NpnTransistor | PnpTransistor => (Some(3), DcApproximate, "Linearized BJT"),
-        Nmosfet | Pmosfet => (Some(3), DcApproximate, "Threshold switch MOSFET"),
+        Resistor => (Some(2), ExactDc, "Linear resistor"),
+        Capacitor => (Some(2), ExactDc, "Open circuit in DC"),
+        Inductor => (Some(2), ExactDc, "Short circuit in DC"),
+        Diode => (Some(2), ApproximateDc, "Piecewise silicon diode"),
+        Led => (Some(2), ApproximateDc, "Piecewise LED"),
+        ZenerDiode => (Some(2), ApproximateDc, "Zener breakdown approximation"),
+        SchottkyDiode => (Some(2), ApproximateDc, "Piecewise Schottky diode"),
+        TvsDiode => (Some(2), ApproximateDc, "DC clamp approximation"),
+        Switch | PushButton | SlideSwitch => (Some(2), ExactDc, "Ideal open/closed switch"),
+        Ground => (Some(1), ExactDc, "0 V reference"),
+        VSource | Battery => (Some(2), ExactDc, "Ideal DC voltage source"),
+        ISource => (Some(2), ExactDc, "Ideal DC current source"),
+        Lamp => (Some(2), ApproximateDc, "Fixed resistance load — approximate"),
+        Potentiometer => (Some(3), ExactDc, "Fixed wiper approximation"),
+        NpnTransistor | PnpTransistor => (Some(3), ApproximateDc, "Linearized BJT companion model"),
+        Nmosfet | Pmosfet => (Some(3), ApproximateDc, "Threshold-switch MOSFET model"),
         VoltageReg => (
             Some(3),
-            ConnectivityOnly,
-            "Pass-through regulator approximation",
+            ApproximateDc,
+            "Pass-through regulator — approximate; no regulation modelled",
         ),
-        Fuse => (Some(2), DcMna, "Low resistance fuse"),
-        Relay => (Some(5), DcApproximate, "Coil + ideal contact"),
-        DcMotor => (Some(2), DcApproximate, "Fixed resistance motor load"),
-        Thermistor | Varistor => (Some(2), DcApproximate, "Fixed resistance approximation"),
-        Phototransistor => (Some(2), DcApproximate, "Fixed resistance approximation"),
-        Voltmeter => (Some(2), DcMna, "1 Mohm voltmeter"),
-        Ammeter => (Some(2), DcMna, "1 milliohm ammeter"),
-        Timer555 => (Some(8), Symbolic, "Symbolic in DC simulation"),
+        Fuse => (Some(2), ExactDc, "Low resistance fuse"),
+        Relay => (Some(5), ApproximateDc, "Coil resistance + ideal contact"),
+        DcMotor => (Some(2), ApproximateDc, "Fixed winding resistance — no back-EMF"),
+        Thermistor | Varistor => (Some(2), ApproximateDc, "Fixed resistance approximation"),
+        Phototransistor => (Some(2), ApproximateDc, "Fixed resistance approximation"),
+        Voltmeter => (Some(2), ExactDc, "1 MΩ voltmeter probe"),
+        Ammeter => (Some(2), ExactDc, "1 mΩ ammeter shunt"),
+        Timer555 => (Some(8), SymbolOnly, "Symbolic — not modelled in DC"),
         LogicNot | LogicAnd | LogicOr | LogicNand | LogicNor | LogicXor => {
-            (None, Symbolic, "Symbolic logic component")
+            (None, DigitalOnly, "Digital logic gate — no DC current model")
         }
         Esp32 | Esp32S3 | Esp32C3 | ArduinoUno | RaspberryPiPico => {
-            (None, ConnectivityOnly, "Powered module connectivity model")
+            (None, Unsupported, "MCU — connectivity and ERC only")
         }
-        Breadboard => (None, Symbolic, "Symbolic breadboard"),
-        Servo => (Some(3), Symbolic, "Symbolic PWM servo"),
-        Oled | Sensor => (Some(4), Symbolic, "Symbolic I2C module"),
-        NetLabel => (Some(2), ConnectivityOnly, "Net alias"),
-        Crystal => (Some(2), Symbolic, "Symbolic crystal"),
-        Transformer => (Some(4), Symbolic, "Symbolic transformer"),
-        Display7Seg => (None, Symbolic, "Symbolic display"),
-        VoltageRef => (Some(3), Symbolic, "Symbolic voltage reference"),
-        MotorDriver => (None, Symbolic, "Symbolic motor driver"),
-        Optocoupler => (Some(4), Symbolic, "Symbolic optocoupler"),
-        GenericIc => (None, Symbolic, "Symbolic generic IC"),
-        OpAmp => (Some(3), Symbolic, "Symbolic op amp"),
-        TextNote => (Some(0), Symbolic, "Annotation only"),
-        Dht11 => (Some(3), ConnectivityOnly, "1-Wire digital sensor"),
-        Dht22 => (Some(3), ConnectivityOnly, "1-Wire digital sensor"),
-        HcSr04 => (Some(4), ConnectivityOnly, "Ultrasonic distance sensor"),
-        Buzzer => (Some(2), DcApproximate, "Piezo buzzer load"),
-        NeoPixel => (Some(3), ConnectivityOnly, "WS2812 addressable LED"),
-        PirSensor => (Some(3), ConnectivityOnly, "PIR motion sensor"),
+        Breadboard => (None, SymbolOnly, "Symbolic breadboard"),
+        Servo => (Some(3), SymbolOnly, "Symbolic PWM servo"),
+        Oled | Sensor => (Some(4), Unsupported, "I²C module — connectivity and ERC only"),
+        NetLabel => (Some(2), Unsupported, "Net alias"),
+        Crystal => (Some(2), SymbolOnly, "Symbolic crystal oscillator"),
+        Transformer => (Some(4), SymbolOnly, "Symbolic transformer"),
+        Display7Seg => (None, SymbolOnly, "Symbolic 7-segment display"),
+        VoltageRef => (Some(3), ApproximateDc, "Approximate voltage reference stub"),
+        MotorDriver => (None, Unsupported, "Motor driver — ERC only"),
+        Optocoupler => (Some(4), SymbolOnly, "Symbolic optocoupler"),
+        GenericIc => (None, SymbolOnly, "Symbolic generic IC"),
+        OpAmp => (Some(3), SymbolOnly, "Symbolic op-amp — SPICE needed for accuracy"),
+        TextNote => (Some(0), SymbolOnly, "Annotation only"),
+        Dht11 => (Some(3), Unsupported, "1-Wire digital sensor — ERC only"),
+        Dht22 => (Some(3), Unsupported, "1-Wire digital sensor — ERC only"),
+        HcSr04 => (Some(4), Unsupported, "Ultrasonic sensor — ERC only"),
+        Buzzer => (Some(2), ApproximateDc, "Piezo buzzer — resistive load approximation"),
+        NeoPixel => (Some(3), Unsupported, "WS2812 LED — ERC only"),
+        PirSensor => (Some(3), Unsupported, "PIR sensor — ERC only"),
     };
 
     let (voltage_range, max_current, needs_current_limit, needs_driver) = match kind {
@@ -218,11 +239,11 @@ mod tests {
         assert!(electrical_metadata(ComponentKind::DcMotor).needs_driver);
         assert_eq!(
             electrical_metadata(ComponentKind::Timer555).simulation,
-            SimulationSupport::Symbolic
+            SimulationSupport::SymbolOnly
         );
         assert_eq!(
             electrical_metadata(ComponentKind::Led).simulation,
-            SimulationSupport::DcApproximate
+            SimulationSupport::ApproximateDc
         );
         assert!(
             electrical_metadata(ComponentKind::Led)
