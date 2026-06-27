@@ -1,5 +1,4 @@
 use crate::model::*;
-use crate::{component_pin_defs, point_touches_wire_segment};
 use egui::Pos2;
 use std::collections::{HashMap, HashSet};
 

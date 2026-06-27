@@ -1,5 +1,5 @@
+use crate::engine::units::parse_metric_value;
 use crate::model::*;
-use crate::parse_metric_value;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

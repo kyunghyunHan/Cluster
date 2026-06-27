@@ -5,6 +5,7 @@ pub(crate) mod graph;
 pub(crate) mod library;
 pub(crate) mod net;
 pub(crate) mod pin;
+pub(crate) mod pin_defs;
 pub(crate) mod wire;
 
 pub(crate) use circuit::{
@@ -18,4 +19,10 @@ pub(crate) use graph::{
 };
 pub(crate) use net::{CircuitNetlist, Net, NetlistAnnotations, NoConnectMarker};
 pub(crate) use pin::{CircuitPin, ElectricalType, NetlistPin, PinRef, PinRole};
-pub(crate) use wire::Wire;
+// Only the items needed by code outside the model module are re-exported.
+// module_pin, module_pin_defs, breadboard_pin_defs, module_pin_y are internal
+// helpers used only within pin_defs.rs.
+pub(crate) use pin_defs::{
+    component_pin_defs, component_pins, component_size, module_pin_y, rotate_point,
+};
+pub(crate) use wire::{Wire, distance_to_segment, point_touches_wire_segment};

@@ -259,7 +259,7 @@ pub(crate) fn build_schematic_graph(
     explicit_junctions: &[Pos2],
 ) -> SchematicGraph {
     use crate::model::ComponentKind;
-    use crate::{component_pin_defs, point_touches_wire_segment};
+    use crate::model::{component_pin_defs, point_touches_wire_segment};
 
     const SNAP: f32 = 1.0;
 
