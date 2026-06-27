@@ -59,6 +59,7 @@ pub(crate) fn build_circuit_netlist_with_annotations(
     wires: &[Wire],
     annotations: &NetlistAnnotations,
 ) -> CircuitNetlist {
+    let graph = build_schematic_graph(components, wires, &annotations.junctions);
     let mut nodes = NetlistNodes::default();
     let mut nets = NetlistUnionFind::default();
 
@@ -258,10 +259,27 @@ pub(crate) fn build_circuit_netlist_with_annotations(
         }
     }
 
+    let wire_segments = graph
+        .segments
+        .iter()
+        .filter_map(|segment| {
+            let from_pos = graph.node_by_id(segment.from_node)?.position;
+            let root = nets.find(nodes.node_for(from_pos));
+            let net_id = root_to_id.get(&root).copied()?;
+            Some(WireNetSegment {
+                id: segment.id,
+                source_wire_id: segment.source_wire_id,
+                net_id,
+                points: segment.points.clone(),
+            })
+        })
+        .collect();
+
     CircuitNetlist {
         nets: net_rows,
         pins,
         wire_nets,
+        wire_segments,
         floating_wires,
         isolated_wires,
         explicit_junctions: annotations.junctions.clone(),
@@ -447,6 +465,15 @@ mod tests {
         let net1 = netlist.wire_nets[&1];
         let net2 = netlist.wire_nets[&2];
         assert_eq!(net1, net2, "T-junction wires must share a net");
+        let horizontal_segments = netlist
+            .wire_segments
+            .iter()
+            .filter(|segment| segment.source_wire_id == 1)
+            .count();
+        assert_eq!(
+            horizontal_segments, 2,
+            "A T-junction must split the touched wire into segment-level graph edges"
+        );
     }
 
     #[test]
@@ -458,6 +485,17 @@ mod tests {
         assert_ne!(
             netlist.wire_nets[&1], netlist.wire_nets[&2],
             "Interior wire crossings must not connect without an explicit contact point"
+        );
+        assert_eq!(netlist.wire_segments.len(), 2);
+        let segment_nets = netlist
+            .wire_segments
+            .iter()
+            .map(|segment| segment.net_id)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            segment_nets.len(),
+            2,
+            "Crossing wires without a junction remain separate segment nets"
         );
     }
 
@@ -610,6 +648,17 @@ mod tests {
 
         assert_eq!(netlist.wire_nets[&1], netlist.wire_nets[&2]);
         assert_eq!(netlist.explicit_junctions, annotations.junctions);
+        assert_eq!(
+            netlist.wire_segments.len(),
+            4,
+            "An explicit junction at a crossing splits both crossed wires"
+        );
+        let segment_nets = netlist
+            .wire_segments
+            .iter()
+            .map(|segment| segment.net_id)
+            .collect::<HashSet<_>>();
+        assert_eq!(segment_nets.len(), 1);
     }
 
     #[test]

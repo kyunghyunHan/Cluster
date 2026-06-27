@@ -11754,6 +11754,8 @@ mod tests {
                     points: vec![SavedPoint { x: 0.0, y: 0.0 }],
                 },
             ],
+            junction_dots: Vec::new(),
+            no_connect_markers: Vec::new(),
             pages: Vec::new(),
             current_page: 0,
         };

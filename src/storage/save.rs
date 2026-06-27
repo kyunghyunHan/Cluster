@@ -6,7 +6,7 @@ use egui::Pos2;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectFolderLayout {

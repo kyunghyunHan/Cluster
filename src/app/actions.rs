@@ -1166,21 +1166,25 @@ impl SavedCircuit {
                 counters,
                 components: saved_components_from(&components),
                 wires: saved_wires_from(&wires),
+                junction_dots: Vec::new(),
+                no_connect_markers: Vec::new(),
             })
             .collect::<Vec<_>>();
         Self {
-            schema_version: 2,
+            schema_version: 3,
             next_id: app.next_id,
             counters: app.counters.clone(),
             components: saved_components_from(&app.components),
             wires: saved_wires_from(&app.wires),
+            junction_dots: Vec::new(),
+            no_connect_markers: Vec::new(),
             pages,
             current_page: app.current_page,
         }
     }
 
     pub(crate) fn into_snapshot(self) -> Result<(CircuitSnapshot, Vec<String>), String> {
-        if self.schema_version > 2 {
+        if self.schema_version > 3 {
             return Err(format!(
                 "Unsupported schema version {}.",
                 self.schema_version
@@ -1199,6 +1203,12 @@ impl SavedCircuit {
                 self.counters,
                 &mut load_notes,
             );
+            validate_saved_annotations(
+                self.junction_dots,
+                self.no_connect_markers,
+                "Page 1",
+                &mut load_notes,
+            );
             pages.push(page);
         } else {
             for (idx, page) in self.pages.into_iter().enumerate() {
@@ -1208,6 +1218,12 @@ impl SavedCircuit {
                 } else {
                     page.name
                 };
+                validate_saved_annotations(
+                    page.junction_dots,
+                    page.no_connect_markers,
+                    &name,
+                    &mut load_notes,
+                );
                 pages.push(repair_saved_page(
                     name,
                     page.components,
@@ -1369,4 +1385,30 @@ fn repair_saved_page(
         .unwrap_or(0);
     let next_id = saved_next_id.max(max_id + 1).max(repair_id);
     (name, components, wires, next_id, saved_counters)
+}
+
+fn validate_saved_annotations(
+    junction_dots: Vec<SavedJunctionDot>,
+    no_connect_markers: Vec<SavedNoConnectMarker>,
+    page_name: &str,
+    load_notes: &mut Vec<String>,
+) {
+    let invalid_junctions = junction_dots
+        .iter()
+        .filter(|dot| dot.id == 0 || !dot.x.is_finite() || !dot.y.is_finite())
+        .count();
+    let invalid_no_connects = no_connect_markers
+        .iter()
+        .filter(|marker| marker.id == 0 || !marker.x.is_finite() || !marker.y.is_finite())
+        .count();
+    if invalid_junctions > 0 {
+        load_notes.push(format!(
+            "Dropped {invalid_junctions} invalid junction marker(s) on {page_name}."
+        ));
+    }
+    if invalid_no_connects > 0 {
+        load_notes.push(format!(
+            "Dropped {invalid_no_connects} invalid no-connect marker(s) on {page_name}."
+        ));
+    }
 }

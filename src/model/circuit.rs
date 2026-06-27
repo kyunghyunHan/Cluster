@@ -60,6 +60,10 @@ pub(crate) struct SavedCircuit {
     pub(crate) components: Vec<SavedComponent>,
     pub(crate) wires: Vec<SavedWire>,
     #[serde(default)]
+    pub(crate) junction_dots: Vec<SavedJunctionDot>,
+    #[serde(default)]
+    pub(crate) no_connect_markers: Vec<SavedNoConnectMarker>,
+    #[serde(default)]
     pub(crate) pages: Vec<SavedPage>,
     #[serde(default)]
     pub(crate) current_page: usize,
@@ -72,6 +76,10 @@ pub(crate) struct SavedPage {
     pub(crate) counters: Counters,
     pub(crate) components: Vec<SavedComponent>,
     pub(crate) wires: Vec<SavedWire>,
+    #[serde(default)]
+    pub(crate) junction_dots: Vec<SavedJunctionDot>,
+    #[serde(default)]
+    pub(crate) no_connect_markers: Vec<SavedNoConnectMarker>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,6 +97,20 @@ pub(crate) struct SavedComponent {
 pub(crate) struct SavedWire {
     pub(crate) id: u64,
     pub(crate) points: Vec<SavedPoint>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct SavedJunctionDot {
+    pub(crate) id: u64,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct SavedNoConnectMarker {
+    pub(crate) id: u64,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

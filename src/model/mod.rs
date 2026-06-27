@@ -10,14 +10,16 @@ pub(crate) mod wire;
 
 pub(crate) use circuit::{
     CircuitSnapshot, Counters, DragState, SavedCircuit, SavedComponent, SavedPage, SavedPoint,
-    SavedWire,
+    SavedJunctionDot, SavedNoConnectMarker, SavedWire,
 };
 pub(crate) use component::{Component, ComponentKind, SimulationSupport, electrical_metadata};
 pub(crate) use graph::{
     Branch, BranchKind, Junction, NodeId, PinConnection as GraphPinConnection, SchematicGraph,
     SchematicNet as GraphNet, SchematicNode, WireSegment, build_schematic_graph,
 };
-pub(crate) use net::{CircuitNetlist, Net, NetlistAnnotations, NoConnectMarker};
+pub(crate) use net::{
+    CircuitNetlist, JunctionDot, Net, NetlistAnnotations, NoConnectMarker, WireNetSegment,
+};
 pub(crate) use pin::{CircuitPin, ElectricalType, NetlistPin, PinRef, PinRole};
 // Only the items needed by code outside the model module are re-exported.
 // module_pin, module_pin_defs, breadboard_pin_defs, module_pin_y are internal
