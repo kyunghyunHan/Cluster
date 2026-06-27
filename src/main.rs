@@ -1,4 +1,6 @@
 #![allow(
+    dead_code,
+    unused_imports,
     clippy::collapsible_else_if,
     clippy::collapsible_if,
     clippy::for_kv_map,
@@ -3577,7 +3579,6 @@ fn is_on_wire_segment(pos: Pos2, wires: &[Wire]) -> bool {
     false
 }
 
-
 fn closest_point_on_segment(p: Pos2, a: Pos2, b: Pos2) -> Pos2 {
     let ab = b - a;
     let ap = p - a;
@@ -4913,7 +4914,6 @@ fn wire_contact_points(components: &[Component], wires: &[Wire]) -> Vec<Pos2> {
     points
 }
 
-
 fn reachable_nodes(graph: &[HashSet<usize>], starts: &[usize]) -> HashSet<usize> {
     let mut seen = HashSet::new();
     let mut queue = VecDeque::new();
@@ -5702,7 +5702,6 @@ fn component_power_limit(component: &Component) -> Option<f64> {
     }
 }
 
-
 fn format_resistance(ohms: f32) -> String {
     if ohms >= 1_000_000.0 {
         format!("{:.2} Mohm", ohms / 1_000_000.0)
@@ -5941,7 +5940,6 @@ fn component_bounds(component: &Component) -> Rect {
     };
     Rect::from_center_size(component.pos, eff)
 }
-
 
 fn draw_minimap(
     painter: &egui::Painter,

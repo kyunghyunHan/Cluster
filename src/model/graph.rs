@@ -124,7 +124,9 @@ impl SchematicGraph {
     }
 
     pub(crate) fn net_for_segment(&self, segment_id: u64) -> Option<&SchematicNet> {
-        self.nets.iter().find(|net| net.segments.contains(&segment_id))
+        self.nets
+            .iter()
+            .find(|net| net.segments.contains(&segment_id))
     }
 
     /// Returns the net that the given original `Wire` (by ID) belongs to.
@@ -383,9 +385,7 @@ pub(crate) fn build_schematic_graph(
         // Find all nodes that lie on this wire.
         let mut on_wire: Vec<(f32, NodeId)> = nodes
             .iter()
-            .filter_map(|n| {
-                polyline_param(&wire.points, n.position, SNAP).map(|t| (t, n.id))
-            })
+            .filter_map(|n| polyline_param(&wire.points, n.position, SNAP).map(|t| (t, n.id)))
             .collect();
         on_wire.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         on_wire.dedup_by_key(|(_, id)| *id);
@@ -500,19 +500,19 @@ pub(crate) fn build_schematic_graph(
         for pin in component_pin_defs(comp) {
             if let Some(idx) = find_node_idx_in(&nodes, pin.pos) {
                 let root = uf.find(idx);
-                root_to_name.entry(root).or_insert_with(|| hint_name.clone());
+                root_to_name
+                    .entry(root)
+                    .or_insert_with(|| hint_name.clone());
             }
         }
     }
 
-    let mut net_id_counter = 0u64;
     let mut gen_name_counter = 1u32;
     let mut nets: Vec<SchematicNet> = Vec::new();
     let mut root_to_net_id: HashMap<usize, u64> = HashMap::new();
 
-    for (&root, node_indices) in &root_to_node_indices {
-        let net_id = net_id_counter;
-        net_id_counter += 1;
+    for (net_id, (&root, node_indices)) in root_to_node_indices.iter().enumerate() {
+        let net_id = net_id as u64;
         root_to_net_id.insert(root, net_id);
 
         let name = root_to_name.get(&root).cloned().unwrap_or_else(|| {

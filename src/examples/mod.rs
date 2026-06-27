@@ -229,8 +229,7 @@ impl crate::CircuitApp {
             Pos2::new(440.0, 110.0),
             "EXPECT: ERROR / OFF\nLED polarity is reversed.",
         );
-        self.status =
-            "Loaded reversed LED warning demo. ERC should flag LED polarity.".to_string();
+        self.status = "Loaded reversed LED warning demo. ERC should flag LED polarity.".to_string();
         self.pending_fit = true;
     }
 

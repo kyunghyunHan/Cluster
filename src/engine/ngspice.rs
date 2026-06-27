@@ -59,11 +59,16 @@ impl std::fmt::Display for NgspiceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NgspiceError::NotInstalled => {
-                write!(f, "ngspice is not installed. Install it with your package manager (e.g. `brew install ngspice`, `apt install ngspice`) to enable accurate simulation.")
+                write!(
+                    f,
+                    "ngspice is not installed. Install it with your package manager (e.g. `brew install ngspice`, `apt install ngspice`) to enable accurate simulation."
+                )
             }
             NgspiceError::SimulationFailed(msg) => write!(f, "ngspice simulation failed: {msg}"),
             NgspiceError::IoError(e) => write!(f, "I/O error: {e}"),
-            NgspiceError::NoResults => write!(f, "ngspice ran but produced no operating-point results"),
+            NgspiceError::NoResults => {
+                write!(f, "ngspice ran but produced no operating-point results")
+            }
         }
     }
 }
@@ -120,10 +125,7 @@ pub(crate) fn export_ngspice_netlist(
     };
 
     let first_two_nodes = |comp_id: u64| -> Option<(String, String)> {
-        let mut pins = netlist
-            .pins
-            .iter()
-            .filter(|p| p.component_id == comp_id);
+        let mut pins = netlist.pins.iter().filter(|p| p.component_id == comp_id);
         let a = pins.next().map(|p| node_name(p.net_id))?;
         let b = pins.next().map(|p| node_name(p.net_id))?;
         Some((a, b))
@@ -288,10 +290,9 @@ pub(crate) fn export_ngspice_netlist(
                 }
             }
             ComponentKind::Relay => {
-                if let (Some(cp), Some(cn)) = (
-                    pin_node(comp.id, "COIL+"),
-                    pin_node(comp.id, "COIL-"),
-                ) {
+                if let (Some(cp), Some(cn)) =
+                    (pin_node(comp.id, "COIL+"), pin_node(comp.id, "COIL-"))
+                {
                     out.push_str(&format!("R{label}_coil {cp} {cn} 100\n"));
                 }
                 unsupported.push(NgspiceUnsupported {
@@ -332,9 +333,7 @@ pub(crate) fn export_ngspice_netlist(
 ///
 /// Returns `Ok(NgspiceResult)` on success.  The temporary file is cleaned up
 /// after the run.
-pub(crate) fn run_ngspice(
-    netlist_text: &str,
-) -> Result<NgspiceResult, NgspiceError> {
+pub(crate) fn run_ngspice(netlist_text: &str) -> Result<NgspiceResult, NgspiceError> {
     if !is_ngspice_available() {
         return Err(NgspiceError::NotInstalled);
     }
@@ -349,7 +348,12 @@ pub(crate) fn run_ngspice(
     }
 
     let output = std::process::Command::new("ngspice")
-        .args(["-b", "-o", out_path.to_str().unwrap_or(""), cir_path.to_str().unwrap_or("")])
+        .args([
+            "-b",
+            "-o",
+            out_path.to_str().unwrap_or(""),
+            cir_path.to_str().unwrap_or(""),
+        ])
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -384,8 +388,10 @@ pub(crate) fn run_ngspice(
 ///   v1#branch               -0.0120
 /// ```
 pub(crate) fn parse_operating_point(output: &str) -> Option<NgspiceResult> {
-    let mut result = NgspiceResult::default();
-    result.raw_output = output.to_string();
+    let mut result = NgspiceResult {
+        raw_output: output.to_string(),
+        ..Default::default()
+    };
 
     let mut in_voltage_section = false;
     let mut in_current_section = false;
@@ -455,9 +461,21 @@ fn spice_node_name(net_name: &str) -> String {
     // SPICE node names must start with a letter and contain only [A-Za-z0-9_]
     let cleaned: String = net_name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    if cleaned.is_empty() || !cleaned.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+    if cleaned.is_empty()
+        || !cleaned
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic())
+            .unwrap_or(false)
+    {
         format!("N_{cleaned}")
     } else {
         cleaned
@@ -467,7 +485,13 @@ fn spice_node_name(net_name: &str) -> String {
 fn spice_ref(label: &str) -> String {
     label
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -484,9 +508,10 @@ fn unsupported_reason(kind: ComponentKind) -> &'static str {
         | ComponentKind::Esp32S3
         | ComponentKind::Esp32C3
         | ComponentKind::ArduinoUno
-        | ComponentKind::RaspberryPiPico => "MCU — no SPICE model; model power draw as a resistive load manually",
-        ComponentKind::Oled
-        | ComponentKind::Sensor => "I²C module — no SPICE model",
+        | ComponentKind::RaspberryPiPico => {
+            "MCU — no SPICE model; model power draw as a resistive load manually"
+        }
+        ComponentKind::Oled | ComponentKind::Sensor => "I²C module — no SPICE model",
         ComponentKind::OpAmp => "Op-amp — add a subcircuit model (.lib) for accurate results",
         ComponentKind::Crystal => "Crystal — not relevant in DC operating-point",
         ComponentKind::Transformer => "Transformer — no DC operating-point model",

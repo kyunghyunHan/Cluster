@@ -18,16 +18,11 @@ pub(crate) struct DesignRules {
     pub(crate) board_edge_clearance_mm: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub(crate) enum BoardUnits {
+    #[default]
     Millimeters,
     Mils,
-}
-
-impl Default for BoardUnits {
-    fn default() -> Self {
-        Self::Millimeters
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

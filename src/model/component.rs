@@ -160,7 +160,11 @@ pub(crate) fn electrical_metadata(kind: ComponentKind) -> ElectricalMetadata {
         Ground => (Some(1), ExactDc, "0 V reference"),
         VSource | Battery => (Some(2), ExactDc, "Ideal DC voltage source"),
         ISource => (Some(2), ExactDc, "Ideal DC current source"),
-        Lamp => (Some(2), ApproximateDc, "Fixed resistance load — approximate"),
+        Lamp => (
+            Some(2),
+            ApproximateDc,
+            "Fixed resistance load — approximate",
+        ),
         Potentiometer => (Some(3), ExactDc, "Fixed wiper approximation"),
         NpnTransistor | PnpTransistor => (Some(3), ApproximateDc, "Linearized BJT companion model"),
         Nmosfet | Pmosfet => (Some(3), ApproximateDc, "Threshold-switch MOSFET model"),
@@ -171,21 +175,31 @@ pub(crate) fn electrical_metadata(kind: ComponentKind) -> ElectricalMetadata {
         ),
         Fuse => (Some(2), ExactDc, "Low resistance fuse"),
         Relay => (Some(5), ApproximateDc, "Coil resistance + ideal contact"),
-        DcMotor => (Some(2), ApproximateDc, "Fixed winding resistance — no back-EMF"),
+        DcMotor => (
+            Some(2),
+            ApproximateDc,
+            "Fixed winding resistance — no back-EMF",
+        ),
         Thermistor | Varistor => (Some(2), ApproximateDc, "Fixed resistance approximation"),
         Phototransistor => (Some(2), ApproximateDc, "Fixed resistance approximation"),
         Voltmeter => (Some(2), ExactDc, "1 MΩ voltmeter probe"),
         Ammeter => (Some(2), ExactDc, "1 mΩ ammeter shunt"),
         Timer555 => (Some(8), SymbolOnly, "Symbolic — not modelled in DC"),
-        LogicNot | LogicAnd | LogicOr | LogicNand | LogicNor | LogicXor => {
-            (None, DigitalOnly, "Digital logic gate — no DC current model")
-        }
+        LogicNot | LogicAnd | LogicOr | LogicNand | LogicNor | LogicXor => (
+            None,
+            DigitalOnly,
+            "Digital logic gate — no DC current model",
+        ),
         Esp32 | Esp32S3 | Esp32C3 | ArduinoUno | RaspberryPiPico => {
             (None, Unsupported, "MCU — connectivity and ERC only")
         }
         Breadboard => (None, SymbolOnly, "Symbolic breadboard"),
         Servo => (Some(3), SymbolOnly, "Symbolic PWM servo"),
-        Oled | Sensor => (Some(4), Unsupported, "I²C module — connectivity and ERC only"),
+        Oled | Sensor => (
+            Some(4),
+            Unsupported,
+            "I²C module — connectivity and ERC only",
+        ),
         NetLabel => (Some(2), Unsupported, "Net alias"),
         Crystal => (Some(2), SymbolOnly, "Symbolic crystal oscillator"),
         Transformer => (Some(4), SymbolOnly, "Symbolic transformer"),
@@ -194,12 +208,20 @@ pub(crate) fn electrical_metadata(kind: ComponentKind) -> ElectricalMetadata {
         MotorDriver => (None, Unsupported, "Motor driver — ERC only"),
         Optocoupler => (Some(4), SymbolOnly, "Symbolic optocoupler"),
         GenericIc => (None, SymbolOnly, "Symbolic generic IC"),
-        OpAmp => (Some(3), SymbolOnly, "Symbolic op-amp — SPICE needed for accuracy"),
+        OpAmp => (
+            Some(3),
+            SymbolOnly,
+            "Symbolic op-amp — SPICE needed for accuracy",
+        ),
         TextNote => (Some(0), SymbolOnly, "Annotation only"),
         Dht11 => (Some(3), Unsupported, "1-Wire digital sensor — ERC only"),
         Dht22 => (Some(3), Unsupported, "1-Wire digital sensor — ERC only"),
         HcSr04 => (Some(4), Unsupported, "Ultrasonic sensor — ERC only"),
-        Buzzer => (Some(2), ApproximateDc, "Piezo buzzer — resistive load approximation"),
+        Buzzer => (
+            Some(2),
+            ApproximateDc,
+            "Piezo buzzer — resistive load approximation",
+        ),
         NeoPixel => (Some(3), Unsupported, "WS2812 LED — ERC only"),
         PirSensor => (Some(3), Unsupported, "PIR sensor — ERC only"),
     };

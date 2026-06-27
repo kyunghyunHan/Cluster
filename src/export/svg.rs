@@ -80,7 +80,10 @@ pub(crate) fn circuit_to_svg(
         svg_component(&mut svg, component, cx, cy, stroke_color, sw, energized);
 
         // Ref-des label (below component)
-        if !matches!(component.kind, ComponentKind::TextNote | ComponentKind::NetLabel) {
+        if !matches!(
+            component.kind,
+            ComponentKind::TextNote | ComponentKind::NetLabel
+        ) {
             svg.push_str(&format!(
                 "<text x=\"{cx:.1}\" y=\"{:.1}\" fill=\"#e1e4e8\" \
                  font-family=\"Arial,sans-serif\" font-size=\"11\" \
@@ -375,7 +378,11 @@ fn svg_bjt(out: &mut String, cx: f32, cy: f32, s: &str, npn: bool) {
         cy + 22.0
     ));
     // Emitter and collector leads with arrows
-    let (ey, cy2) = if npn { (cy + 18.0, cy - 18.0) } else { (cy - 18.0, cy + 18.0) };
+    let (ey, cy2) = if npn {
+        (cy + 18.0, cy - 18.0)
+    } else {
+        (cy - 18.0, cy + 18.0)
+    };
     out.push_str(&format!(
         "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" {s}/>\n",
         cx - 12.0,

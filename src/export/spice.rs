@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-use crate::model::component_pin_defs;
 use crate::engine::mna::parse_si_value;
 use crate::engine::netlist::build_circuit_netlist;
+use crate::model::component_pin_defs;
 use crate::model::{Component, ComponentKind, Wire};
 use std::collections::HashMap;
 use std::path::Path;

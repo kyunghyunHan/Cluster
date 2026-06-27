@@ -767,7 +767,11 @@ pub(crate) fn module_pin(
         label,
         role,
         pos: Pos2::new(
-            if right_side { rect.right() } else { rect.left() },
+            if right_side {
+                rect.right()
+            } else {
+                rect.left()
+            },
             module_pin_y(rect, count, index),
         ),
     }

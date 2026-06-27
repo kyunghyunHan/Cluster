@@ -59,6 +59,15 @@ pub(crate) fn build_circuit_netlist_with_annotations(
     wires: &[Wire],
     annotations: &NetlistAnnotations,
 ) -> CircuitNetlist {
+    build_circuit_netlist_with_page_scopes(components, wires, annotations, &HashMap::new())
+}
+
+fn build_circuit_netlist_with_page_scopes(
+    components: &[Component],
+    wires: &[Wire],
+    annotations: &NetlistAnnotations,
+    component_pages: &HashMap<u64, usize>,
+) -> CircuitNetlist {
     let graph = build_schematic_graph(components, wires, &annotations.junctions);
     let mut nodes = NetlistNodes::default();
     let mut nets = NetlistUnionFind::default();
@@ -109,7 +118,7 @@ pub(crate) fn build_circuit_netlist_with_annotations(
         if component.kind == ComponentKind::Ground {
             for pin in component_pin_defs(component) {
                 label_nodes
-                    .entry("gnd".to_string())
+                    .entry("global:gnd".to_string())
                     .or_default()
                     .push(nodes.node_for(pin.pos));
             }
@@ -122,9 +131,23 @@ pub(crate) fn build_circuit_netlist_with_annotations(
         if label.is_empty() {
             continue;
         }
+        let scope = annotations
+            .net_label_scopes
+            .get(&component.id)
+            .copied()
+            .unwrap_or_default();
+        if scope == NetLabelScope::Local {
+            continue;
+        }
+        let page = component_pages.get(&component.id).copied().unwrap_or(0);
+        let key = match scope {
+            NetLabelScope::Local => unreachable!(),
+            NetLabelScope::Page => format!("page:{page}:{label}"),
+            NetLabelScope::Global => format!("global:{label}"),
+        };
         for pin in component_pin_defs(component) {
             label_nodes
-                .entry(label.clone())
+                .entry(key.clone())
                 .or_default()
                 .push(nodes.node_for(pin.pos));
         }
@@ -291,11 +314,21 @@ pub(crate) fn build_circuit_netlist_with_annotations(
 pub(crate) fn build_multi_page_circuit_netlist(
     pages: &[(&[Component], &[Wire])],
 ) -> CircuitNetlist {
+    build_multi_page_circuit_netlist_with_annotations(pages, &NetlistAnnotations::default())
+}
+
+#[allow(dead_code)]
+pub(crate) fn build_multi_page_circuit_netlist_with_annotations(
+    pages: &[(&[Component], &[Wire])],
+    annotations: &NetlistAnnotations,
+) -> CircuitNetlist {
     let mut components = Vec::new();
     let mut wires = Vec::new();
+    let mut component_pages = HashMap::new();
     for (page_index, (page_components, page_wires)) in pages.iter().enumerate() {
         let offset = page_index as f32 * 1_000_000.0;
         components.extend(page_components.iter().cloned().map(|mut component| {
+            component_pages.insert(component.id, page_index);
             component.pos.x += offset;
             component
         }));
@@ -306,7 +339,7 @@ pub(crate) fn build_multi_page_circuit_netlist(
             wire
         }));
     }
-    build_circuit_netlist(&components, &wires)
+    build_circuit_netlist_with_page_scopes(&components, &wires, annotations, &component_pages)
 }
 
 fn electrical_type_for_role(role: PinRole) -> ElectricalType {
@@ -641,6 +674,7 @@ mod tests {
         let annotations = NetlistAnnotations {
             junctions: vec![Pos2::new(100.0, 100.0)],
             no_connects: Vec::new(),
+            net_label_scopes: HashMap::new(),
         };
 
         let netlist =
@@ -678,6 +712,7 @@ mod tests {
         let annotations = NetlistAnnotations {
             junctions: Vec::new(),
             no_connects: vec![pin_a],
+            net_label_scopes: HashMap::new(),
         };
 
         let netlist = build_circuit_netlist_with_annotations(&[resistor], &[], &annotations);
@@ -725,6 +760,116 @@ mod tests {
         assert_ne!(
             netlist.wire_nets[&10], netlist.wire_nets[&11],
             "Equal coordinates on different schematic pages must not connect unless labels do"
+        );
+    }
+
+    #[test]
+    fn local_net_labels_name_but_do_not_merge_remote_islands() {
+        let label_a = comp(
+            1,
+            ComponentKind::NetLabel,
+            Pos2::new(100.0, 100.0),
+            "SIG_A",
+            "SIG",
+        );
+        let label_b = comp(
+            2,
+            ComponentKind::NetLabel,
+            Pos2::new(300.0, 100.0),
+            "SIG_B",
+            "SIG",
+        );
+        let annotations = NetlistAnnotations {
+            net_label_scopes: [
+                (label_a.id, NetLabelScope::Local),
+                (label_b.id, NetLabelScope::Local),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        let netlist =
+            build_circuit_netlist_with_annotations(&[label_a, label_b], &[], &annotations);
+        let label_nets = netlist
+            .pins
+            .iter()
+            .filter(|pin| pin.component_kind == ComponentKind::NetLabel)
+            .map(|pin| pin.net_id)
+            .collect::<HashSet<_>>();
+        let sig_net_count = netlist.nets.iter().filter(|net| net.name == "SIG").count();
+
+        assert_eq!(label_nets.len(), 4);
+        assert_eq!(
+            sig_net_count, 4,
+            "Local labels may share a display name but must not create a hidden remote connection"
+        );
+    }
+
+    #[test]
+    fn page_scoped_net_labels_merge_within_page_only() {
+        let page1_a = comp(
+            1,
+            ComponentKind::NetLabel,
+            Pos2::new(100.0, 100.0),
+            "P1_A",
+            "SENSE",
+        );
+        let page1_b = comp(
+            2,
+            ComponentKind::NetLabel,
+            Pos2::new(300.0, 100.0),
+            "P1_B",
+            "SENSE",
+        );
+        let page2_a = comp(
+            3,
+            ComponentKind::NetLabel,
+            Pos2::new(100.0, 100.0),
+            "P2_A",
+            "SENSE",
+        );
+        let page2_b = comp(
+            4,
+            ComponentKind::NetLabel,
+            Pos2::new(300.0, 100.0),
+            "P2_B",
+            "SENSE",
+        );
+        let annotations = NetlistAnnotations {
+            net_label_scopes: [
+                (page1_a.id, NetLabelScope::Page),
+                (page1_b.id, NetLabelScope::Page),
+                (page2_a.id, NetLabelScope::Page),
+                (page2_b.id, NetLabelScope::Page),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        let netlist = build_multi_page_circuit_netlist_with_annotations(
+            &[
+                (&[page1_a, page1_b][..], &[][..]),
+                (&[page2_a, page2_b][..], &[][..]),
+            ],
+            &annotations,
+        );
+        let net_by_label = |label: &str| {
+            netlist
+                .pins
+                .iter()
+                .find(|pin| pin.component_label == label)
+                .map(|pin| pin.net_id)
+                .unwrap()
+        };
+
+        assert_eq!(net_by_label("P1_A"), net_by_label("P1_B"));
+        assert_eq!(net_by_label("P2_A"), net_by_label("P2_B"));
+        assert_ne!(
+            net_by_label("P1_A"),
+            net_by_label("P2_A"),
+            "Page-scoped labels must not merge across schematic pages"
         );
     }
 

@@ -1346,10 +1346,7 @@ pub fn solve_dc_detailed(
     let mut wire_net_root: HashMap<u64, usize> = HashMap::new();
     for wire in wires {
         // Use the first point's root as the canonical root for this wire.
-        let wire_root = wire
-            .points
-            .first()
-            .and_then(|&pt| nm.root_of(pt));
+        let wire_root = wire.points.first().and_then(|&pt| nm.root_of(pt));
 
         if let Some(root) = wire_root {
             wire_net_root.insert(wire.id, root);

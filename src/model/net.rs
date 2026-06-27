@@ -2,6 +2,17 @@ use super::pin::{NetlistPin, PinRef};
 use egui::Pos2;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum NetLabelScope {
+    /// Same-name labels connect only when they are already geometrically wired.
+    Local,
+    /// Same-name labels connect within one schematic page only.
+    Page,
+    /// Same-name labels connect across all pages.
+    #[default]
+    Global,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct JunctionDot {
@@ -50,4 +61,5 @@ pub(crate) struct NoConnectMarker {
 pub(crate) struct NetlistAnnotations {
     pub(crate) junctions: Vec<Pos2>,
     pub(crate) no_connects: Vec<Pos2>,
+    pub(crate) net_label_scopes: HashMap<u64, NetLabelScope>,
 }

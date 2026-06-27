@@ -1,10 +1,10 @@
-use egui::{Pos2, Rect, Vec2};
-use std::collections::{HashMap, HashSet};
-use std::fs;
 use crate::app::{AlignDir, Selection, Tool};
 use crate::engine::{mna, netlist::build_circuit_netlist, simulation as simulation_engine};
 use crate::model::*;
 use crate::storage::save::write_with_backup;
+use egui::{Pos2, Rect, Vec2};
+use std::collections::{HashMap, HashSet};
+use std::fs;
 
 impl crate::CircuitApp {
     // ── ID / label helpers ───────────────────────────────────────────────────
@@ -1000,8 +1000,7 @@ impl crate::CircuitApp {
         {
             return simulation.clone();
         }
-        let mut simulation =
-            simulation_engine::analyze_circuit(&self.components, &self.wires);
+        let mut simulation = simulation_engine::analyze_circuit(&self.components, &self.wires);
         simulation.ac = mna::solve_ac(&self.components, &self.wires, self.ac_freq_hz as f64);
         let netlist = self.current_netlist();
         simulation.erc =

@@ -611,7 +611,9 @@ fn check_uart_tx_rx_swap(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
                 .iter()
                 .map(|pin| format!("{}.{}", pin.component_label, pin.pin_name))
                 .collect::<Vec<_>>();
-            let Some(first) = tx_pins.first() else { continue };
+            let Some(first) = tx_pins.first() else {
+                continue;
+            };
             if reported.insert(("tx", net.id)) {
                 v.push(ErcViolation {
                     severity: ErcSeverity::Error,
@@ -631,7 +633,9 @@ fn check_uart_tx_rx_swap(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
                 .iter()
                 .map(|pin| format!("{}.{}", pin.component_label, pin.pin_name))
                 .collect::<Vec<_>>();
-            let Some(first) = rx_pins.first() else { continue };
+            let Some(first) = rx_pins.first() else {
+                continue;
+            };
             if reported.insert(("rx", net.id)) {
                 v.push(ErcViolation {
                     severity: ErcSeverity::Warning,
@@ -1283,8 +1287,7 @@ fn spi_role(pin: &NetlistPin) -> Option<&'static str> {
         Some("MISO")
     } else if name.contains("SCK") || name.contains("SCLK") || name.contains("CLK") {
         Some("SCK")
-    } else if name == "CS" || name.contains(" CS") || name.contains("SS") || name.ends_with("CS")
-    {
+    } else if name == "CS" || name.contains(" CS") || name.contains("SS") || name.ends_with("CS") {
         Some("CS")
     } else {
         None
@@ -1439,10 +1442,12 @@ fn check_i2c_pullup_values(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) 
                 }
                 let on_power = r_nets.iter().any(|nid| {
                     *nid != net_id
-                        && netlist
-                            .pins
-                            .iter()
-                            .any(|p| p.net_id == *nid && (pin_name_is_3v3(&p.pin_name) || p.pin_name.eq_ignore_ascii_case("5V") || p.electrical_type == ElectricalType::PowerOutput))
+                        && netlist.pins.iter().any(|p| {
+                            p.net_id == *nid
+                                && (pin_name_is_3v3(&p.pin_name)
+                                    || p.pin_name.eq_ignore_ascii_case("5V")
+                                    || p.electrical_type == ElectricalType::PowerOutput)
+                        })
                 });
                 if !on_power {
                     continue;
@@ -1524,7 +1529,9 @@ fn check_regulator_voltage_range(netlist: &CircuitNetlist, v: &mut Vec<ErcViolat
         let reg_pin = netlist.pins.iter().find(|p| p.component_id == reg_id);
         let Some(reg_pin) = reg_pin else { continue };
         let reg_value = &reg_pin.component_value;
-        let Some(vout) = parse_metric_value(reg_value, "v") else { continue };
+        let Some(vout) = parse_metric_value(reg_value, "v") else {
+            continue;
+        };
 
         // Find Vin net
         let vin_net = netlist
@@ -1543,7 +1550,9 @@ fn check_regulator_voltage_range(netlist: &CircuitNetlist, v: &mut Vec<ErcViolat
                 )
                 && (p.pin_name == "+" || p.electrical_type == ElectricalType::PowerOutput)
         }) {
-            let Some(vin) = parse_metric_value(&src_pin.component_value, "v") else { continue };
+            let Some(vin) = parse_metric_value(&src_pin.component_value, "v") else {
+                continue;
+            };
             let dropout = vin - vout;
             if dropout < 1.5 {
                 v.push(ErcViolation {
@@ -1581,8 +1590,14 @@ fn check_resistor_wattage(
     dc: &crate::engine::mna::DcResult,
     v: &mut Vec<ErcViolation>,
 ) {
-    for pin in netlist.pins.iter().filter(|p| p.component_kind == ComponentKind::Resistor) {
-        let Some(&power) = dc.component_power.get(&pin.component_id) else { continue };
+    for pin in netlist
+        .pins
+        .iter()
+        .filter(|p| p.component_kind == ComponentKind::Resistor)
+    {
+        let Some(&power) = dc.component_power.get(&pin.component_id) else {
+            continue;
+        };
         // Default rating 0.25 W; parse from value string if it includes "W" annotation
         let rated = parse_metric_value(&pin.component_value, "w")
             .filter(|&r| r > 0.0)
@@ -1617,11 +1632,17 @@ fn check_led_current_limit(
     v: &mut Vec<ErcViolation>,
 ) {
     let mut seen: HashSet<u64> = HashSet::new();
-    for pin in netlist.pins.iter().filter(|p| p.component_kind == ComponentKind::Led) {
+    for pin in netlist
+        .pins
+        .iter()
+        .filter(|p| p.component_kind == ComponentKind::Led)
+    {
         if !seen.insert(pin.component_id) {
             continue;
         }
-        let Some(&current) = dc.branch_current.get(&pin.component_id) else { continue };
+        let Some(&current) = dc.branch_current.get(&pin.component_id) else {
+            continue;
+        };
         let i_abs = current.abs();
         if i_abs > 0.030 {
             v.push(ErcViolation {
@@ -2057,7 +2078,15 @@ mod tests {
             vec![make_net(0, "UART_TX_BAD")],
             vec![
                 make_pin(1, "ESP1", ComponentKind::Esp32, "", "TX0", 0, true),
-                make_pin(2, "PICO1", ComponentKind::RaspberryPiPico, "", "GP0 TX", 0, true),
+                make_pin(
+                    2,
+                    "PICO1",
+                    ComponentKind::RaspberryPiPico,
+                    "",
+                    "GP0 TX",
+                    0,
+                    true,
+                ),
             ],
         );
 
@@ -2076,7 +2105,15 @@ mod tests {
             vec![make_net(0, "SPI_BAD")],
             vec![
                 make_pin(1, "ESP1", ComponentKind::Esp32, "", "GPIO23 MOSI", 0, true),
-                make_pin(2, "ARD1", ComponentKind::ArduinoUno, "", "D12 MISO", 0, true),
+                make_pin(
+                    2,
+                    "ARD1",
+                    ComponentKind::ArduinoUno,
+                    "",
+                    "D12 MISO",
+                    0,
+                    true,
+                ),
             ],
         );
 
