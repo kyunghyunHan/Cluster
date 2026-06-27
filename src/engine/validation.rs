@@ -37,6 +37,9 @@ pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolat
     check_i2c_pullups(netlist, &mut v);
     check_i2c_pullup_values(netlist, &mut v);
     check_oled_sda_scl_swap(netlist, &mut v);
+    check_uart_tx_rx_swap(netlist, &mut v);
+    check_spi_signal_mismatch(netlist, &mut v);
+    check_adc_overvoltage(netlist, &mut v);
     check_i2c_address_conflict(netlist, &mut v);
     check_missing_values(netlist, &mut v);
     check_floating_pins(netlist, &mut v);
@@ -48,6 +51,7 @@ pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolat
     check_unconnected_input_pins(netlist, &mut v);
     check_net_label_remote_short(netlist, &mut v);
     check_regulator_voltage_range(netlist, &mut v);
+    check_missing_decoupling_caps(netlist, &mut v);
 
     v
 }
@@ -587,6 +591,190 @@ fn check_oled_sda_scl_swap(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) 
     }
 }
 
+fn check_uart_tx_rx_swap(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let mut reported = HashSet::new();
+    for net in &netlist.nets {
+        let pins = pins_on_net(netlist, net.id);
+        let tx_pins = pins
+            .iter()
+            .filter(|pin| pin_is_uart_tx(pin))
+            .copied()
+            .collect::<Vec<_>>();
+        let rx_pins = pins
+            .iter()
+            .filter(|pin| pin_is_uart_rx(pin))
+            .copied()
+            .collect::<Vec<_>>();
+
+        if tx_pins.len() >= 2 {
+            let labels = tx_pins
+                .iter()
+                .map(|pin| format!("{}.{}", pin.component_label, pin.pin_name))
+                .collect::<Vec<_>>();
+            let Some(first) = tx_pins.first() else { continue };
+            if reported.insert(("tx", net.id)) {
+                v.push(ErcViolation {
+                    severity: ErcSeverity::Error,
+                    component_id: Some(first.component_id),
+                    wire_id: first_wire_on_net(netlist, net.id),
+                    message: format!(
+                        "UART TX/TX mismatch on {}: {} are tied together. Connect TX to the other device RX.",
+                        net.name,
+                        labels.join(", ")
+                    ),
+                });
+            }
+        }
+
+        if rx_pins.len() >= 2 {
+            let labels = rx_pins
+                .iter()
+                .map(|pin| format!("{}.{}", pin.component_label, pin.pin_name))
+                .collect::<Vec<_>>();
+            let Some(first) = rx_pins.first() else { continue };
+            if reported.insert(("rx", net.id)) {
+                v.push(ErcViolation {
+                    severity: ErcSeverity::Warning,
+                    component_id: Some(first.component_id),
+                    wire_id: first_wire_on_net(netlist, net.id),
+                    message: format!(
+                        "UART RX/RX mismatch on {}: {} are tied together. Connect one device TX to the other device RX.",
+                        net.name,
+                        labels.join(", ")
+                    ),
+                });
+            }
+        }
+    }
+}
+
+fn check_spi_signal_mismatch(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    for net in &netlist.nets {
+        let pins = pins_on_net(netlist, net.id);
+        let mut roles: HashMap<&'static str, Vec<&NetlistPin>> = HashMap::new();
+        for pin in pins {
+            if let Some(role) = spi_role(pin) {
+                roles.entry(role).or_default().push(pin);
+            }
+        }
+        if roles.len() <= 1 {
+            continue;
+        }
+
+        let labels = roles
+            .iter()
+            .flat_map(|(role, pins)| {
+                pins.iter()
+                    .map(move |pin| format!("{role}:{}.{}", pin.component_label, pin.pin_name))
+            })
+            .collect::<Vec<_>>();
+        let first = roles.values().flatten().next().copied();
+        v.push(ErcViolation {
+            severity: ErcSeverity::Error,
+            component_id: first.map(|pin| pin.component_id),
+            wire_id: first_wire_on_net(netlist, net.id),
+            message: format!(
+                "SPI signal mismatch on {}: {} share one net. Keep MOSI, MISO, SCK, and CS/SS on separate matching nets.",
+                net.name,
+                labels.join(", ")
+            ),
+        });
+    }
+}
+
+fn check_adc_overvoltage(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    for net in &netlist.nets {
+        let pins = pins_on_net(netlist, net.id);
+        if !pins.iter().any(|pin| pin_is_5v_source(pin)) {
+            continue;
+        }
+        for adc in pins.iter().filter(|pin| pin_is_adc_pin(pin)) {
+            v.push(ErcViolation {
+                severity: ErcSeverity::Error,
+                component_id: Some(adc.component_id),
+                wire_id: first_wire_on_net(netlist, net.id),
+                message: format!(
+                    "{} {} ADC input is connected to a 5V net. Add a divider or level shifter so the ADC stays within its reference voltage.",
+                    adc.component_label, adc.pin_name
+                ),
+            });
+        }
+    }
+}
+
+fn check_missing_decoupling_caps(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let mut component_ids = netlist
+        .pins
+        .iter()
+        .filter(|pin| {
+            matches!(
+                pin.component_kind,
+                ComponentKind::Esp32
+                    | ComponentKind::Esp32S3
+                    | ComponentKind::Esp32C3
+                    | ComponentKind::ArduinoUno
+                    | ComponentKind::RaspberryPiPico
+                    | ComponentKind::GenericIc
+                    | ComponentKind::Timer555
+            )
+        })
+        .map(|pin| pin.component_id)
+        .collect::<Vec<_>>();
+    component_ids.sort_unstable();
+    component_ids.dedup();
+
+    for component_id in component_ids {
+        let pins = netlist
+            .pins
+            .iter()
+            .filter(|pin| pin.component_id == component_id)
+            .collect::<Vec<_>>();
+        let Some(first) = pins.first() else { continue };
+        let power_nets = pins
+            .iter()
+            .filter(|pin| {
+                pin.electrical_type == ElectricalType::PowerIn
+                    || pin_name_is_3v3(&pin.pin_name)
+                    || pin.pin_name.eq_ignore_ascii_case("5V")
+                    || pin.pin_name.eq_ignore_ascii_case("VCC")
+                    || pin.pin_name.eq_ignore_ascii_case("VIN")
+            })
+            .map(|pin| pin.net_id)
+            .collect::<HashSet<_>>();
+        let ground_nets = pins
+            .iter()
+            .filter(|pin| {
+                pin.electrical_type == ElectricalType::Ground
+                    || pin.pin_name.eq_ignore_ascii_case("GND")
+            })
+            .map(|pin| pin.net_id)
+            .collect::<HashSet<_>>();
+        if power_nets.is_empty() || ground_nets.is_empty() {
+            continue;
+        }
+
+        let has_cap = component_ids_of_kind(netlist, ComponentKind::Capacitor)
+            .into_iter()
+            .any(|cap_id| {
+                let cap_nets = component_net_ids(netlist, cap_id);
+                cap_nets.iter().any(|net| power_nets.contains(net))
+                    && cap_nets.iter().any(|net| ground_nets.contains(net))
+            });
+        if !has_cap {
+            v.push(ErcViolation {
+                severity: ErcSeverity::Warning,
+                component_id: Some(component_id),
+                wire_id: None,
+                message: format!(
+                    "{} {} has no decoupling capacitor between power and GND. Add a 100 nF ceramic capacitor close to the power pins.",
+                    component_kind_short(first.component_kind),
+                    first.component_label
+                ),
+            });
+        }
+    }
+}
+
 fn check_missing_values(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
     let reported: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut seen = reported;
@@ -1066,6 +1254,50 @@ fn net_has_pullup(netlist: &CircuitNetlist, signal_net: usize) -> bool {
                         })
                 })
         })
+}
+
+fn first_wire_on_net(netlist: &CircuitNetlist, net_id: usize) -> Option<u64> {
+    netlist
+        .wire_nets
+        .iter()
+        .filter(|(_, candidate_net)| **candidate_net == net_id)
+        .map(|(wire_id, _)| *wire_id)
+        .min()
+}
+
+fn pin_is_uart_tx(pin: &NetlistPin) -> bool {
+    let name = normalized_pin_name(&pin.pin_name);
+    name == "TX" || name == "TX0" || name.ends_with("TX") || name.contains("UARTTX")
+}
+
+fn pin_is_uart_rx(pin: &NetlistPin) -> bool {
+    let name = normalized_pin_name(&pin.pin_name);
+    name == "RX" || name == "RX0" || name.ends_with("RX") || name.contains("UARTRX")
+}
+
+fn spi_role(pin: &NetlistPin) -> Option<&'static str> {
+    let name = normalized_pin_name(&pin.pin_name);
+    if name.contains("MOSI") {
+        Some("MOSI")
+    } else if name.contains("MISO") {
+        Some("MISO")
+    } else if name.contains("SCK") || name.contains("SCLK") || name.contains("CLK") {
+        Some("SCK")
+    } else if name == "CS" || name.contains(" CS") || name.contains("SS") || name.ends_with("CS")
+    {
+        Some("CS")
+    } else {
+        None
+    }
+}
+
+fn pin_is_adc_pin(pin: &NetlistPin) -> bool {
+    pin_is_microcontroller(pin) && normalized_pin_name(&pin.pin_name).contains("ADC")
+}
+
+fn normalized_pin_name(name: &str) -> String {
+    name.to_ascii_uppercase()
+        .replace([' ', '_', '-', '/', '.'], "")
 }
 
 // ─── New ERC rules ───────────────────────────────────────────────────────────
@@ -1817,6 +2049,82 @@ mod tests {
             v.iter()
                 .any(|e| e.message.contains("SDA") && e.message.contains("SCL"))
         );
+    }
+
+    #[test]
+    fn reports_uart_tx_tx_swap() {
+        let nl = netlist(
+            vec![make_net(0, "UART_TX_BAD")],
+            vec![
+                make_pin(1, "ESP1", ComponentKind::Esp32, "", "TX0", 0, true),
+                make_pin(2, "PICO1", ComponentKind::RaspberryPiPico, "", "GP0 TX", 0, true),
+            ],
+        );
+
+        let violations = validate_beginner_rules(&nl);
+
+        assert!(violations.iter().any(|violation| {
+            violation.severity == ErcSeverity::Error
+                && violation.message.contains("UART TX/TX mismatch")
+                && violation.component_id.is_some()
+        }));
+    }
+
+    #[test]
+    fn reports_spi_mosi_miso_mismatch() {
+        let nl = netlist(
+            vec![make_net(0, "SPI_BAD")],
+            vec![
+                make_pin(1, "ESP1", ComponentKind::Esp32, "", "GPIO23 MOSI", 0, true),
+                make_pin(2, "ARD1", ComponentKind::ArduinoUno, "", "D12 MISO", 0, true),
+            ],
+        );
+
+        let violations = validate_beginner_rules(&nl);
+
+        assert!(violations.iter().any(|violation| {
+            violation.severity == ErcSeverity::Error
+                && violation.message.contains("SPI signal mismatch")
+                && violation.component_id.is_some()
+        }));
+    }
+
+    #[test]
+    fn reports_adc_overvoltage_from_5v_source() {
+        let nl = netlist(
+            vec![make_net(0, "ADC_BAD")],
+            vec![
+                make_pin(1, "BAT1", ComponentKind::Battery, "5V", "+", 0, true),
+                make_pin(2, "ESP1", ComponentKind::Esp32, "", "GPIO34 ADC", 0, true),
+            ],
+        );
+
+        let violations = validate_beginner_rules(&nl);
+
+        assert!(violations.iter().any(|violation| {
+            violation.severity == ErcSeverity::Error
+                && violation.message.contains("ADC input")
+                && violation.component_id == Some(2)
+        }));
+    }
+
+    #[test]
+    fn reports_missing_mcu_decoupling_capacitor() {
+        let nl = netlist(
+            vec![make_net(0, "3V3"), make_net(1, "GND")],
+            vec![
+                make_pin(1, "ESP1", ComponentKind::Esp32, "", "3V3", 0, true),
+                make_pin(1, "ESP1", ComponentKind::Esp32, "", "GND", 1, true),
+            ],
+        );
+
+        let violations = validate_beginner_rules(&nl);
+
+        assert!(violations.iter().any(|violation| {
+            violation.severity == ErcSeverity::Warning
+                && violation.message.contains("decoupling capacitor")
+                && violation.component_id == Some(1)
+        }));
     }
 
     #[test]
