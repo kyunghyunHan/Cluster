@@ -923,6 +923,9 @@ impl eframe::App for CircuitApp {
                                                 - wire_midpoint(wire).to_vec2() * self.zoom;
                                         }
                                     }
+                                    ValidationPanelAction::ApplyAutoFix(auto_fix) => {
+                                        self.apply_erc_auto_fix(auto_fix);
+                                    }
                                 }
                             }
                         });

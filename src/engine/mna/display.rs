@@ -81,7 +81,6 @@ fn strip_unit(s: &str) -> &str {
     s
 }
 
-
 pub fn format_voltage(v: f64) -> String {
     if v.abs() >= 1000.0 {
         format!("{:.1}kV", v / 1000.0)
@@ -173,10 +172,6 @@ pub fn voltage_color(v: f64, vmax: f64) -> egui::Color32 {
         )
     } else {
         let u = (s - 0.75) / 0.25;
-        Color32::from_rgb(
-            (250.0 - u * 20.0) as u8,
-            (110.0 - u * 100.0) as u8,
-            10u8,
-        )
+        Color32::from_rgb((250.0 - u * 20.0) as u8, (110.0 - u * 100.0) as u8, 10u8)
     }
 }

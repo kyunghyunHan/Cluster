@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use egui::Pos2;
 
 use crate::{
-    component_pin_defs, parse_metric_value, point_touches_wire_segment, wire_contact_points,
-    Component, ComponentKind, PinRole, Wire,
+    Component, ComponentKind, PinRole, Wire, component_pin_defs, parse_metric_value,
+    point_touches_wire_segment, wire_contact_points,
 };
 
 use super::display::parse_si_value;

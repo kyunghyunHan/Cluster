@@ -191,7 +191,7 @@ Notes:
 1. Breadboard View: 일부 완료 - ESP32/Arduino + OLED/Sensor I2C 예제의 VCC/GND/SDA/SCL 점퍼 체크와 schematic net 강조 지원. 향후 실제 점퍼 편집, 전원 레일, 핀 하이라이트, 자동 배선 보조 확장
 2. CAD/PCB 데이터 모델: 일부 완료 - SymbolInstance, Footprint, NetClass, Board, Track, Via, 기본 DRC, Gerber/Excellon scaffold 추가. 향후 기존 Component를 SymbolInstance로 점진 이전
 3. Schematic netlist 안정화: 일부 완료 - deterministic net name/id 생성, global GND merge, explicit junction/no-connect annotation 모델, crossing/T-junction/pin-to-wire/multi-page label 회귀 테스트 추가. 향후 UI 저장/편집, local/global label scope 확장
-4. 초보자 ERC 강화: GPIO 전류 초과, LED 저항 누락, 모터/릴레이 직접 구동, 공통 GND, 입력 전용 GPIO, ADC 과전압, I2C/SPI/UART 배선 실수
+4. 초보자 ERC 강화: 일부 완료 - GPIO 전류 초과, LED 저항 누락, 모터/릴레이 직접 구동, 공통 GND, 입력 전용 GPIO, ADC 과전압, I2C/SPI/UART 배선 실수, ERC repair suggestion/Auto fix UI scaffold 추가. 향후 자동 배선/정확한 위치 삽입 확장
 5. PCB editor MVP: Update PCB, footprint 배치, ratsnest, manual routing, via, top/bottom copper, board outline
 6. DRC panel: 일부 완료 - track width/clearance/via/annular ring/edge clearance/open outline/outside footprint/unrouted ratsnest 검사 scaffold 추가. 향후 pad/silkscreen violation 클릭 이동 UI 연결
 7. Export: 일부 완료 - SVG/SPICE/BOM/Arduino 유지, Gerber RS-274X/Excellon scaffold, BOM/CPL CSV helper, 선택적 ngspice batch 실행 경로 추가. 향후 UI export wizard와 ngspice 결과 plot 연결

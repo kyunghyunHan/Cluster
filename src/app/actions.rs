@@ -1,4 +1,5 @@
 use crate::app::{AlignDir, Selection, Tool};
+use crate::engine::validation::ErcAutoFix;
 use crate::engine::{mna, netlist::build_circuit_netlist, simulation as simulation_engine};
 use crate::model::*;
 use crate::storage::save::write_with_backup;
@@ -339,6 +340,76 @@ impl crate::CircuitApp {
             component.value = text.to_string();
         }
         note
+    }
+
+    pub(crate) fn apply_erc_auto_fix(&mut self, fix: ErcAutoFix) {
+        let target_id = match fix {
+            ErcAutoFix::AddLedSeriesResistor { component_id }
+            | ErcAutoFix::AddI2cPullups { component_id }
+            | ErcAutoFix::AddGpioDriverNote { component_id }
+            | ErcAutoFix::AddLevelShifterNote { component_id } => component_id,
+        };
+        let Some(target) = self
+            .components
+            .iter()
+            .find(|component| component.id == target_id)
+        else {
+            self.status = "Auto fix target no longer exists.".to_string();
+            return;
+        };
+        let base_pos = target.pos;
+        self.record_history();
+        match fix {
+            ErcAutoFix::AddLedSeriesResistor { .. } => {
+                let id = self
+                    .place_component(ComponentKind::Resistor, base_pos + Vec2::new(-120.0, -70.0));
+                if let Some(component) = self
+                    .components
+                    .iter_mut()
+                    .find(|component| component.id == id)
+                {
+                    component.value = "330 ohm".to_string();
+                }
+                self.selected = Some(Selection::Component(id));
+                self.status = "Auto fix placed a 330 ohm resistor. Wire it in series with the LED."
+                    .to_string();
+            }
+            ErcAutoFix::AddI2cPullups { .. } => {
+                let sda = self
+                    .place_component(ComponentKind::Resistor, base_pos + Vec2::new(-120.0, -90.0));
+                let scl = self
+                    .place_component(ComponentKind::Resistor, base_pos + Vec2::new(-40.0, -90.0));
+                for id in [sda, scl] {
+                    if let Some(component) = self
+                        .components
+                        .iter_mut()
+                        .find(|component| component.id == id)
+                    {
+                        component.value = "4.7k".to_string();
+                    }
+                }
+                self.selected = Some(Selection::Component(sda));
+                self.status =
+                    "Auto fix placed two 4.7k pull-up resistors. Wire them from SDA/SCL to logic VCC.".to_string();
+            }
+            ErcAutoFix::AddGpioDriverNote { .. } => {
+                let id = self.place_note(
+                    base_pos + Vec2::new(120.0, -100.0),
+                    "Use a MOSFET/transistor driver and separate supply for this load.",
+                );
+                self.selected = Some(Selection::Component(id));
+                self.status = "Auto fix added a driver suggestion note.".to_string();
+            }
+            ErcAutoFix::AddLevelShifterNote { .. } => {
+                let id = self.place_note(
+                    base_pos + Vec2::new(120.0, -100.0),
+                    "Add level shifter or resistor divider before this 3.3V GPIO.",
+                );
+                self.selected = Some(Selection::Component(id));
+                self.status = "Auto fix added a level-shifter suggestion note.".to_string();
+            }
+        }
+        self.mark_dirty();
     }
 
     pub(crate) fn add_wire(&mut self, points: Vec<Pos2>) {

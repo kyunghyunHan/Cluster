@@ -18,6 +18,71 @@ pub(crate) struct ErcViolation {
     pub(crate) message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ErcAutoFix {
+    AddLedSeriesResistor { component_id: u64 },
+    AddI2cPullups { component_id: u64 },
+    AddGpioDriverNote { component_id: u64 },
+    AddLevelShifterNote { component_id: u64 },
+}
+
+impl ErcViolation {
+    pub(crate) fn fix_suggestion(&self) -> Option<&'static str> {
+        let msg = self.message.to_ascii_lowercase();
+        if msg.contains("current limiting resistor") {
+            Some(
+                "Add a 220-1k ohm resistor in series with the LED. 330 ohm is a safe beginner default.",
+            )
+        } else if msg.contains("directly drives") && msg.contains("gpio") {
+            Some(
+                "Do not drive motors, relays, lamps, or high-current LEDs directly from GPIO. Use a transistor/MOSFET driver and a separate supply.",
+            )
+        } else if msg.contains("i2c") && msg.contains("no pull-up") {
+            Some(
+                "Add a 4.7k pull-up from SDA to logic VCC and another 4.7k pull-up from SCL to logic VCC.",
+            )
+        } else if msg.contains("5v") && (msg.contains("gpio") || msg.contains("3.3v")) {
+            Some(
+                "Keep ESP32/Pico GPIO at 3.3V. Add a level shifter or resistor divider before the pin.",
+            )
+        } else if msg.contains("flyback diode") {
+            Some(
+                "Place a reverse-biased diode across the relay coil or motor winding to clamp inductive kickback.",
+            )
+        } else if msg.contains("decoupling capacitor") {
+            Some(
+                "Place a 100 nF ceramic capacitor between VCC/3V3 and GND close to the IC/module power pins.",
+            )
+        } else if msg.contains("adc input") {
+            Some(
+                "Scale the signal with a resistor divider or buffer so the ADC pin never exceeds its reference voltage.",
+            )
+        } else if msg.contains("sda") && msg.contains("scl") {
+            Some(
+                "Swap the I2C wires so controller SDA goes to module SDA and controller SCL goes to module SCL.",
+            )
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn auto_fix(&self) -> Option<ErcAutoFix> {
+        let component_id = self.component_id?;
+        let msg = self.message.to_ascii_lowercase();
+        if msg.contains("current limiting resistor") {
+            Some(ErcAutoFix::AddLedSeriesResistor { component_id })
+        } else if msg.contains("i2c") && msg.contains("no pull-up") {
+            Some(ErcAutoFix::AddI2cPullups { component_id })
+        } else if msg.contains("directly drives") && msg.contains("gpio") {
+            Some(ErcAutoFix::AddGpioDriverNote { component_id })
+        } else if msg.contains("5v") && (msg.contains("gpio") || msg.contains("3.3v")) {
+            Some(ErcAutoFix::AddLevelShifterNote { component_id })
+        } else {
+            None
+        }
+    }
+}
+
 pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolation> {
     let mut v = Vec::new();
 
@@ -2162,6 +2227,39 @@ mod tests {
                 && violation.message.contains("decoupling capacitor")
                 && violation.component_id == Some(1)
         }));
+    }
+
+    #[test]
+    fn common_erc_violations_provide_repair_suggestions_and_auto_fixes() {
+        let led = ErcViolation {
+            severity: ErcSeverity::Warning,
+            component_id: Some(7),
+            wire_id: None,
+            message: "LED LED1 has no current limiting resistor on either terminal.".to_string(),
+        };
+        assert!(
+            led.fix_suggestion()
+                .is_some_and(|suggestion| suggestion.contains("330 ohm"))
+        );
+        assert_eq!(
+            led.auto_fix(),
+            Some(ErcAutoFix::AddLedSeriesResistor { component_id: 7 })
+        );
+
+        let i2c = ErcViolation {
+            severity: ErcSeverity::Warning,
+            component_id: Some(9),
+            wire_id: None,
+            message: "I2C SDA has no pull-up resistor.".to_string(),
+        };
+        assert!(
+            i2c.fix_suggestion()
+                .is_some_and(|suggestion| suggestion.contains("4.7k"))
+        );
+        assert_eq!(
+            i2c.auto_fix(),
+            Some(ErcAutoFix::AddI2cPullups { component_id: 9 })
+        );
     }
 
     #[test]

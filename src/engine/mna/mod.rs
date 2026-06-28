@@ -874,7 +874,10 @@ mod regression {
     }
     fn wire(id: u64, a: Pos2, b: Pos2) -> Wire {
         let corner = Pos2::new(b.x, a.y);
-        Wire { id, points: vec![a, corner, b] }
+        Wire {
+            id,
+            points: vec![a, corner, b],
+        }
     }
 
     // ── Crossing wires are NOT electrically connected ─────────────────────
@@ -885,17 +888,50 @@ mod regression {
         // Horizontal wire: (0,0)→(100,0)
         // Vertical wire:   (50,-50)→(50,50)
         // They cross at (50,0) but neither wire has an endpoint there.
-        let w1 = Wire { id: 1, points: vec![Pos2::new(0.0, 0.0), Pos2::new(100.0, 0.0)] };
+        let w1 = Wire {
+            id: 1,
+            points: vec![Pos2::new(0.0, 0.0), Pos2::new(100.0, 0.0)],
+        };
         let w2 = Wire {
             id: 2,
             points: vec![Pos2::new(50.0, -50.0), Pos2::new(50.0, 50.0)],
         };
         // Battery + resistor in two separate branches — no shared net expected
-        let bat = comp(10, ComponentKind::Battery, Pos2::new(-40.0, -80.0), "BAT1", "9V");
-        let r1 = comp(11, ComponentKind::Resistor, Pos2::new(140.0, 0.0), "R1", "1k");
-        let r2 = comp(12, ComponentKind::Resistor, Pos2::new(50.0, 80.0), "R2", "1k");
-        let gnd1 = comp(13, ComponentKind::Ground, Pos2::new(0.0, 100.0), "GND1", "0V");
-        let gnd2 = comp(14, ComponentKind::Ground, Pos2::new(100.0, 100.0), "GND2", "0V");
+        let bat = comp(
+            10,
+            ComponentKind::Battery,
+            Pos2::new(-40.0, -80.0),
+            "BAT1",
+            "9V",
+        );
+        let r1 = comp(
+            11,
+            ComponentKind::Resistor,
+            Pos2::new(140.0, 0.0),
+            "R1",
+            "1k",
+        );
+        let r2 = comp(
+            12,
+            ComponentKind::Resistor,
+            Pos2::new(50.0, 80.0),
+            "R2",
+            "1k",
+        );
+        let gnd1 = comp(
+            13,
+            ComponentKind::Ground,
+            Pos2::new(0.0, 100.0),
+            "GND1",
+            "0V",
+        );
+        let gnd2 = comp(
+            14,
+            ComponentKind::Ground,
+            Pos2::new(100.0, 100.0),
+            "GND2",
+            "0V",
+        );
         let wires = vec![w1.clone(), w2.clone()];
         let components = vec![bat.clone(), r1.clone(), r2.clone(), gnd1, gnd2];
         // If the crossing were treated as a junction the solver would see a
@@ -918,7 +954,13 @@ mod regression {
     // node, so the solver must refuse to solve it.
     #[test]
     fn no_ground_returns_error() {
-        let r = comp(1, ComponentKind::Resistor, Pos2::new(100.0, 0.0), "R1", "1k");
+        let r = comp(
+            1,
+            ComponentKind::Resistor,
+            Pos2::new(100.0, 0.0),
+            "R1",
+            "1k",
+        );
         let result = solve_dc_detailed(&[r], &[]);
         assert!(matches!(result, Err(SimulationError::NoGround)));
     }
@@ -931,11 +973,28 @@ mod regression {
     #[test]
     fn open_circuit_current_is_zero() {
         let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
-        let r = comp(2, ComponentKind::Resistor, Pos2::new(200.0, 0.0), "R1", "1k");
-        let bat_plus = component_pin_defs(&bat).into_iter().find(|p| p.label == "+").unwrap().pos;
-        let r_a = component_pin_defs(&r).into_iter().find(|p| p.label == "A").unwrap().pos;
+        let r = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(200.0, 0.0),
+            "R1",
+            "1k",
+        );
+        let bat_plus = component_pin_defs(&bat)
+            .into_iter()
+            .find(|p| p.label == "+")
+            .unwrap()
+            .pos;
+        let r_a = component_pin_defs(&r)
+            .into_iter()
+            .find(|p| p.label == "A")
+            .unwrap()
+            .pos;
         // Only bat+ → R_A connected; R_B is floating (no return path to bat-).
-        let wires = vec![Wire { id: 1, points: vec![bat_plus, r_a] }];
+        let wires = vec![Wire {
+            id: 1,
+            points: vec![bat_plus, r_a],
+        }];
         let dc = solve_dc(&[bat, r], &wires)
             .expect("open circuit (battery ref = GND) should still solve");
         let i = dc.branch_current.get(&1u64).copied().unwrap_or(99.0);
@@ -956,16 +1015,25 @@ mod regression {
     #[test]
     fn series_circuit_wire_current_is_known() {
         let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
-        let r = comp(2, ComponentKind::Resistor, Pos2::new(200.0, 0.0), "R1", "1k");
+        let r = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(200.0, 0.0),
+            "R1",
+            "1k",
+        );
         let bat_pins = component_pin_defs(&bat);
         let bat_plus = bat_pins.iter().find(|p| p.label == "+").unwrap().pos; // (40,0)
-        let bat_neg = bat_pins.iter().find(|p| p.label == "-").unwrap().pos;  // (-40,0)
+        let bat_neg = bat_pins.iter().find(|p| p.label == "-").unwrap().pos; // (-40,0)
         let r_pins = component_pin_defs(&r);
         let r_a = r_pins.iter().find(|p| p.label == "A").unwrap().pos; // (160,0)
         let r_b = r_pins.iter().find(|p| p.label == "B").unwrap().pos; // (240,0)
         let wires = vec![
             // Top wire: bat+ straight to R_A (no other pins lie on this segment)
-            Wire { id: 1, points: vec![bat_plus, r_a] },
+            Wire {
+                id: 1,
+                points: vec![bat_plus, r_a],
+            },
             // Return wire routed below y=-80 so it avoids the other component pins
             Wire {
                 id: 2,
@@ -998,29 +1066,54 @@ mod regression {
     #[test]
     fn ac_capacitor_has_finite_impedance_above_dc() {
         // C = 100 nF at 1 kHz → |Z| = 1/(2πfC) ≈ 1592 Ω
-        let result = solve_ac(
-            &[],
-            &[],
-            1000.0,
-        );
+        let result = solve_ac(&[], &[], 1000.0);
         // No components → None is acceptable; just ensure solver doesn't panic.
         let _ = result;
 
         // With a real capacitor circuit: verify |Z| is in the right ballpark.
-        let c = comp(1, ComponentKind::Capacitor, Pos2::new(100.0, 0.0), "C1", "100nF");
+        let c = comp(
+            1,
+            ComponentKind::Capacitor,
+            Pos2::new(100.0, 0.0),
+            "C1",
+            "100nF",
+        );
         let src = comp(2, ComponentKind::VSource, Pos2::new(0.0, 0.0), "V1", "1V");
-        let gnd = comp(3, ComponentKind::Ground, Pos2::new(200.0, 100.0), "GND", "0V");
+        let gnd = comp(
+            3,
+            ComponentKind::Ground,
+            Pos2::new(200.0, 100.0),
+            "GND",
+            "0V",
+        );
         let c_pins = component_pin_defs(&c);
         let src_pins = component_pin_defs(&src);
         let gnd_pin = component_pin_defs(&gnd)[0].pos;
-        let src_pos = src_pins.iter().find(|p| p.label == "+").map(|p| p.pos).unwrap();
-        let src_neg = src_pins.iter().find(|p| p.label == "-").map(|p| p.pos).unwrap();
+        let src_pos = src_pins
+            .iter()
+            .find(|p| p.label == "+")
+            .map(|p| p.pos)
+            .unwrap();
+        let src_neg = src_pins
+            .iter()
+            .find(|p| p.label == "-")
+            .map(|p| p.pos)
+            .unwrap();
         let c_a = c_pins.get(0).map(|p| p.pos).unwrap();
         let c_b = c_pins.get(1).map(|p| p.pos).unwrap();
         let wires = vec![
-            Wire { id: 1, points: vec![src_pos, c_a] },
-            Wire { id: 2, points: vec![c_b, Pos2::new(c_b.x, gnd_pin.y), gnd_pin] },
-            Wire { id: 3, points: vec![src_neg, Pos2::new(src_neg.x, gnd_pin.y), gnd_pin] },
+            Wire {
+                id: 1,
+                points: vec![src_pos, c_a],
+            },
+            Wire {
+                id: 2,
+                points: vec![c_b, Pos2::new(c_b.x, gnd_pin.y), gnd_pin],
+            },
+            Wire {
+                id: 3,
+                points: vec![src_neg, Pos2::new(src_neg.x, gnd_pin.y), gnd_pin],
+            },
         ];
         if let Some(ac) = solve_ac(&[c, src, gnd], &wires, 1000.0) {
             let z = ac.component_impedance.get(&1).copied().unwrap_or(0.0);
@@ -1037,25 +1130,65 @@ mod regression {
     fn conflicting_voltage_sources_return_error() {
         // Two batteries across the same two nodes with different voltages.
         let bat9 = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
-        let bat5 = comp(2, ComponentKind::Battery, Pos2::new(0.0, 80.0), "BAT2", "5V");
-        let gnd = comp(3, ComponentKind::Ground, Pos2::new(-60.0, 40.0), "GND", "0V");
+        let bat5 = comp(
+            2,
+            ComponentKind::Battery,
+            Pos2::new(0.0, 80.0),
+            "BAT2",
+            "5V",
+        );
+        let gnd = comp(
+            3,
+            ComponentKind::Ground,
+            Pos2::new(-60.0, 40.0),
+            "GND",
+            "0V",
+        );
 
         let bat9_pins = component_pin_defs(&bat9);
         let bat5_pins = component_pin_defs(&bat5);
         let gnd_pin = component_pin_defs(&gnd)[0].pos;
 
-        let b9_pos = bat9_pins.iter().find(|p| p.label == "+").map(|p| p.pos).unwrap();
-        let b9_neg = bat9_pins.iter().find(|p| p.label == "-").map(|p| p.pos).unwrap();
-        let b5_pos = bat5_pins.iter().find(|p| p.label == "+").map(|p| p.pos).unwrap();
-        let b5_neg = bat5_pins.iter().find(|p| p.label == "-").map(|p| p.pos).unwrap();
+        let b9_pos = bat9_pins
+            .iter()
+            .find(|p| p.label == "+")
+            .map(|p| p.pos)
+            .unwrap();
+        let b9_neg = bat9_pins
+            .iter()
+            .find(|p| p.label == "-")
+            .map(|p| p.pos)
+            .unwrap();
+        let b5_pos = bat5_pins
+            .iter()
+            .find(|p| p.label == "+")
+            .map(|p| p.pos)
+            .unwrap();
+        let b5_neg = bat5_pins
+            .iter()
+            .find(|p| p.label == "-")
+            .map(|p| p.pos)
+            .unwrap();
 
         // Connect both positives together and both negatives together (to GND).
         let node_pos = Pos2::new(60.0, 40.0);
         let wires = vec![
-            Wire { id: 1, points: vec![b9_pos, Pos2::new(b9_pos.x, node_pos.y), node_pos] },
-            Wire { id: 2, points: vec![b5_pos, Pos2::new(b5_pos.x, node_pos.y), node_pos] },
-            Wire { id: 3, points: vec![b9_neg, Pos2::new(b9_neg.x, gnd_pin.y), gnd_pin] },
-            Wire { id: 4, points: vec![b5_neg, Pos2::new(b5_neg.x, gnd_pin.y), gnd_pin] },
+            Wire {
+                id: 1,
+                points: vec![b9_pos, Pos2::new(b9_pos.x, node_pos.y), node_pos],
+            },
+            Wire {
+                id: 2,
+                points: vec![b5_pos, Pos2::new(b5_pos.x, node_pos.y), node_pos],
+            },
+            Wire {
+                id: 3,
+                points: vec![b9_neg, Pos2::new(b9_neg.x, gnd_pin.y), gnd_pin],
+            },
+            Wire {
+                id: 4,
+                points: vec![b5_neg, Pos2::new(b5_neg.x, gnd_pin.y), gnd_pin],
+            },
         ];
 
         let result = solve_dc_detailed(&[bat9, bat5, gnd], &wires);
@@ -1074,7 +1207,13 @@ mod regression {
     #[test]
     fn floating_node_returns_no_ground_or_floating() {
         // A resistor with no connection to any source or ground.
-        let r = comp(1, ComponentKind::Resistor, Pos2::new(100.0, 0.0), "R1", "1k");
+        let r = comp(
+            1,
+            ComponentKind::Resistor,
+            Pos2::new(100.0, 0.0),
+            "R1",
+            "1k",
+        );
         let result = solve_dc_detailed(&[r], &[]);
         assert!(
             matches!(
@@ -1105,7 +1244,9 @@ mod regression {
         });
         let violations = run_drc(&board);
         assert!(
-            violations.iter().any(|v| v.object_id == Some(99) && v.title == "Track too narrow"),
+            violations
+                .iter()
+                .any(|v| v.object_id == Some(99) && v.title == "Track too narrow"),
             "track at 0.05 mm must trigger DRC error"
         );
     }

@@ -15,12 +15,12 @@ use std::collections::{HashMap, HashSet};
 use egui::Pos2;
 
 use crate::{
-    component_pin_defs, parse_metric_value, point_touches_wire_segment, wire_contact_points,
-    CircuitPin, Component, ComponentKind, PinRole, Wire,
+    CircuitPin, Component, ComponentKind, PinRole, Wire, component_pin_defs, parse_metric_value,
+    point_touches_wire_segment, wire_contact_points,
 };
 
 use super::errors::{ComponentPowerRole, SimulationError};
-use super::matrix::{validate_voltage_sources, Mna};
+use super::matrix::{Mna, validate_voltage_sources};
 use super::models::{BjtEntry, DiodeEntry, IsEntry, MosEntry, NetMap, ResEntry, VsEntry};
 
 // ── Public result type ────────────────────────────────────────────────────────
@@ -178,11 +178,10 @@ pub fn solve_dc_detailed(
     }
     let num_nodes = next_node - 1;
 
-    let mna_node =
-        |pos: Pos2, nm: &mut NetMap, mna_of: &HashMap<usize, usize>| -> Option<usize> {
-            let root = nm.root_of(pos)?;
-            mna_of.get(&root).copied()
-        };
+    let mna_node = |pos: Pos2, nm: &mut NetMap, mna_of: &HashMap<usize, usize>| -> Option<usize> {
+        let root = nm.root_of(pos)?;
+        mna_of.get(&root).copied()
+    };
 
     // ── 4. Build component entries ────────────────────────────────────────
     let mut res: Vec<ResEntry> = Vec::new();
@@ -201,31 +200,55 @@ pub fn solve_dc_detailed(
             ComponentKind::Resistor => {
                 let r = parse_metric_value(&comp.value, "ohm").unwrap_or(1_000.0) as f64;
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r,
+                    });
                 }
             }
             ComponentKind::Potentiometer => {
-                let r =
-                    parse_metric_value(&comp.value, "ohm").unwrap_or(10_000.0) as f64 * 0.5;
+                let r = parse_metric_value(&comp.value, "ohm").unwrap_or(10_000.0) as f64 * 0.5;
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r,
+                    });
                 }
             }
             ComponentKind::Fuse => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 0.05 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 0.05,
+                    });
                 }
             }
             ComponentKind::Lamp => {
                 let rated_v = parse_metric_value(&comp.value, "v").unwrap_or(12.0) as f64;
                 let r = (rated_v * rated_v) / 40.0;
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r,
+                    });
                 }
             }
             ComponentKind::DcMotor => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 5.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 5.0,
+                    });
                 }
             }
             ComponentKind::Relay => {
@@ -238,7 +261,12 @@ pub fn solve_dc_detailed(
                     .find(|p| p.label.contains("COIL-"))
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(a), Some(b)) = (coil_p, coil_n) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 100.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 100.0,
+                    });
                 }
             }
             ComponentKind::VoltageReg => {
@@ -251,7 +279,12 @@ pub fn solve_dc_detailed(
                     .find(|p| p.label == "OUT")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(a), Some(b)) = (in_n, out_n) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 0.5 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 0.5,
+                    });
                 }
             }
             ComponentKind::NpnTransistor => {
@@ -278,7 +311,12 @@ pub fn solve_dc_detailed(
                         h_fe: 100.0,
                         npn: true,
                     });
-                    res.push(ResEntry { id: comp.id, a: c, b: e, r: 100_000.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a: c,
+                        b: e,
+                        r: 100_000.0,
+                    });
                 }
             }
             ComponentKind::PnpTransistor => {
@@ -305,7 +343,12 @@ pub fn solve_dc_detailed(
                         h_fe: 100.0,
                         npn: false,
                     });
-                    res.push(ResEntry { id: comp.id, a: e, b: c, r: 100_000.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a: e,
+                        b: c,
+                        r: 100_000.0,
+                    });
                 }
             }
             ComponentKind::Nmosfet => {
@@ -362,7 +405,11 @@ pub fn solve_dc_detailed(
             }
             ComponentKind::VSource | ComponentKind::Battery => {
                 let vv = parse_metric_value(&comp.value, "v").unwrap_or(
-                    if comp.kind == ComponentKind::Battery { 9.0 } else { 5.0 },
+                    if comp.kind == ComponentKind::Battery {
+                        9.0
+                    } else {
+                        5.0
+                    },
                 ) as f64;
                 let pos_n = pins
                     .iter()
@@ -379,7 +426,12 @@ pub fn solve_dc_detailed(
                         return Err(SimulationError::VoltageSourceConflict);
                     }
                 } else {
-                    vs.push(VsEntry { id: comp.id, pos: pos_n, neg: neg_n, v: vv });
+                    vs.push(VsEntry {
+                        id: comp.id,
+                        pos: pos_n,
+                        neg: neg_n,
+                        v: vv,
+                    });
                 }
             }
             ComponentKind::ISource => {
@@ -394,43 +446,87 @@ pub fn solve_dc_detailed(
                     .find(|p| p.role == PinRole::Ground)
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of))
                     .unwrap_or(0);
-                is_src.push(IsEntry { id: comp.id, pos: pos_n, neg: neg_n, i: iv });
+                is_src.push(IsEntry {
+                    id: comp.id,
+                    pos: pos_n,
+                    neg: neg_n,
+                    i: iv,
+                });
             }
             ComponentKind::Diode => {
                 if let (Some(a), Some(k)) = (p0, p1) {
-                    diode_entries.push(DiodeEntry { id: comp.id, anode: a, cathode: k, vf: 0.65, rb: 8.0 });
+                    diode_entries.push(DiodeEntry {
+                        id: comp.id,
+                        anode: a,
+                        cathode: k,
+                        vf: 0.65,
+                        rb: 8.0,
+                    });
                 }
             }
             ComponentKind::Led => {
                 if let (Some(a), Some(k)) = (p0, p1) {
-                    diode_entries.push(DiodeEntry { id: comp.id, anode: a, cathode: k, vf: 2.0, rb: 20.0 });
+                    diode_entries.push(DiodeEntry {
+                        id: comp.id,
+                        anode: a,
+                        cathode: k,
+                        vf: 2.0,
+                        rb: 20.0,
+                    });
                 }
             }
             ComponentKind::ZenerDiode => {
                 let vz = parse_metric_value(&comp.value, "v").unwrap_or(5.1) as f64;
                 if let (Some(a), Some(k)) = (p0, p1) {
-                    diode_entries.push(DiodeEntry { id: comp.id, anode: k, cathode: a, vf: vz, rb: 5.0 });
+                    diode_entries.push(DiodeEntry {
+                        id: comp.id,
+                        anode: k,
+                        cathode: a,
+                        vf: vz,
+                        rb: 5.0,
+                    });
                 }
             }
             ComponentKind::Thermistor => {
                 let r = parse_metric_value(&comp.value, "ohm").unwrap_or(10_000.0) as f64;
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r,
+                    });
                 }
             }
             ComponentKind::Varistor => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 100.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 100.0,
+                    });
                 }
             }
             ComponentKind::SchottkyDiode => {
                 if let (Some(a), Some(k)) = (p0, p1) {
-                    diode_entries.push(DiodeEntry { id: comp.id, anode: a, cathode: k, vf: 0.30, rb: 4.0 });
+                    diode_entries.push(DiodeEntry {
+                        id: comp.id,
+                        anode: a,
+                        cathode: k,
+                        vf: 0.30,
+                        rb: 4.0,
+                    });
                 }
             }
             ComponentKind::TvsDiode => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 1000.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 1000.0,
+                    });
                 }
             }
             ComponentKind::Phototransistor => {
@@ -443,22 +539,42 @@ pub fn solve_dc_detailed(
                     .find(|p| p.label == "E")
                     .and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
                 if let (Some(c), Some(e)) = (c_n, e_n) {
-                    res.push(ResEntry { id: comp.id, a: c, b: e, r: 500.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a: c,
+                        b: e,
+                        r: 500.0,
+                    });
                 }
             }
             ComponentKind::Voltmeter => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 1_000_000.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 1_000_000.0,
+                    });
                 }
             }
             ComponentKind::Ammeter => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 0.001 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 0.001,
+                    });
                 }
             }
             ComponentKind::Buzzer => {
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    res.push(ResEntry { id: comp.id, a, b, r: 150.0 });
+                    res.push(ResEntry {
+                        id: comp.id,
+                        a,
+                        b,
+                        r: 150.0,
+                    });
                 }
             }
             // Components not modelled in DC MNA — ignored (open circuit).
@@ -508,11 +624,31 @@ pub fn solve_dc_detailed(
     for (bi, bjt) in bjt_entries.iter().enumerate() {
         let mid = bjt_start_node + bi;
         if bjt.npn {
-            vs.push(VsEntry { id: bjt.id, pos: bjt.b, neg: mid, v: bjt.vbe });
-            res.push(ResEntry { id: bjt.id, a: mid, b: bjt.e, r: bjt.rb_be });
+            vs.push(VsEntry {
+                id: bjt.id,
+                pos: bjt.b,
+                neg: mid,
+                v: bjt.vbe,
+            });
+            res.push(ResEntry {
+                id: bjt.id,
+                a: mid,
+                b: bjt.e,
+                r: bjt.rb_be,
+            });
         } else {
-            vs.push(VsEntry { id: bjt.id, pos: bjt.e, neg: mid, v: bjt.vbe });
-            res.push(ResEntry { id: bjt.id, a: mid, b: bjt.b, r: bjt.rb_be });
+            vs.push(VsEntry {
+                id: bjt.id,
+                pos: bjt.e,
+                neg: mid,
+                v: bjt.vbe,
+            });
+            res.push(ResEntry {
+                id: bjt.id,
+                a: mid,
+                b: bjt.b,
+                r: bjt.rb_be,
+            });
         }
     }
     validate_voltage_sources(&vs)?;
@@ -523,54 +659,59 @@ pub fn solve_dc_detailed(
     if total_nodes == 0 {
         return Err(SimulationError::FloatingNode);
     }
-    let solve_with_states =
-        |diode_on: &[bool], mos_on: &[bool]| -> Result<super::matrix::SolveSolution, SimulationError> {
-            let mut mat = Mna::new(total_nodes, m);
-            for re in &res {
-                mat.stamp_r(re.a, re.b, re.r);
+    let solve_with_states = |diode_on: &[bool],
+                             mos_on: &[bool]|
+     -> Result<super::matrix::SolveSolution, SimulationError> {
+        let mut mat = Mna::new(total_nodes, m);
+        for re in &res {
+            mat.stamp_r(re.a, re.b, re.r);
+        }
+        for (index, diode) in diode_entries.iter().enumerate() {
+            if diode_on.get(index).copied().unwrap_or(false) {
+                mat.stamp_r(diode.anode, diode.cathode, diode.rb);
+                mat.stamp_is(diode.anode, diode.cathode, diode.vf / diode.rb);
+            } else {
+                mat.stamp_r(diode.anode, diode.cathode, 1.0e9);
             }
-            for (index, diode) in diode_entries.iter().enumerate() {
-                if diode_on.get(index).copied().unwrap_or(false) {
-                    mat.stamp_r(diode.anode, diode.cathode, diode.rb);
-                    mat.stamp_is(diode.anode, diode.cathode, diode.vf / diode.rb);
+        }
+        for (index, mos) in mos_entries.iter().enumerate() {
+            mat.stamp_r(
+                mos.drain,
+                mos.source,
+                if mos_on.get(index).copied().unwrap_or(false) {
+                    mos.r_on
                 } else {
-                    mat.stamp_r(diode.anode, diode.cathode, 1.0e9);
-                }
+                    mos.r_off
+                },
+            );
+        }
+        for (k, v_src) in vs.iter().enumerate() {
+            mat.stamp_vs(k, v_src.pos, v_src.neg, v_src.v);
+        }
+        for (bi, bjt) in bjt_entries.iter().enumerate() {
+            let k_vbe = bjt_vs_start + bi;
+            if bjt.npn {
+                mat.stamp_cccs(bjt.c, bjt.e, k_vbe, bjt.h_fe);
+            } else {
+                mat.stamp_cccs(bjt.c, bjt.e, k_vbe, -bjt.h_fe);
             }
-            for (index, mos) in mos_entries.iter().enumerate() {
-                mat.stamp_r(
-                    mos.drain,
-                    mos.source,
-                    if mos_on.get(index).copied().unwrap_or(false) {
-                        mos.r_on
-                    } else {
-                        mos.r_off
-                    },
-                );
-            }
-            for (k, v_src) in vs.iter().enumerate() {
-                mat.stamp_vs(k, v_src.pos, v_src.neg, v_src.v);
-            }
-            for (bi, bjt) in bjt_entries.iter().enumerate() {
-                let k_vbe = bjt_vs_start + bi;
-                if bjt.npn {
-                    mat.stamp_cccs(bjt.c, bjt.e, k_vbe, bjt.h_fe);
-                } else {
-                    mat.stamp_cccs(bjt.c, bjt.e, k_vbe, -bjt.h_fe);
-                }
-            }
-            for i_src in &is_src {
-                mat.stamp_is(i_src.pos, i_src.neg, i_src.i);
-            }
-            mat.solve()
-        };
+        }
+        for i_src in &is_src {
+            mat.stamp_is(i_src.pos, i_src.neg, i_src.i);
+        }
+        mat.solve()
+    };
 
     let initial_diode_states = vec![false; diode_entries.len()];
     let initial_mos_states = vec![false; mos_entries.len()];
     let initial_solution = solve_with_states(&initial_diode_states, &initial_mos_states)?;
     let initial = &initial_solution.x;
     let initial_voltage = |mna_idx: usize| -> f64 {
-        if mna_idx == 0 { 0.0 } else { initial.get(mna_idx - 1).copied().unwrap_or(0.0) }
+        if mna_idx == 0 {
+            0.0
+        } else {
+            initial.get(mna_idx - 1).copied().unwrap_or(0.0)
+        }
     };
     let diode_states = diode_entries
         .iter()
@@ -591,7 +732,11 @@ pub fn solve_dc_detailed(
 
     // ── 8. Decode results ─────────────────────────────────────────────────
     let vnode = |mna_idx: usize| -> f64 {
-        if mna_idx == 0 { 0.0 } else { x.get(mna_idx - 1).copied().unwrap_or(0.0) }
+        if mna_idx == 0 {
+            0.0
+        } else {
+            x.get(mna_idx - 1).copied().unwrap_or(0.0)
+        }
     };
 
     let mut net_voltages: HashMap<usize, f64> = HashMap::new();
@@ -734,12 +879,11 @@ pub fn solve_dc_detailed(
                 let Some(distance) = distance_along_wire(&wire.points, pin.pos) else {
                     continue;
                 };
-                let toward_pin_sign =
-                    if distance <= wire_polyline_length(&wire.points) * 0.5 {
-                        -1.0
-                    } else {
-                        1.0
-                    };
+                let toward_pin_sign = if distance <= wire_polyline_length(&wire.points) * 0.5 {
+                    -1.0
+                } else {
+                    1.0
+                };
                 candidates.push(terminal_current * toward_pin_sign);
             }
         }
@@ -760,7 +904,10 @@ pub fn solve_dc_detailed(
         }
     }
 
-    let vmax = net_voltages.values().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    let vmax = net_voltages
+        .values()
+        .map(|v| v.abs())
+        .fold(0.0_f64, f64::max);
 
     Ok(DcResult {
         net_voltages,
@@ -805,9 +952,13 @@ pub(super) fn terminal_current_into_component(
         | ComponentKind::SchottkyDiode
         | ComponentKind::ZenerDiode
         | ComponentKind::TvsDiode => {
-            if pin.label == "A" { branch_current } else { -branch_current }
+            if pin.label == "A" {
+                branch_current
+            } else {
+                -branch_current
+            }
         }
-        ComponentKind::Nmosfet | ComponentKind::Pmosfet => match pin.label.as_ref() {
+        ComponentKind::Nmosfet | ComponentKind::Pmosfet => match pin.label {
             "D" => branch_current,
             "S" => -branch_current,
             _ => 0.0,
@@ -825,10 +976,7 @@ pub(super) fn terminal_current_into_component(
 }
 
 pub(super) fn wire_polyline_length(points: &[Pos2]) -> f32 {
-    points
-        .windows(2)
-        .map(|s| s[0].distance(s[1]))
-        .sum()
+    points.windows(2).map(|s| s[0].distance(s[1])).sum()
 }
 
 pub(super) fn distance_along_wire(points: &[Pos2], point: Pos2) -> Option<f32> {
