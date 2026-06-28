@@ -36,6 +36,8 @@ pub(crate) fn build_breadboard_guide(
                 | ComponentKind::Esp32C3
                 | ComponentKind::ArduinoUno
                 | ComponentKind::RaspberryPiPico
+                | ComponentKind::Stm32BluePill
+                | ComponentKind::Stm32Nucleo64
         )
     });
     let peripheral = components
@@ -92,6 +94,20 @@ pub(crate) fn build_breadboard_guide(
             ("GND", "GND", "Common ground"),
             ("A4 SDA", "SDA", "I2C data"),
             ("A5 SCL", "SCL", "I2C clock"),
+        ],
+        (ComponentKind::Stm32BluePill, ComponentKind::Oled)
+        | (ComponentKind::Stm32BluePill, ComponentKind::Sensor) => vec![
+            ("3V3", "VCC", "Power rail"),
+            ("GND", "GND", "Common ground"),
+            ("PB7 SDA", "SDA", "I2C data"),
+            ("PB6 SCL", "SCL", "I2C clock"),
+        ],
+        (ComponentKind::Stm32Nucleo64, ComponentKind::Oled)
+        | (ComponentKind::Stm32Nucleo64, ComponentKind::Sensor) => vec![
+            ("3V3", "VCC", "Power rail"),
+            ("GND", "GND", "Common ground"),
+            ("D14 PB9 SDA", "SDA", "I2C data"),
+            ("D15 PB8 SCL", "SCL", "I2C clock"),
         ],
         _ => {
             guide.notes.push(format!(

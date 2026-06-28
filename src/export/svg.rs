@@ -178,6 +178,12 @@ fn svg_component(
         ComponentKind::RaspberryPiPico => {
             svg_module_box(out, cx, cy, &s, color, "Pico", 60.0, 90.0)
         }
+        ComponentKind::Stm32BluePill => {
+            svg_module_box(out, cx, cy, &s, color, "STM32\nBlue Pill", 70.0, 130.0)
+        }
+        ComponentKind::Stm32Nucleo64 => {
+            svg_module_box(out, cx, cy, &s, color, "STM32\nNucleo", 90.0, 160.0)
+        }
         ComponentKind::Oled => svg_module_box(out, cx, cy, &s, color, "OLED", 50.0, 50.0),
         ComponentKind::Sensor => svg_module_box(out, cx, cy, &s, color, "SEN", 50.0, 50.0),
         ComponentKind::Dht11 => svg_module_box(out, cx, cy, &s, color, "DHT11", 40.0, 40.0),

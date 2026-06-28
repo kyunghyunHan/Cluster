@@ -118,6 +118,56 @@ pub(crate) fn esp32_devkit_part() -> LibraryPart {
     }
 }
 
+pub(crate) fn stm32_blue_pill_part() -> LibraryPart {
+    LibraryPart {
+        part_id: "cluster:stm32-blue-pill-f103c8".to_string(),
+        display_name: "STM32 Blue Pill F103C8".to_string(),
+        symbol_id: "MCU:STM32_BluePill_F103C8".to_string(),
+        footprint_id: "Module_STM32_BluePill".to_string(),
+        pin_map: vec![
+            PinMapping {
+                symbol_pin: "3V3".to_string(),
+                footprint_pad: "3V3".to_string(),
+            },
+            PinMapping {
+                symbol_pin: "GND".to_string(),
+                footprint_pad: "GND".to_string(),
+            },
+            PinMapping {
+                symbol_pin: "PB7_SDA".to_string(),
+                footprint_pad: "PB7".to_string(),
+            },
+            PinMapping {
+                symbol_pin: "PB6_SCL".to_string(),
+                footprint_pad: "PB6".to_string(),
+            },
+            PinMapping {
+                symbol_pin: "PA13_SWDIO".to_string(),
+                footprint_pad: "PA13".to_string(),
+            },
+            PinMapping {
+                symbol_pin: "PA14_SWCLK".to_string(),
+                footprint_pad: "PA14".to_string(),
+            },
+        ],
+        model_3d_path: Some("models/stm32-blue-pill.step".to_string()),
+        default_value: Some("STM32F103C8T6 Blue Pill".to_string()),
+        simulation_model_path: None,
+        package_type: Some("Module".to_string()),
+        supplier: SupplierFields {
+            manufacturer: Some("STMicroelectronics".to_string()),
+            manufacturer_part_number: Some("STM32F103C8T6".to_string()),
+            lcsc_part_number: None,
+            jlcpcb_part_number: None,
+        },
+        properties: HashMap::from([
+            ("core".to_string(), "Cortex-M3".to_string()),
+            ("logic_voltage".to_string(), "3.3V".to_string()),
+            ("debug".to_string(), "SWD".to_string()),
+        ]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +185,27 @@ mod tests {
         );
         assert_eq!(part.supplier.manufacturer.as_deref(), Some("Espressif"));
         assert!(part.model_3d_path.as_deref().unwrap().ends_with(".step"));
+    }
+
+    #[test]
+    fn stm32_part_carries_swd_and_i2c_mapping() {
+        let part = stm32_blue_pill_part();
+
+        assert_eq!(part.symbol_id, "MCU:STM32_BluePill_F103C8");
+        assert_eq!(
+            part.supplier.manufacturer.as_deref(),
+            Some("STMicroelectronics")
+        );
+        assert!(
+            part.pin_map
+                .iter()
+                .any(|pin| pin.symbol_pin.contains("SDA"))
+        );
+        assert!(
+            part.pin_map
+                .iter()
+                .any(|pin| pin.symbol_pin.contains("SWDIO"))
+        );
     }
 
     #[test]

@@ -132,6 +132,10 @@ impl crate::CircuitApp {
                 self.counters.pico += 1;
                 format!("PICO{}", self.counters.pico)
             }
+            ComponentKind::Stm32BluePill | ComponentKind::Stm32Nucleo64 => {
+                self.counters.logic_gate += 1;
+                format!("STM{}", self.counters.logic_gate)
+            }
             ComponentKind::Breadboard => {
                 self.counters.breadboard += 1;
                 format!("BB{}", self.counters.breadboard)
@@ -276,6 +280,8 @@ impl crate::CircuitApp {
             ComponentKind::Esp32C3 => "ESP32-C3 Mini".to_string(),
             ComponentKind::ArduinoUno => "ATmega328P".to_string(),
             ComponentKind::RaspberryPiPico => "RP2040".to_string(),
+            ComponentKind::Stm32BluePill => "STM32F103C8T6 Blue Pill".to_string(),
+            ComponentKind::Stm32Nucleo64 => "STM32 Nucleo-64".to_string(),
             ComponentKind::Breadboard => "400 tie".to_string(),
             ComponentKind::Relay => "5V coil".to_string(),
             ComponentKind::DcMotor => "6V DC".to_string(),

@@ -508,7 +508,9 @@ fn unsupported_reason(kind: ComponentKind) -> &'static str {
         | ComponentKind::Esp32S3
         | ComponentKind::Esp32C3
         | ComponentKind::ArduinoUno
-        | ComponentKind::RaspberryPiPico => {
+        | ComponentKind::RaspberryPiPico
+        | ComponentKind::Stm32BluePill
+        | ComponentKind::Stm32Nucleo64 => {
             "MCU — no SPICE model; model power draw as a resistive load manually"
         }
         ComponentKind::Oled | ComponentKind::Sensor => "I²C module — no SPICE model",

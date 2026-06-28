@@ -36,6 +36,8 @@ pub(crate) enum ComponentKind {
     Esp32C3,
     ArduinoUno,
     RaspberryPiPico,
+    Stm32BluePill,
+    Stm32Nucleo64,
     Breadboard,
     Relay,
     DcMotor,
@@ -190,9 +192,8 @@ pub(crate) fn electrical_metadata(kind: ComponentKind) -> ElectricalMetadata {
             DigitalOnly,
             "Digital logic gate — no DC current model",
         ),
-        Esp32 | Esp32S3 | Esp32C3 | ArduinoUno | RaspberryPiPico => {
-            (None, Unsupported, "MCU — connectivity and ERC only")
-        }
+        Esp32 | Esp32S3 | Esp32C3 | ArduinoUno | RaspberryPiPico | Stm32BluePill
+        | Stm32Nucleo64 => (None, Unsupported, "MCU — connectivity and ERC only"),
         Breadboard => (None, SymbolOnly, "Symbolic breadboard"),
         Servo => (Some(3), SymbolOnly, "Symbolic PWM servo"),
         Oled | Sensor => (
@@ -230,7 +231,9 @@ pub(crate) fn electrical_metadata(kind: ComponentKind) -> ElectricalMetadata {
         Led => (Some((-0.3, 3.3)), Some(0.025), true, false),
         Esp32 | Esp32S3 | Esp32C3 => (Some((0.0, 3.6)), Some(0.012), false, false),
         ArduinoUno => (Some((0.0, 5.5)), Some(0.020), false, false),
-        RaspberryPiPico => (Some((0.0, 3.6)), Some(0.012), false, false),
+        RaspberryPiPico | Stm32BluePill | Stm32Nucleo64 => {
+            (Some((0.0, 3.6)), Some(0.020), false, false)
+        }
         DcMotor | Relay | Servo | Lamp => (None, None, false, true),
         Dht11 | Dht22 => (Some((3.0, 5.5)), Some(0.002), false, false),
         HcSr04 => (Some((4.5, 5.5)), None, false, false),

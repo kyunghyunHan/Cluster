@@ -597,6 +597,8 @@ pub fn solve_dc_detailed(
             | ComponentKind::Esp32C3
             | ComponentKind::ArduinoUno
             | ComponentKind::RaspberryPiPico
+            | ComponentKind::Stm32BluePill
+            | ComponentKind::Stm32Nucleo64
             | ComponentKind::NetLabel
             | ComponentKind::Timer555
             | ComponentKind::Crystal

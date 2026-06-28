@@ -446,6 +446,8 @@ fn check_esp_gpio_overvoltage(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation
                     | ComponentKind::Esp32S3
                     | ComponentKind::Esp32C3
                     | ComponentKind::RaspberryPiPico
+                    | ComponentKind::Stm32BluePill
+                    | ComponentKind::Stm32Nucleo64
             ) && pin_is_microcontroller_gpio(pin)
         }) {
             v.push(ErcViolation {
@@ -783,6 +785,8 @@ fn check_missing_decoupling_caps(netlist: &CircuitNetlist, v: &mut Vec<ErcViolat
                     | ComponentKind::Esp32C3
                     | ComponentKind::ArduinoUno
                     | ComponentKind::RaspberryPiPico
+                    | ComponentKind::Stm32BluePill
+                    | ComponentKind::Stm32Nucleo64
                     | ComponentKind::GenericIc
                     | ComponentKind::Timer555
             )
@@ -1827,9 +1831,12 @@ pub(crate) fn pin_is_microcontroller_gpio(pin: &NetlistPin) -> bool {
             | ComponentKind::Esp32C3
             | ComponentKind::ArduinoUno
             | ComponentKind::RaspberryPiPico
+            | ComponentKind::Stm32BluePill
+            | ComponentKind::Stm32Nucleo64
     ) && (pin.pin_name.to_ascii_uppercase().contains("GPIO")
         || pin.pin_name.to_ascii_uppercase().starts_with("GP")
-        || pin.pin_name.to_ascii_uppercase().starts_with('D'))
+        || pin.pin_name.to_ascii_uppercase().starts_with('D')
+        || pin_name_is_stm32_port(&pin.pin_name))
 }
 
 pub(crate) fn pin_is_i2c_named(name: &str) -> bool {
@@ -1853,7 +1860,23 @@ fn pin_is_microcontroller(pin: &NetlistPin) -> bool {
             | ComponentKind::Esp32C3
             | ComponentKind::ArduinoUno
             | ComponentKind::RaspberryPiPico
+            | ComponentKind::Stm32BluePill
+            | ComponentKind::Stm32Nucleo64
     )
+}
+
+fn pin_name_is_stm32_port(name: &str) -> bool {
+    let compact = normalized_pin_name(name);
+    ["PA", "PB", "PC", "PD", "PE", "PF", "PG"]
+        .iter()
+        .any(|prefix| {
+            compact.match_indices(prefix).any(|(index, _)| {
+                compact[index + prefix.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_digit())
+            })
+        })
 }
 
 fn component_kind_short(kind: ComponentKind) -> &'static str {
@@ -1868,6 +1891,7 @@ fn component_kind_short(kind: ComponentKind) -> &'static str {
         ComponentKind::Esp32 | ComponentKind::Esp32S3 | ComponentKind::Esp32C3 => "ESP32",
         ComponentKind::ArduinoUno => "Arduino",
         ComponentKind::RaspberryPiPico => "Pico",
+        ComponentKind::Stm32BluePill | ComponentKind::Stm32Nucleo64 => "STM32",
         ComponentKind::Oled => "OLED",
         _ => "Component",
     }
@@ -2011,6 +2035,43 @@ mod tests {
         );
         let v = validate_beginner_rules(&nl);
         assert!(v.iter().any(|e| e.severity == ErcSeverity::Error));
+    }
+
+    #[test]
+    fn reports_5v_on_stm32_gpio_and_adc() {
+        let nl = netlist(
+            vec![make_net(0, "NET_5V")],
+            vec![
+                make_pin(1, "ARD1", ComponentKind::ArduinoUno, "", "5V", 0, true),
+                make_pin(
+                    2,
+                    "STM1",
+                    ComponentKind::Stm32BluePill,
+                    "",
+                    "PB7 SDA",
+                    0,
+                    true,
+                ),
+                make_pin(
+                    2,
+                    "STM1",
+                    ComponentKind::Stm32BluePill,
+                    "",
+                    "PA0 ADC",
+                    0,
+                    true,
+                ),
+            ],
+        );
+        let v = validate_beginner_rules(&nl);
+        assert!(
+            v.iter()
+                .any(|e| e.message.contains("PB7 SDA") && e.message.contains("5V net"))
+        );
+        assert!(
+            v.iter()
+                .any(|e| e.message.contains("PA0 ADC") && e.message.contains("ADC input"))
+        );
     }
 
     // ── Reversed LED ─────────────────────────────────────────────────────
