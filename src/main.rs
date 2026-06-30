@@ -50,6 +50,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use storage::save::write_with_backup;
 use ui::breadboard::{BreadboardRoute, build_breadboard_guide, render_breadboard_view};
+use ui::palette::{PaletteAction, render_parts_palette, selected_part};
 use ui::validation_panel::{ValidationPanelAction, render_validation_panel};
 
 const SAVE_PATH: &str = "cluster_circuit.json";
@@ -436,13 +437,19 @@ impl eframe::App for CircuitApp {
         });
 
         egui::SidePanel::left("palette")
-            .default_width(220.0)
+            .default_width(180.0)
+            .width_range(160.0..=260.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.heading("Parts");
+                ui.label(
+                    egui::RichText::new("Parts")
+                        .size(14.0)
+                        .strong()
+                        .color(Color32::from_rgb(220, 228, 236)),
+                );
                 ui.separator();
                 ui.add_sized(
-                    Vec2::new(ui.available_width(), 22.0),
+                    Vec2::new(ui.available_width(), 20.0),
                     egui::TextEdit::singleline(&mut self.palette_filter)
                         .hint_text("Filter parts...")
                         .text_color(Color32::from_rgb(210, 218, 226)),
@@ -452,161 +459,13 @@ impl eframe::App for CircuitApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let filter = self.palette_filter.clone();
-                        part_section(
-                            ui,
-                            self,
-                            "Passives  [Q]R [A]C [I]L",
-                            SectionMode::Open,
-                            &[
-                                ("Resistor [Q]", ComponentKind::Resistor),
-                                ("Capacitor [A]", ComponentKind::Capacitor),
-                                ("Inductor [I]", ComponentKind::Inductor),
-                                ("Potentiometer", ComponentKind::Potentiometer),
-                                ("Lamp", ComponentKind::Lamp),
-                                ("Fuse", ComponentKind::Fuse),
-                            ],
-                            &filter,
-                        );
-                        part_section(
-                            ui,
-                            self,
-                            "Semiconductors  [D]iode [E]LED",
-                            SectionMode::Open,
-                            &[
-                                ("Diode [D]", ComponentKind::Diode),
-                                ("Zener Diode [Z]", ComponentKind::ZenerDiode),
-                                ("LED [E]", ComponentKind::Led),
-                                ("Op Amp", ComponentKind::OpAmp),
-                            ],
-                            &filter,
-                        );
-                        part_section(
-                            ui,
-                            self,
-                            "Transistors",
-                            SectionMode::Open,
-                            &[
-                                ("NPN BJT [N]", ComponentKind::NpnTransistor),
-                                ("PNP BJT [P]", ComponentKind::PnpTransistor),
-                                ("N-MOSFET", ComponentKind::Nmosfet),
-                                ("P-MOSFET", ComponentKind::Pmosfet),
-                                ("Voltage Reg", ComponentKind::VoltageReg),
-                            ],
-                            &filter,
-                        );
-                        part_section(
-                            ui,
-                            self,
-                            "Logic Gates",
-                            SectionMode::Collapsed,
-                            &[
-                                ("NOT  (Inverter)", ComponentKind::LogicNot),
-                                ("AND", ComponentKind::LogicAnd),
-                                ("OR", ComponentKind::LogicOr),
-                                ("NAND", ComponentKind::LogicNand),
-                                ("NOR", ComponentKind::LogicNor),
-                                ("XOR", ComponentKind::LogicXor),
-                            ],
-                            &filter,
-                        );
-                        part_section(
-                            ui,
-                            self,
-                            "Sources and IO  [B]attery [G]nd",
-                            SectionMode::Open,
-                            &[
-                                ("Ground [G]", ComponentKind::Ground),
-                                ("Voltage Source", ComponentKind::VSource),
-                                ("Current Source", ComponentKind::ISource),
-                                ("Battery [B]", ComponentKind::Battery),
-                                ("Switch", ComponentKind::Switch),
-                                ("Push Button", ComponentKind::PushButton),
-                                ("Slide Switch", ComponentKind::SlideSwitch),
-                            ],
-                            &filter,
-                        );
-                        part_section(
-                            ui,
-                            self,
-                            "Modules",
-                            SectionMode::Collapsed,
-                            &[
-                                ("ESP32 WROOM", ComponentKind::Esp32),
-                                ("ESP32-S3", ComponentKind::Esp32S3),
-                                ("ESP32-C3", ComponentKind::Esp32C3),
-                                ("Arduino UNO", ComponentKind::ArduinoUno),
-                                ("Pi Pico", ComponentKind::RaspberryPiPico),
-                                ("STM32 Blue Pill", ComponentKind::Stm32BluePill),
-                                ("STM32 Nucleo-64", ComponentKind::Stm32Nucleo64),
-                                ("Breadboard", ComponentKind::Breadboard),
-                                ("OLED I2C", ComponentKind::Oled),
-                                ("Sensor (I2C)", ComponentKind::Sensor),
-                            ],
-                            &filter,
-                        );
-                        part_section(
-                            ui,
-                            self,
-                            "Sensors",
-                            SectionMode::Open,
-                            &[
-                                ("DHT11 Temp/Humidity", ComponentKind::Dht11),
-                                ("DHT22 Temp/Humidity", ComponentKind::Dht22),
-                                ("HC-SR04 Ultrasonic", ComponentKind::HcSr04),
-                                ("PIR Motion Sensor", ComponentKind::PirSensor),
-                                ("Buzzer", ComponentKind::Buzzer),
-                                ("NeoPixel (WS2812)", ComponentKind::NeoPixel),
-                            ],
-                            &filter,
-                        );
-                        part_section(
-                            ui,
-                            self,
-                            "Actuators",
-                            SectionMode::Collapsed,
-                            &[
-                                ("Relay", ComponentKind::Relay),
-                                ("DC Motor", ComponentKind::DcMotor),
-                                ("Servo", ComponentKind::Servo),
-                                ("Motor Driver", ComponentKind::MotorDriver),
-                            ],
-                            &filter,
-                        );
-
-                        part_section(
-                            ui,
-                            self,
-                            "Advanced",
-                            SectionMode::Collapsed,
-                            &[
-                                ("Net Label", ComponentKind::NetLabel),
-                                ("555 Timer", ComponentKind::Timer555),
-                                ("Crystal", ComponentKind::Crystal),
-                                ("Transformer", ComponentKind::Transformer),
-                                ("7-Seg Display", ComponentKind::Display7Seg),
-                                ("Thermistor", ComponentKind::Thermistor),
-                                ("Varistor", ComponentKind::Varistor),
-                                ("Voltage Ref", ComponentKind::VoltageRef),
-                                ("Schottky", ComponentKind::SchottkyDiode),
-                                ("TVS Diode", ComponentKind::TvsDiode),
-                                ("Phototransistor", ComponentKind::Phototransistor),
-                                ("Optocoupler", ComponentKind::Optocoupler),
-                                ("Generic IC", ComponentKind::GenericIc),
-                            ],
-                            &filter,
-                        );
-
-                        part_section(
-                            ui,
-                            self,
-                            "Measurement Tools",
-                            SectionMode::Collapsed,
-                            &[
-                                ("Voltmeter", ComponentKind::Voltmeter),
-                                ("Ammeter", ComponentKind::Ammeter),
-                            ],
-                            &filter,
-                        );
+                        if let Some(PaletteAction::PlacePart { kind, label }) =
+                            render_parts_palette(ui, &filter, selected_part(self.tool))
+                        {
+                            self.tool = Tool::Place(kind);
+                            self.draft_wire.clear();
+                            self.status = format!("Placing {label}. Click the canvas.");
+                        }
 
                         palette_section(ui, "Lessons: Current Flows", SectionMode::Open, |ui| {
                             if palette_action(ui, "LED Circuit").clicked() {
@@ -3684,10 +3543,14 @@ fn compact_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 
 fn palette_action(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add_sized(
-        Vec2::new(ui.available_width(), 27.0),
-        egui::Button::new(egui::RichText::new(label).color(Color32::from_rgb(216, 224, 232)))
-            .fill(Color32::from_rgb(28, 33, 39))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(48, 56, 64))),
+        Vec2::new(ui.available_width(), 22.0),
+        egui::Button::new(
+            egui::RichText::new(label)
+                .size(10.5)
+                .color(Color32::from_rgb(216, 224, 232)),
+        )
+        .fill(Color32::from_rgb(28, 33, 39))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(48, 56, 64))),
     )
 }
 
@@ -4079,100 +3942,39 @@ enum SectionMode {
     Collapsed,
 }
 
-fn part_section(
-    ui: &mut egui::Ui,
-    app: &mut CircuitApp,
-    title: &str,
-    mode: SectionMode,
-    parts: &[(&str, ComponentKind)],
-    filter: &str,
-) {
-    let lf = filter.to_lowercase();
-    let filtered: Vec<_> = if lf.is_empty() {
-        parts.iter().copied().collect()
-    } else {
-        parts
-            .iter()
-            .copied()
-            .filter(|(label, _)| label.to_lowercase().contains(&lf))
-            .collect()
-    };
-    if filtered.is_empty() {
-        return;
-    }
-    let effective_mode = if lf.is_empty() {
-        mode
-    } else {
-        SectionMode::Open
-    };
-    palette_section(ui, title, effective_mode, |ui| {
-        for (label, kind) in &filtered {
-            part_button(ui, app, label, *kind);
-        }
-    });
-}
-
 fn palette_section(
     ui: &mut egui::Ui,
     title: &str,
     mode: SectionMode,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
-    ui.add_space(5.0);
+    ui.add_space(3.0);
     egui::Frame::NONE
         .fill(Color32::from_rgb(23, 28, 35))
         .stroke(Stroke::new(1.0, Color32::from_rgb(58, 68, 80)))
-        .corner_radius(egui::CornerRadius::same(6))
-        .inner_margin(egui::Margin::symmetric(7, 5))
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(5, 3))
         .show(ui, |ui| {
             let title = egui::RichText::new(title.to_uppercase())
-                .size(11.0)
+                .size(10.0)
                 .strong()
                 .color(Color32::from_rgb(190, 204, 218));
             match mode {
                 SectionMode::Open => {
                     ui.label(title);
-                    ui.add_space(5.0);
+                    ui.add_space(3.0);
                     add_contents(ui);
                 }
                 SectionMode::Collapsed => {
                     egui::CollapsingHeader::new(title)
                         .default_open(false)
                         .show(ui, |ui| {
-                            ui.add_space(4.0);
+                            ui.add_space(2.0);
                             add_contents(ui);
                         });
                 }
             }
         });
-}
-
-fn part_button(ui: &mut egui::Ui, app: &mut CircuitApp, label: &str, kind: ComponentKind) {
-    let selected = app.tool == Tool::Place(kind);
-    let (fill, stroke, color) = if selected {
-        (
-            Color32::from_rgb(38, 70, 82),
-            Stroke::new(1.0, Color32::from_rgb(105, 178, 255)),
-            Color32::from_rgb(235, 246, 255),
-        )
-    } else {
-        (
-            Color32::from_rgb(25, 29, 35),
-            Stroke::new(1.0, Color32::from_rgb(43, 50, 58)),
-            Color32::from_rgb(198, 207, 216),
-        )
-    };
-    let response = ui.add_sized(
-        Vec2::new(ui.available_width(), 27.0),
-        egui::Button::new(egui::RichText::new(label).color(color))
-            .fill(fill)
-            .stroke(stroke),
-    );
-    if response.clicked() {
-        app.tool = Tool::Place(kind);
-        app.draft_wire.clear();
-        app.status = format!("Placing {label}. Click the canvas.");
-    }
 }
 
 fn push_unique_point(points: &mut Vec<Pos2>, pos: Pos2) {
