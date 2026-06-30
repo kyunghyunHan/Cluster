@@ -37,7 +37,7 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn mark_dirty(&mut self) {
-        self.dirty = true;
+        self.history_state.dirty = true;
         self.invalidate_analysis_cache();
     }
 
@@ -49,31 +49,31 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn record_history(&mut self) {
-        self.history.push(self.snapshot());
-        if self.history.len() > 80 {
-            self.history.remove(0);
+        self.history_state.undo.push(self.snapshot());
+        if self.history_state.undo.len() > 80 {
+            self.history_state.undo.remove(0);
         }
-        self.redo_history.clear();
+        self.history_state.redo.clear();
         self.mark_dirty();
     }
 
     pub(crate) fn undo(&mut self) {
-        let Some(snapshot) = self.history.pop() else {
+        let Some(snapshot) = self.history_state.undo.pop() else {
             self.status = "Nothing to undo.".to_string();
             return;
         };
-        self.redo_history.push(self.snapshot());
+        self.history_state.redo.push(self.snapshot());
         self.restore_snapshot(snapshot);
         self.mark_dirty();
         self.status = "Undo.".to_string();
     }
 
     pub(crate) fn redo(&mut self) {
-        let Some(snapshot) = self.redo_history.pop() else {
+        let Some(snapshot) = self.history_state.redo.pop() else {
             self.status = "Nothing to redo.".to_string();
             return;
         };
-        self.history.push(self.snapshot());
+        self.history_state.undo.push(self.snapshot());
         self.restore_snapshot(snapshot);
         self.mark_dirty();
         self.status = "Redo.".to_string();

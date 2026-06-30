@@ -782,7 +782,7 @@ impl crate::CircuitApp {
         self.save_current_page();
         match self.write_circuit_json(crate::SAVE_PATH) {
             Ok(()) => {
-                self.dirty = false;
+                self.history_state.dirty = false;
                 self.last_autorecover_revision = self.circuit_revision;
                 self.status = format!("Saved {}.", crate::SAVE_PATH);
             }
@@ -984,7 +984,7 @@ impl crate::CircuitApp {
         let Some(bounds) = crate::circuit_bounds(&self.components, &self.wires) else {
             return;
         };
-        let canvas = self.canvas_rect;
+        let canvas = self.canvas.rect;
         if canvas.width() < 1.0 || canvas.height() < 1.0 {
             return;
         }
@@ -1015,7 +1015,7 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn backup_dirty_work(&mut self, reason: &str) {
-        if !self.dirty || (self.components.is_empty() && self.wires.is_empty()) {
+        if !self.history_state.dirty || (self.components.is_empty() && self.wires.is_empty()) {
             return;
         }
         self.save_current_page();
@@ -1046,7 +1046,7 @@ impl crate::CircuitApp {
                 if recovery {
                     self.mark_dirty();
                 } else {
-                    self.dirty = false;
+                    self.history_state.dirty = false;
                     self.circuit_revision = self.circuit_revision.saturating_add(1);
                     self.cached_simulation = None;
                     self.last_autorecover_revision = self.circuit_revision;
@@ -1070,7 +1070,7 @@ impl crate::CircuitApp {
         if !self.simulate {
             return crate::engine::simulation::Simulation::default();
         }
-        let ac_key = self.ac_freq_hz.to_bits();
+        let ac_key = self.simulation_ui.ac_freq_hz.to_bits();
         if let Some((revision, cached_ac_key, simulation)) = &self.cached_simulation
             && *revision == self.circuit_revision
             && *cached_ac_key == ac_key
@@ -1078,7 +1078,11 @@ impl crate::CircuitApp {
             return simulation.clone();
         }
         let mut simulation = simulation_engine::analyze_circuit(&self.components, &self.wires);
-        simulation.ac = mna::solve_ac(&self.components, &self.wires, self.ac_freq_hz as f64);
+        simulation.ac = mna::solve_ac(
+            &self.components,
+            &self.wires,
+            self.simulation_ui.ac_freq_hz as f64,
+        );
         let netlist = self.current_netlist();
         simulation.erc =
             crate::run_erc_with_netlist(&self.components, &self.wires, &simulation, &netlist);
@@ -1109,7 +1113,7 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn flush_autorecover_if_needed(&mut self) {
-        if !self.dirty
+        if !self.history_state.dirty
             || self.last_autorecover_revision == self.circuit_revision
             || (self.components.is_empty() && self.wires.is_empty())
         {

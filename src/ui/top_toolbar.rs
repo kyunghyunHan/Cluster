@@ -46,6 +46,7 @@ pub(crate) enum TopToolbarAction {
     BlankSchematic,
     AddPage,
     RemoveCurrentPage,
+    Help,
 }
 
 pub(crate) fn render_top_toolbar(
@@ -73,6 +74,9 @@ pub(crate) fn render_top_toolbar(
         if tool_button(ui, model.tool == Tool::Wire, "Wire").clicked() {
             action = Some(TopToolbarAction::WireTool);
         }
+        if tool_button(ui, *model.simulate, "Simulate").clicked() {
+            *model.simulate = !*model.simulate;
+        }
         ui.separator();
         for (label, next) in [
             ("Undo", TopToolbarAction::Undo),
@@ -84,6 +88,31 @@ pub(crate) fn render_top_toolbar(
             if compact_button(ui, label).clicked() {
                 action = Some(next);
             }
+        }
+        ui.separator();
+        if compact_button(ui, "Save").clicked() {
+            action = Some(TopToolbarAction::SaveJson);
+        }
+        if compact_button(ui, "Load").clicked() {
+            action = Some(TopToolbarAction::LoadJson);
+        }
+        toolbar_menu(ui, "Export", |ui| {
+            for (label, next) in [
+                ("SVG", TopToolbarAction::ExportSvg),
+                ("PNG screenshot", TopToolbarAction::ExportPng),
+                ("SPICE CIR", TopToolbarAction::ExportCir),
+                ("Netlist TXT", TopToolbarAction::ExportNetlistText),
+                ("BOM CSV", TopToolbarAction::ExportBomCsv),
+                ("Arduino starter code", TopToolbarAction::ExportArduinoCode),
+            ] {
+                if menu_action(ui, label).clicked() {
+                    action = Some(next);
+                    ui.close();
+                }
+            }
+        });
+        if compact_button(ui, "Help").clicked() {
+            action = Some(TopToolbarAction::Help);
         }
         ui.separator();
         toolbar_menu(ui, "Align", |ui| {

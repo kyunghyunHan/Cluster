@@ -49,10 +49,13 @@ use model::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use storage::save::write_with_backup;
-use ui::bottom_panel::{PageTabsAction, render_page_tabs};
+use ui::bottom_dock::{
+    BottomDockAction, BottomDockModel, BottomDockTab, PageTabsAction, render_bottom_dock,
+    render_page_tabs,
+};
 use ui::breadboard::{BreadboardRoute, build_breadboard_guide, render_breadboard_view};
 use ui::canvas_overlay::draw_simulation_legend;
-use ui::left_palette::{PaletteAction, render_parts_palette, selected_part};
+use ui::left_palette::{PaletteAction, PaletteTemplate, render_parts_palette, selected_part};
 use ui::right_inspector::render_inspector_header;
 use ui::status_bar::{StatusBarModel, render_status_bar};
 use ui::top_toolbar::{TopToolbarAction, TopToolbarModel, render_top_toolbar};
@@ -62,6 +65,72 @@ const SAVE_PATH: &str = "cluster_circuit.json";
 const AUTORECOVER_PATH: &str = "cluster_autorecover.json";
 
 // Tool, AlignDir, Selection are defined in app/state.rs and imported above.
+
+struct UiState {
+    show_help: bool,
+    bottom_dock_tab: BottomDockTab,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            show_help: false,
+            bottom_dock_tab: BottomDockTab::Erc,
+        }
+    }
+}
+
+struct CanvasState {
+    rect: Rect,
+    cursor_world_pos: Option<Pos2>,
+}
+
+impl Default for CanvasState {
+    fn default() -> Self {
+        Self {
+            rect: Rect::EVERYTHING,
+            cursor_world_pos: None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct PaletteState {
+    filter: String,
+}
+
+struct SimulationUiState {
+    show_voltage_labels: bool,
+    show_dc_overlay: bool,
+    show_oscilloscope: bool,
+    ac_freq_hz: f32,
+}
+
+impl Default for SimulationUiState {
+    fn default() -> Self {
+        Self {
+            show_voltage_labels: false,
+            show_dc_overlay: true,
+            show_oscilloscope: false,
+            ac_freq_hz: 1000.0,
+        }
+    }
+}
+
+#[derive(Default)]
+struct InspectorState;
+
+#[derive(Default)]
+struct BreadboardUiState {
+    open: bool,
+}
+
+#[derive(Default)]
+struct HistoryState {
+    undo: Vec<CircuitSnapshot>,
+    redo: Vec<CircuitSnapshot>,
+    dirty: bool,
+}
 
 struct CircuitApp {
     components: Vec<Component>,
@@ -79,9 +148,13 @@ struct CircuitApp {
     status: String,
     next_id: u64,
     counters: Counters,
-    history: Vec<CircuitSnapshot>,
-    redo_history: Vec<CircuitSnapshot>,
-    dirty: bool,
+    history_state: HistoryState,
+    ui_state: UiState,
+    canvas: CanvasState,
+    palette_ui: PaletteState,
+    simulation_ui: SimulationUiState,
+    inspector_ui: InspectorState,
+    breadboard_ui: BreadboardUiState,
     // View
     zoom: f32,
     pan: Vec2,
@@ -90,16 +163,10 @@ struct CircuitApp {
     clipboard: Vec<Component>,
     /// Wires internal to the copied group (both endpoints in selection)
     clipboard_wires: Vec<Wire>,
-    // Last known canvas rect (updated each frame)
-    canvas_rect: Rect,
-    // Cursor world-space position while hovering the canvas
-    cursor_world_pos: Option<Pos2>,
     // Multi-select: component IDs
     multi_selected: HashSet<u64>,
     // World-space anchor for rectangle selection drag
     rect_select_start: Option<Pos2>,
-    // Palette search filter
-    palette_filter: String,
     // Net highlighting: wire ID hovered in select mode → highlight whole net
     hovered_net_wire: Option<u64>,
     // Cache of which wire IDs share the same net as hovered wire
@@ -111,8 +178,6 @@ struct CircuitApp {
     cached_simulation: Option<(u64, u32, Simulation)>,
     cached_connected_pins: Option<(u64, Vec<(i32, i32)>)>,
     last_autorecover_revision: u64,
-    /// Show DC voltage labels on every wire
-    show_voltage_labels: bool,
     // ── Multi-page ──────────────────────────────────────────────────────
     /// All pages: (name, components, wires, next_id, counters)
     pages: Vec<(String, Vec<Component>, Vec<Wire>, u64, Counters)>,
@@ -124,18 +189,8 @@ struct CircuitApp {
     find_result_idx: usize,
     // ── Deferred canvas fit (set after demo load, applied once canvas rect is known) ──
     pending_fit: bool,
-    // ── DC simulation overlay on canvas ─────────────────────────────────
-    show_dc_overlay: bool,
     // ── Inline value editing: (component_id, edited_text) ───────────────
     inline_edit: Option<(u64, String)>,
-    // ── Keyboard shortcuts help dialog ──────────────────────────────────
-    show_help: bool,
-    // ── Oscilloscope / waveform viewer ──────────────────────────────────
-    show_oscilloscope: bool,
-    // ── Beginner breadboard wiring assistant ─────────────────────────────
-    show_breadboard_view: bool,
-    // ── AC analysis frequency ────────────────────────────────────────────
-    ac_freq_hz: f32,
     // ── Right-click context menu: (screen_pos, target component ID) ──────
     context_menu: Option<(egui::Pos2, u64)>,
     // ── PNG screenshot pending ────────────────────────────────────────────
@@ -160,18 +215,19 @@ impl CircuitApp {
             status: String::new(),
             next_id: 1,
             counters: Counters::default(),
-            history: Vec::new(),
-            redo_history: Vec::new(),
-            dirty: false,
+            history_state: HistoryState::default(),
+            ui_state: UiState::default(),
+            canvas: CanvasState::default(),
+            palette_ui: PaletteState::default(),
+            simulation_ui: SimulationUiState::default(),
+            inspector_ui: InspectorState,
+            breadboard_ui: BreadboardUiState::default(),
             zoom: 1.0,
             pan: Vec2::ZERO,
             clipboard: Vec::new(),
             clipboard_wires: Vec::new(),
-            canvas_rect: Rect::EVERYTHING,
-            cursor_world_pos: None,
             multi_selected: HashSet::new(),
             rect_select_start: None,
-            palette_filter: String::new(),
             hovered_net_wire: None,
             highlighted_net_wires: HashSet::new(),
             snap_target: None,
@@ -180,7 +236,6 @@ impl CircuitApp {
             cached_simulation: None,
             cached_connected_pins: None,
             last_autorecover_revision: 0,
-            show_voltage_labels: false,
             pages: vec![(
                 "Page 1".to_string(),
                 Vec::new(),
@@ -194,12 +249,7 @@ impl CircuitApp {
             find_results: Vec::new(),
             find_result_idx: 0,
             pending_fit: false,
-            show_dc_overlay: true,
             inline_edit: None,
-            show_help: false,
-            show_oscilloscope: false,
-            show_breadboard_view: false,
-            ac_freq_hz: 1000.0,
             context_menu: None,
             screenshot_pending: false,
         }
@@ -249,14 +299,50 @@ impl CircuitApp {
             }
             TopToolbarAction::AddPage => self.add_page(),
             TopToolbarAction::RemoveCurrentPage => self.remove_current_page(),
+            TopToolbarAction::Help => self.ui_state.show_help = true,
+        }
+    }
+
+    fn load_palette_template(&mut self, template: PaletteTemplate) {
+        match template {
+            PaletteTemplate::Esp32Led => self.load_button_toggle_led_demo(),
+            PaletteTemplate::Esp32Oled => self.load_esp32_oled_demo(),
+            PaletteTemplate::Esp32Button => self.load_esp32_button_debounce_demo(),
+            PaletteTemplate::ArduinoLed => self.load_arduino_led_demo(),
         }
     }
 
     fn zoom_by(&mut self, factor: f32) {
-        let canvas_center = self.canvas_rect.center();
+        let canvas_center = self.canvas.rect.center();
         let world_center = (canvas_center.to_vec2() - self.pan) / self.zoom;
         self.zoom = (self.zoom * factor).clamp(0.05, 8.0);
         self.pan = canvas_center.to_vec2() - world_center * self.zoom;
+    }
+
+    fn handle_validation_panel_action(&mut self, action: ValidationPanelAction) {
+        match action {
+            ValidationPanelAction::SelectComponent(id) => {
+                self.selected = Some(Selection::Component(id));
+                self.highlighted_net_wires.clear();
+                self.hovered_net_wire = None;
+                if let Some(comp) = self.components.iter().find(|component| component.id == id) {
+                    let canvas_center = self.canvas.rect.center();
+                    self.pan = canvas_center.to_vec2() - comp.pos.to_vec2() * self.zoom;
+                }
+            }
+            ValidationPanelAction::SelectWire(id) => {
+                self.selected = Some(Selection::Wire(id));
+                self.hovered_net_wire = Some(id);
+                self.highlighted_net_wires = self.same_net_wires(id);
+                if let Some(wire) = self.wires.iter().find(|wire| wire.id == id) {
+                    let canvas_center = self.canvas.rect.center();
+                    self.pan = canvas_center.to_vec2() - wire_midpoint(wire).to_vec2() * self.zoom;
+                }
+            }
+            ValidationPanelAction::ApplyAutoFix(auto_fix) => {
+                self.apply_erc_auto_fix(auto_fix);
+            }
+        }
     }
 }
 
@@ -265,7 +351,7 @@ impl eframe::App for CircuitApp {
         apply_app_style(ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "Cluster Circuits{}",
-            if self.dirty { " *" } else { "" }
+            if self.history_state.dirty { " *" } else { "" }
         )));
 
         // ── Handle screenshot events ──────────────────────────────────────
@@ -303,12 +389,12 @@ impl eframe::App for CircuitApp {
                     orthogonal_wires: &mut self.orthogonal_wires,
                     show_pins: &mut self.show_pins,
                     simulate: &mut self.simulate,
-                    show_breadboard_view: &mut self.show_breadboard_view,
-                    show_voltage_labels: &mut self.show_voltage_labels,
-                    show_dc_overlay: &mut self.show_dc_overlay,
-                    show_oscilloscope: &mut self.show_oscilloscope,
+                    show_breadboard_view: &mut self.breadboard_ui.open,
+                    show_voltage_labels: &mut self.simulation_ui.show_voltage_labels,
+                    show_dc_overlay: &mut self.simulation_ui.show_dc_overlay,
+                    show_oscilloscope: &mut self.simulation_ui.show_oscilloscope,
                     grid: &mut self.grid,
-                    ac_freq_hz: &mut self.ac_freq_hz,
+                    ac_freq_hz: &mut self.simulation_ui.ac_freq_hz,
                 },
             );
             if let Some(action) = toolbar_action {
@@ -338,7 +424,7 @@ impl eframe::App for CircuitApp {
                 ui.separator();
                 ui.add_sized(
                     Vec2::new(ui.available_width(), 20.0),
-                    egui::TextEdit::singleline(&mut self.palette_filter)
+                    egui::TextEdit::singleline(&mut self.palette_ui.filter)
                         .hint_text("Filter parts...")
                         .text_color(Color32::from_rgb(210, 218, 226)),
                 );
@@ -346,13 +432,20 @@ impl eframe::App for CircuitApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        let filter = self.palette_filter.clone();
-                        if let Some(PaletteAction::PlacePart { kind, label }) =
+                        let filter = self.palette_ui.filter.clone();
+                        if let Some(action) =
                             render_parts_palette(ui, &filter, selected_part(self.tool))
                         {
-                            self.tool = Tool::Place(kind);
-                            self.draft_wire.clear();
-                            self.status = format!("Placing {label}. Click the canvas.");
+                            match action {
+                                PaletteAction::PlacePart { kind, label } => {
+                                    self.tool = Tool::Place(kind);
+                                    self.draft_wire.clear();
+                                    self.status = format!("Placing {label}. Click the canvas.");
+                                }
+                                PaletteAction::LoadTemplate(template) => {
+                                    self.load_palette_template(template);
+                                }
+                            }
                         }
 
                         palette_section(ui, "Lessons: Current Flows", SectionMode::Open, |ui| {
@@ -439,7 +532,7 @@ impl eframe::App for CircuitApp {
                             metric_row(ui, "Wires", self.wires.len().to_string());
                             metric_row(ui, "Pages", self.pages.len().to_string());
                             if compact_button(ui, "Breadboard View").clicked() {
-                                self.show_breadboard_view = true;
+                                self.breadboard_ui.open = true;
                             }
                             if self.simulate {
                                 ui.add_space(4.0);
@@ -617,67 +710,6 @@ impl eframe::App for CircuitApp {
                                 }
                             }
                         }
-
-                        // ── ERC Panel ────────────────────────────────────────────
-                        let erc_errors = simulation
-                            .erc
-                            .iter()
-                            .filter(|e| e.severity == ErcSeverity::Error)
-                            .count();
-                        let erc_warnings = simulation
-                            .erc
-                            .iter()
-                            .filter(|e| e.severity == ErcSeverity::Warning)
-                            .count();
-                        let erc_title = if erc_errors > 0 {
-                            format!("ERC  ✗{erc_errors} ⚠{erc_warnings}")
-                        } else if erc_warnings > 0 {
-                            format!("ERC  ⚠{erc_warnings}")
-                        } else if simulation.erc.is_empty() && !self.components.is_empty() {
-                            "ERC  ✓ OK".to_string()
-                        } else {
-                            "ERC".to_string()
-                        };
-                        let erc_mode = if erc_errors > 0 || erc_warnings > 0 {
-                            SectionMode::Open
-                        } else {
-                            SectionMode::Collapsed
-                        };
-                        palette_section(ui, &erc_title, erc_mode, |ui| {
-                            if let Some(action) = render_validation_panel(
-                                ui,
-                                &simulation.erc,
-                                !self.components.is_empty(),
-                            ) {
-                                match action {
-                                    ValidationPanelAction::SelectComponent(id) => {
-                                        self.selected = Some(Selection::Component(id));
-                                        self.highlighted_net_wires.clear();
-                                        self.hovered_net_wire = None;
-                                        if let Some(comp) =
-                                            self.components.iter().find(|c| c.id == id)
-                                        {
-                                            let canvas_center = self.canvas_rect.center();
-                                            self.pan = canvas_center.to_vec2()
-                                                - comp.pos.to_vec2() * self.zoom;
-                                        }
-                                    }
-                                    ValidationPanelAction::SelectWire(id) => {
-                                        self.selected = Some(Selection::Wire(id));
-                                        self.hovered_net_wire = Some(id);
-                                        self.highlighted_net_wires = self.same_net_wires(id);
-                                        if let Some(wire) = self.wires.iter().find(|w| w.id == id) {
-                                            let canvas_center = self.canvas_rect.center();
-                                            self.pan = canvas_center.to_vec2()
-                                                - wire_midpoint(wire).to_vec2() * self.zoom;
-                                        }
-                                    }
-                                    ValidationPanelAction::ApplyAutoFix(auto_fix) => {
-                                        self.apply_erc_auto_fix(auto_fix);
-                                    }
-                                }
-                            }
-                        });
 
                         palette_section(ui, "Shortcuts", SectionMode::Collapsed, |ui| {
                             metric_row(ui, "W", "wire tool");
@@ -891,7 +923,7 @@ impl eframe::App for CircuitApp {
 
                             // ── AC impedance + time constant for reactive components ──
                             {
-                                let f = self.ac_freq_hz as f64;
+                                let f = self.simulation_ui.ac_freq_hz as f64;
                                 let omega = 2.0 * std::f64::consts::PI * f;
                                 match component.kind {
                                     ComponentKind::Capacitor => {
@@ -1123,18 +1155,46 @@ impl eframe::App for CircuitApp {
                     selection: selection_summary(self.selected, &self.components, &self.wires),
                     component_count: self.components.len(),
                     wire_count: self.wires.len(),
-                    cursor_world: self.cursor_world_pos,
-                    dirty: self.dirty,
+                    cursor_world: self.canvas.cursor_world_pos,
+                    dirty: self.history_state.dirty,
                     page_name,
                 },
             );
         });
 
+        egui::TopBottomPanel::bottom("bottom_dock")
+            .default_height(190.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                if let Some(action) = render_bottom_dock(
+                    ui,
+                    BottomDockModel {
+                        active_tab: self.ui_state.bottom_dock_tab,
+                        violations: &simulation.erc,
+                        has_components: !self.components.is_empty(),
+                        simulation: &simulation,
+                        breadboard_enabled: self.breadboard_ui.open,
+                        status: &self.status,
+                    },
+                ) {
+                    match action {
+                        BottomDockAction::SetTab(tab) => self.ui_state.bottom_dock_tab = tab,
+                        BottomDockAction::Validation(validation_action) => {
+                            self.handle_validation_panel_action(validation_action);
+                        }
+                        BottomDockAction::OpenBreadboard => {
+                            self.breadboard_ui.open = true;
+                            self.ui_state.bottom_dock_tab = BottomDockTab::Breadboard;
+                        }
+                    }
+                }
+            });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             let available = ui.available_size();
             let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
             let rect = response.rect;
-            self.canvas_rect = rect;
+            self.canvas.rect = rect;
 
             // Deferred zoom-to-fit: apply now that canvas rect is real
             if self.pending_fit && rect.width() > 1.0 && rect.is_finite() {
@@ -1266,7 +1326,7 @@ impl eframe::App for CircuitApp {
                     dc_i,
                     dc_vmax,
                     dc_imax,
-                    self.show_voltage_labels && simulation.dc.is_some(),
+                    self.simulation_ui.show_voltage_labels && simulation.dc.is_some(),
                     open_wire,
                     view,
                 );
@@ -1296,7 +1356,7 @@ impl eframe::App for CircuitApp {
                     view,
                     dc_v,
                     dc_i,
-                    self.show_dc_overlay && self.simulate,
+                    self.simulation_ui.show_dc_overlay && self.simulate,
                 );
             }
 
@@ -1322,7 +1382,8 @@ impl eframe::App for CircuitApp {
             }
 
             // Rectangle selection preview
-            if let (Some(start), Some(end)) = (self.rect_select_start, self.cursor_world_pos) {
+            if let (Some(start), Some(end)) = (self.rect_select_start, self.canvas.cursor_world_pos)
+            {
                 let ss = view.to_screen(start);
                 let se = view.to_screen(end);
                 let sel_rect = Rect::from_two_pos(ss, se);
@@ -1342,7 +1403,7 @@ impl eframe::App for CircuitApp {
             draw_junctions(&painter, &self.wires, view);
 
             // ── Node voltage circles at wire junctions ─────────────────
-            if self.show_dc_overlay && self.simulate {
+            if self.simulation_ui.show_dc_overlay && self.simulate {
                 if let Some(dc) = &simulation.dc {
                     draw_node_voltage_indicators(&painter, &self.wires, dc, view, dc.vmax);
                 }
@@ -1365,11 +1426,11 @@ impl eframe::App for CircuitApp {
             let hover_pos = ui.input(|i| i.pointer.hover_pos());
             let pointer_in_rect = hover_pos.filter(|pos| rect.contains(*pos));
 
-            self.cursor_world_pos = None;
+            self.canvas.cursor_world_pos = None;
             self.snap_target = None;
             if let Some(raw_hover) = pointer_in_rect {
                 let world_hover = view.to_world(raw_hover);
-                self.cursor_world_pos = Some(world_hover);
+                self.canvas.cursor_world_pos = Some(world_hover);
                 let mut world_pos = snap_pos(world_hover, rect, self.grid, self.snap);
                 let in_wire_mode = self.tool == Tool::Wire;
                 let in_select_mode = self.tool == Tool::Select;
@@ -2174,7 +2235,7 @@ impl eframe::App for CircuitApp {
             if !primary_down {
                 self.drag = None;
                 if let Some(start) = self.rect_select_start.take() {
-                    if let Some(end) = self.cursor_world_pos {
+                    if let Some(end) = self.canvas.cursor_world_pos {
                         if start.distance(end) > 4.0 {
                             let sel = Rect::from_two_pos(start, end);
                             for comp in &self.components {
@@ -2433,7 +2494,7 @@ impl eframe::App for CircuitApp {
 
         // ? — Toggle shortcuts help
         if ctx.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::Questionmark)) {
-            self.show_help = !self.show_help;
+            self.ui_state.show_help = !self.ui_state.show_help;
         }
 
         // Space — toggle simulation on/off (when not dragging/panning)
@@ -2484,8 +2545,8 @@ impl eframe::App for CircuitApp {
 
         // ── Find dialog (floating overlay) ──────────────────────────────────
         // ── Keyboard shortcuts help dialog ───────────────────────────────────
-        if self.show_help {
-            let mut open = self.show_help;
+        if self.ui_state.show_help {
+            let mut open = self.ui_state.show_help;
             egui::Window::new("⌨  Keyboard Shortcuts")
                 .open(&mut open)
                 .collapsible(false)
@@ -2586,12 +2647,12 @@ impl eframe::App for CircuitApp {
                             .italics(),
                     );
                 });
-            self.show_help = open;
+            self.ui_state.show_help = open;
         }
 
         // ── DC / AC Analysis panel ──────────────────────────────────────────
-        if self.show_oscilloscope {
-            let mut open = self.show_oscilloscope;
+        if self.simulation_ui.show_oscilloscope {
+            let mut open = self.simulation_ui.show_oscilloscope;
             let dc_result = simulation.dc.clone();
             let ac_result = simulation.ac.clone();
             let id_to_label: std::collections::HashMap<u64, String> = self
@@ -2763,7 +2824,7 @@ impl eframe::App for CircuitApp {
                                 ui.label(
                                     egui::RichText::new(format!(
                                         "AC  ·  {:.0} Hz  ·  Net Voltage |V|",
-                                        self.ac_freq_hz
+                                        self.simulation_ui.ac_freq_hz
                                     ))
                                     .strong()
                                     .color(Color32::from_rgb(255, 200, 100)),
@@ -2845,12 +2906,12 @@ impl eframe::App for CircuitApp {
                         }); // ScrollArea
                     }
                 });
-            self.show_oscilloscope = open;
+            self.simulation_ui.show_oscilloscope = open;
         }
 
         // ── Breadboard View / wiring assistant ─────────────────────────────
-        if self.show_breadboard_view {
-            let mut open = self.show_breadboard_view;
+        if self.breadboard_ui.open {
+            let mut open = self.breadboard_ui.open;
             let guide = build_breadboard_guide(&self.components, &inspector_netlist);
             let mut selected_route: Option<BreadboardRoute> = None;
             egui::Window::new("Breadboard View")
@@ -2875,7 +2936,7 @@ impl eframe::App for CircuitApp {
                     route.from_label, route.from_pin, route.to_label, route.to_pin
                 );
             }
-            self.show_breadboard_view = open;
+            self.breadboard_ui.open = open;
         }
 
         if self.show_find {
@@ -2928,7 +2989,7 @@ impl eframe::App for CircuitApp {
                         self.selected = Some(Selection::Component(cur_id));
                         // Center canvas on the found component
                         if let Some(comp) = self.components.iter().find(|c| c.id == cur_id) {
-                            let canvas_center = self.canvas_rect.center().to_vec2();
+                            let canvas_center = self.canvas.rect.center().to_vec2();
                             self.pan = canvas_center - comp.pos.to_vec2() * self.zoom;
                         }
                         ui.label(
@@ -11006,14 +11067,14 @@ mod tests {
         let mut app = CircuitApp::new();
         app.load_led_demo();
         app.add_page();
-        app.dirty = false;
+        app.history_state.dirty = false;
 
         let blank = app.current_simulation();
         assert_eq!(blank.summary, "No source or return");
 
         app.switch_page(0);
         assert!(
-            !app.dirty,
+            !app.history_state.dirty,
             "Viewing another page should not mark data unsaved."
         );
 
@@ -12135,7 +12196,7 @@ mod tests {
             .map(|(_, key, _)| *key)
             .unwrap();
 
-        app.ac_freq_hz = 10_000.0;
+        app.simulation_ui.ac_freq_hz = 10_000.0;
         let _ = app.current_simulation();
         let second_key = app
             .cached_simulation
