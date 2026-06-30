@@ -42,8 +42,8 @@ use engine::netlist::build_circuit_netlist;
 use engine::simulation as simulation_engine;
 use engine::simulation::{Conductance, Simulation, SimulationStatus};
 use engine::validation::{
-    ErcSeverity, ErcViolation, pin_is_controller_scl, pin_is_controller_sda, pin_is_i2c_named,
-    pin_is_microcontroller_gpio, validate_beginner_rules,
+    ErcRule, ErcSeverity, ErcViolation, pin_is_controller_scl, pin_is_controller_sda,
+    pin_is_i2c_named, pin_is_microcontroller_gpio, validate_beginner_rules,
 };
 use model::*;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -6559,6 +6559,7 @@ fn run_erc_with_netlist(
                     ErcSeverity::Warning
                 };
                 v.push(ErcViolation {
+                    rule: ErcRule::FloatingConnectivity,
                     severity: sev,
                     component_id: Some(comp.id),
                     wire_id: None,
@@ -6580,6 +6581,7 @@ fn run_erc_with_netlist(
         });
     if !has_ground && !components.is_empty() {
         v.push(ErcViolation {
+            rule: ErcRule::MissingGround,
             severity: ErcSeverity::Error,
             component_id: None,
             wire_id: None,
@@ -6596,6 +6598,7 @@ fn run_erc_with_netlist(
     });
     if !has_source && !components.is_empty() {
         v.push(ErcViolation {
+            rule: ErcRule::General,
             severity: ErcSeverity::Warning,
             component_id: None,
             wire_id: None,
@@ -6607,6 +6610,7 @@ fn run_erc_with_netlist(
     let net_report = analyze_wire_nets_for_erc(components, wires);
     for conflict in &net_report.power_conflicts {
         v.push(ErcViolation {
+            rule: ErcRule::PowerRailConflict,
             severity: ErcSeverity::Error,
             component_id: None,
             wire_id: conflict.wire_id,
@@ -6617,6 +6621,7 @@ fn run_erc_with_netlist(
         let already_reported = !net_report.power_conflicts.is_empty();
         if !already_reported {
             v.push(ErcViolation {
+                rule: ErcRule::PowerShort,
                 severity: ErcSeverity::Error,
                 component_id: None,
                 wire_id: net_report.first_short_wire,
@@ -6633,6 +6638,7 @@ fn run_erc_with_netlist(
     for (id, warn) in &simulation.component_warnings {
         if let Some(comp) = components.iter().find(|c| c.id == *id) {
             v.push(ErcViolation {
+                rule: ErcRule::General,
                 severity: ErcSeverity::Error,
                 component_id: Some(*id),
                 wire_id: None,
@@ -6647,6 +6653,7 @@ fn run_erc_with_netlist(
             if let Some(r) = parse_metric_value(&comp.value, "ohm") {
                 if r <= 0.0 {
                     v.push(ErcViolation {
+                        rule: ErcRule::MissingValue,
                         severity: ErcSeverity::Warning,
                         component_id: Some(comp.id),
                         wire_id: None,
@@ -6658,6 +6665,7 @@ fn run_erc_with_netlist(
                 }
             } else {
                 v.push(ErcViolation {
+                    rule: ErcRule::MissingValue,
                     severity: ErcSeverity::Warning,
                     component_id: Some(comp.id),
                     wire_id: None,
@@ -6678,6 +6686,7 @@ fn run_erc_with_netlist(
     for (label, ids) in &labels {
         if ids.len() > 1 {
             v.push(ErcViolation {
+                rule: ErcRule::DuplicateReference,
                 severity: ErcSeverity::Warning,
                 component_id: Some(ids[0]),
                 wire_id: None,
@@ -6690,6 +6699,7 @@ fn run_erc_with_netlist(
     for wire in wires {
         if wire.points.len() < 2 || wire_length(wire) <= 0.5 {
             v.push(ErcViolation {
+                rule: ErcRule::FloatingConnectivity,
                 severity: ErcSeverity::Warning,
                 component_id: None,
                 wire_id: Some(wire.id),
