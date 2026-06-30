@@ -49,8 +49,13 @@ use model::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use storage::save::write_with_backup;
+use ui::bottom_panel::{PageTabsAction, render_page_tabs};
 use ui::breadboard::{BreadboardRoute, build_breadboard_guide, render_breadboard_view};
-use ui::palette::{PaletteAction, render_parts_palette, selected_part};
+use ui::canvas_overlay::draw_simulation_legend;
+use ui::left_palette::{PaletteAction, render_parts_palette, selected_part};
+use ui::right_inspector::render_inspector_header;
+use ui::status_bar::{StatusBarModel, render_status_bar};
+use ui::top_toolbar::{TopToolbarAction, TopToolbarModel, render_top_toolbar};
 use ui::validation_panel::{ValidationPanelAction, render_validation_panel};
 
 const SAVE_PATH: &str = "cluster_circuit.json";
@@ -199,6 +204,60 @@ impl CircuitApp {
             screenshot_pending: false,
         }
     }
+
+    fn handle_top_toolbar_action(&mut self, action: TopToolbarAction, ctx: &egui::Context) {
+        match action {
+            TopToolbarAction::SelectTool => {
+                self.tool = Tool::Select;
+                self.draft_wire.clear();
+            }
+            TopToolbarAction::WireTool => {
+                self.tool = Tool::Wire;
+                self.draft_wire.clear();
+            }
+            TopToolbarAction::Undo => self.undo(),
+            TopToolbarAction::Redo => self.redo(),
+            TopToolbarAction::Rotate => self.rotate_selected(),
+            TopToolbarAction::Duplicate => self.duplicate_selected(),
+            TopToolbarAction::Delete => self.delete_selected(),
+            TopToolbarAction::Align(dir) => self.align_selected(dir),
+            TopToolbarAction::Distribute { vertical } => self.distribute_selected(vertical),
+            TopToolbarAction::ToggleFind => self.show_find = !self.show_find,
+            TopToolbarAction::ZoomOut => self.zoom_by(1.0 / 1.25_f32),
+            TopToolbarAction::ZoomIn => self.zoom_by(1.25_f32),
+            TopToolbarAction::ZoomFit => self.zoom_to_fit(),
+            TopToolbarAction::SaveJson => self.save_circuit_json(),
+            TopToolbarAction::LoadJson => self.load_circuit_json(),
+            TopToolbarAction::RecoverAutosave => self.recover_autosave(),
+            TopToolbarAction::TidyWires => {
+                self.record_history();
+                let count = self.wires.len();
+                for wire in &mut self.wires {
+                    tidy_wire_points(wire);
+                }
+                self.status = format!("Tidied {} wire(s).", count);
+            }
+            TopToolbarAction::ExportSvg => self.export_svg(),
+            TopToolbarAction::ExportPng => self.export_png(ctx),
+            TopToolbarAction::ExportCir => self.export_spice_netlist(),
+            TopToolbarAction::ExportNetlistText => self.export_netlist_text(),
+            TopToolbarAction::ExportBomCsv => self.export_bom_csv(),
+            TopToolbarAction::ExportArduinoCode => self.export_arduino_code(),
+            TopToolbarAction::BlankSchematic => {
+                self.reset_canvas();
+                self.status = "Blank schematic ready.".to_string();
+            }
+            TopToolbarAction::AddPage => self.add_page(),
+            TopToolbarAction::RemoveCurrentPage => self.remove_current_page(),
+        }
+    }
+
+    fn zoom_by(&mut self, factor: f32) {
+        let canvas_center = self.canvas_rect.center();
+        let world_center = (canvas_center.to_vec2() - self.pan) / self.zoom;
+        self.zoom = (self.zoom * factor).clamp(0.05, 8.0);
+        self.pan = canvas_center.to_vec2() - world_center * self.zoom;
+    }
 }
 
 impl eframe::App for CircuitApp {
@@ -234,198 +293,27 @@ impl eframe::App for CircuitApp {
         let inspector_netlist = self.current_netlist();
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    egui::RichText::new("Cluster")
-                        .size(18.0)
-                        .strong()
-                        .color(Color32::from_rgb(245, 248, 252)),
-                );
-                ui.label(
-                    egui::RichText::new("workbench")
-                        .size(12.0)
-                        .color(Color32::from_rgb(160, 170, 180)),
-                );
-                ui.separator();
-                if tool_button(ui, self.tool == Tool::Select, "Select").clicked() {
-                    self.tool = Tool::Select;
-                    self.draft_wire.clear();
-                }
-                if tool_button(ui, self.tool == Tool::Wire, "Wire").clicked() {
-                    self.tool = Tool::Wire;
-                    self.draft_wire.clear();
-                }
-                ui.separator();
-                if compact_button(ui, "Undo").clicked() {
-                    self.undo();
-                }
-                if compact_button(ui, "Redo").clicked() {
-                    self.redo();
-                }
-                if compact_button(ui, "Rotate").clicked() {
-                    self.rotate_selected();
-                }
-                if compact_button(ui, "Duplicate").clicked() {
-                    self.duplicate_selected();
-                }
-                if compact_button(ui, "Delete").clicked() {
-                    self.delete_selected();
-                }
-                ui.separator();
-                // Align tools
-                toolbar_menu(ui, "Align", |ui| {
-                    if menu_action(ui, "Left edges").clicked() {
-                        self.align_selected(AlignDir::Left);
-                        ui.close();
-                    }
-                    if menu_action(ui, "Right edges").clicked() {
-                        self.align_selected(AlignDir::Right);
-                        ui.close();
-                    }
-                    if menu_action(ui, "Top edges").clicked() {
-                        self.align_selected(AlignDir::Top);
-                        ui.close();
-                    }
-                    if menu_action(ui, "Bottom edges").clicked() {
-                        self.align_selected(AlignDir::Bottom);
-                        ui.close();
-                    }
-                    ui.separator();
-                    if menu_action(ui, "Center horizontally").clicked() {
-                        self.align_selected(AlignDir::CenterH);
-                        ui.close();
-                    }
-                    if menu_action(ui, "Center vertically").clicked() {
-                        self.align_selected(AlignDir::CenterV);
-                        ui.close();
-                    }
-                    ui.separator();
-                    if menu_action(ui, "Distribute horizontally").clicked() {
-                        self.distribute_selected(false);
-                        ui.close();
-                    }
-                    if menu_action(ui, "Distribute vertically").clicked() {
-                        self.distribute_selected(true);
-                        ui.close();
-                    }
-                });
-                if compact_button(ui, "Find  Ctrl+F").clicked() {
-                    self.show_find = !self.show_find;
-                }
-                ui.separator();
-                // Zoom controls
-                if compact_button(ui, "−").clicked() {
-                    let factor = 1.0 / 1.25_f32;
-                    let canvas_center = self.canvas_rect.center();
-                    let world_center = (canvas_center.to_vec2() - self.pan) / self.zoom;
-                    self.zoom = (self.zoom * factor).clamp(0.05, 8.0);
-                    self.pan = canvas_center.to_vec2() - world_center * self.zoom;
-                }
-                ui.label(
-                    egui::RichText::new(format!("{:.0}%", self.zoom * 100.0))
-                        .size(11.0)
-                        .monospace()
-                        .color(Color32::from_rgb(180, 190, 200)),
-                );
-                if compact_button(ui, "+").clicked() {
-                    let factor = 1.25_f32;
-                    let canvas_center = self.canvas_rect.center();
-                    let world_center = (canvas_center.to_vec2() - self.pan) / self.zoom;
-                    self.zoom = (self.zoom * factor).clamp(0.05, 8.0);
-                    self.pan = canvas_center.to_vec2() - world_center * self.zoom;
-                }
-                if compact_button(ui, "Fit").clicked() {
-                    self.zoom_to_fit();
-                }
-                ui.separator();
-                toolbar_menu(ui, "View", |ui| {
-                    ui.checkbox(&mut self.snap, "Snap to grid");
-                    ui.checkbox(&mut self.orthogonal_wires, "90° wires");
-                    ui.checkbox(&mut self.show_pins, "Show pins");
-                    ui.checkbox(&mut self.simulate, "Live simulation");
-                    ui.checkbox(&mut self.show_breadboard_view, "Breadboard View");
-                    ui.checkbox(&mut self.show_voltage_labels, "Voltage labels on wires");
-                    ui.checkbox(&mut self.show_dc_overlay, "V/I badges on components");
-                    ui.checkbox(&mut self.show_oscilloscope, "DC/AC Analysis panel");
-                    ui.add_sized(
-                        Vec2::new(180.0, 18.0),
-                        egui::Slider::new(&mut self.grid, 10.0..=40.0).text("Grid"),
-                    );
-                    ui.add_sized(
-                        Vec2::new(180.0, 18.0),
-                        egui::Slider::new(&mut self.ac_freq_hz, 1.0..=1_000_000.0)
-                            .text("AC freq (Hz)")
-                            .logarithmic(true),
-                    );
-                });
-                toolbar_menu(ui, "Actions", |ui| {
-                    if menu_action(ui, "Save JSON").clicked() {
-                        self.save_circuit_json();
-                        ui.close();
-                    }
-                    if menu_action(ui, "Load JSON").clicked() {
-                        self.load_circuit_json();
-                        ui.close();
-                    }
-                    if menu_action(ui, "Recover Auto Backup").clicked() {
-                        self.recover_autosave();
-                        ui.close();
-                    }
-                    ui.separator();
-                    if menu_action(ui, "Tidy all wires  Ctrl+T").clicked() {
-                        self.record_history();
-                        let count = self.wires.len();
-                        for wire in &mut self.wires {
-                            tidy_wire_points(wire);
-                        }
-                        self.status = format!("Tidied {} wire(s).", count);
-                        ui.close();
-                    }
-                    ui.separator();
-                    if menu_action(ui, "Export SVG").clicked() {
-                        self.export_svg();
-                        ui.close();
-                    }
-                    if menu_action(ui, "Export PNG (screenshot)").clicked() {
-                        self.export_png(ctx);
-                        ui.close();
-                    }
-                    if menu_action(ui, "Export CIR").clicked() {
-                        self.export_spice_netlist();
-                        ui.close();
-                    }
-                    if menu_action(ui, "Export Netlist TXT").clicked() {
-                        self.export_netlist_text();
-                        ui.close();
-                    }
-                    if menu_action(ui, "Export BOM CSV").clicked() {
-                        self.export_bom_csv();
-                        ui.close();
-                    }
-                    if menu_action(ui, "Generate Arduino Code").clicked() {
-                        self.export_arduino_code();
-                        ui.close();
-                    }
-                    ui.separator();
-                    if menu_action(ui, "Blank schematic").clicked() {
-                        self.reset_canvas();
-                        self.status = "Blank schematic ready.".to_string();
-                        ui.close();
-                    }
-                    ui.separator();
-                    if menu_action(ui, "Add page").clicked() {
-                        self.add_page();
-                        ui.close();
-                    }
-                    if menu_action(ui, "Remove current page").clicked() {
-                        self.remove_current_page();
-                        ui.close();
-                    }
-                });
-                ui.separator();
-                status_pill(ui, &simulation.summary, simulation_tone(&simulation));
-            });
+            let toolbar_action = render_top_toolbar(
+                ui,
+                TopToolbarModel {
+                    tool: self.tool,
+                    zoom: self.zoom,
+                    simulation_summary: &simulation.summary,
+                    snap: &mut self.snap,
+                    orthogonal_wires: &mut self.orthogonal_wires,
+                    show_pins: &mut self.show_pins,
+                    simulate: &mut self.simulate,
+                    show_breadboard_view: &mut self.show_breadboard_view,
+                    show_voltage_labels: &mut self.show_voltage_labels,
+                    show_dc_overlay: &mut self.show_dc_overlay,
+                    show_oscilloscope: &mut self.show_oscilloscope,
+                    grid: &mut self.grid,
+                    ac_freq_hz: &mut self.ac_freq_hz,
+                },
+            );
+            if let Some(action) = toolbar_action {
+                self.handle_top_toolbar_action(action, ctx);
+            }
             if !self.status.is_empty() {
                 ui.label(
                     egui::RichText::new(&self.status)
@@ -823,8 +711,7 @@ impl eframe::App for CircuitApp {
                     ui.separator();
                     ui.add_space(4.0);
                 }
-                ui.heading("Inspector");
-                ui.separator();
+                render_inspector_header(ui);
                 match self.selected {
                     Some(Selection::Component(id)) => {
                         let mut inspector_changed = false;
@@ -1189,101 +1076,58 @@ impl eframe::App for CircuitApp {
 
         // ── Page tabs (bottom strip above status bar) ────────────────────────
         egui::TopBottomPanel::bottom("page_tabs").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Pages:")
-                        .size(11.0)
-                        .color(Color32::from_rgb(120, 130, 140)),
-                );
-                let page_count = self.pages.len();
-                for idx in 0..page_count {
-                    let name = self.pages[idx].0.clone();
-                    let active = idx == self.current_page;
-                    let btn_color = if active {
-                        Color32::from_rgb(80, 180, 130)
-                    } else {
-                        Color32::from_rgb(90, 100, 115)
-                    };
-                    let resp = ui.add(
-                        egui::Button::new(egui::RichText::new(&name).size(11.0).color(btn_color))
-                            .frame(active),
-                    );
-                    if resp.clicked() && !active {
-                        self.switch_page(idx);
+            let page_names = self
+                .pages
+                .iter()
+                .map(|page| page.0.clone())
+                .collect::<Vec<_>>();
+            if let Some(action) = render_page_tabs(ui, &page_names, self.current_page) {
+                match action {
+                    PageTabsAction::SwitchTo(idx) => self.switch_page(idx),
+                    PageTabsAction::RenameDefault(idx) => {
+                        self.pages[idx].0 = format!("Page {}", idx + 1);
                     }
-                    if resp.double_clicked() {
-                        // rename: just cycle through generic names for now
-                        let new_name = format!("Page {}", idx + 1);
-                        self.pages[idx].0 = new_name;
-                    }
+                    PageTabsAction::AddPage => self.add_page(),
                 }
-                if ui.small_button("+").clicked() {
-                    self.add_page();
-                }
-            });
+            }
         });
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.monospace(format!(
-                    "Tool: {}",
-                    match self.tool {
-                        Tool::Select => "Select".to_string(),
-                        Tool::Wire => "Wire".to_string(),
-                        Tool::Place(kind) => format!("Place {}", component_kind_label(kind)),
-                    }
-                ));
-                ui.separator();
-                ui.monospace(format!("Grid: {:.0}px", self.grid));
-                ui.separator();
-                ui.monospace(format!("Zoom: {:.0}%", self.zoom * 100.0));
-                ui.separator();
-                ui.colored_label(
-                    if self.snap {
-                        Color32::from_rgb(100, 220, 160)
-                    } else {
-                        Color32::from_rgb(130, 130, 140)
-                    },
-                    if self.snap { "SNAP" } else { "snap off" },
-                );
-                ui.separator();
-                ui.colored_label(
-                    simulation_text_color(&simulation),
-                    format!(
-                        "{}{}",
-                        simulation.summary,
-                        match simulation_warning_count(&simulation) {
-                            0 => String::new(),
-                            count => format!(" / {count} warning(s)"),
-                        }
-                    ),
-                );
-                ui.separator();
-                ui.label(selection_summary(
-                    self.selected,
-                    &self.components,
-                    &self.wires,
-                ));
-                ui.separator();
-                ui.monospace(format!(
-                    "C:{} W:{}",
-                    self.components.len(),
-                    self.wires.len()
-                ));
-                if let Some(cursor) = self.cursor_world_pos {
-                    ui.separator();
-                    ui.monospace(format!("({:.0}, {:.0})", cursor.x, cursor.y));
+            let active_tool = match self.tool {
+                Tool::Select => "Select".to_string(),
+                Tool::Wire => "Wire".to_string(),
+                Tool::Place(kind) => format!("Place {}", component_kind_label(kind)),
+            };
+            let simulation_text = format!(
+                "{}{}",
+                simulation.summary,
+                match simulation_warning_count(&simulation) {
+                    0 => String::new(),
+                    count => format!(" / {count} warning(s)"),
                 }
-                ui.separator();
-                ui.colored_label(
-                    if self.dirty {
-                        Color32::from_rgb(255, 198, 92)
-                    } else {
-                        Color32::from_rgb(138, 190, 145)
-                    },
-                    if self.dirty { "●" } else { "✓" },
-                );
-            });
+            );
+            let page_name = self
+                .pages
+                .get(self.current_page)
+                .map(|page| page.0.as_str())
+                .unwrap_or("Page");
+            render_status_bar(
+                ui,
+                StatusBarModel {
+                    active_tool,
+                    grid: self.grid,
+                    zoom: self.zoom,
+                    snap: self.snap,
+                    simulation_text,
+                    simulation_color: simulation_text_color(&simulation),
+                    selection: selection_summary(self.selected, &self.components, &self.wires),
+                    component_count: self.components.len(),
+                    wire_count: self.wires.len(),
+                    cursor_world: self.cursor_world_pos,
+                    dirty: self.dirty,
+                    page_name,
+                },
+            );
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -1508,6 +1352,7 @@ impl eframe::App for CircuitApp {
             if self.simulate && !self.components.is_empty() {
                 draw_sim_summary(&painter, rect, &simulation);
             }
+            draw_simulation_legend(&painter, rect, self.simulate, simulation.dc.is_some());
 
             draw_title_block(&painter, rect, &self.components, &self.wires, &simulation);
 
@@ -3501,37 +3346,6 @@ fn section_title(ui: &mut egui::Ui, text: &str) {
     );
 }
 
-fn toolbar_menu(ui: &mut egui::Ui, label: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
-    ui.menu_button(
-        egui::RichText::new(format!("{label} v"))
-            .strong()
-            .color(Color32::from_rgb(230, 236, 242)),
-        add_contents,
-    );
-}
-
-fn tool_button(ui: &mut egui::Ui, active: bool, label: &str) -> egui::Response {
-    let (fill, stroke, text) = if active {
-        (
-            Color32::from_rgb(38, 70, 82),
-            Stroke::new(1.0, Color32::from_rgb(105, 178, 255)),
-            Color32::from_rgb(235, 246, 255),
-        )
-    } else {
-        (
-            Color32::from_rgb(30, 34, 40),
-            Stroke::new(1.0, Color32::from_rgb(52, 60, 68)),
-            Color32::from_rgb(190, 198, 206),
-        )
-    };
-    ui.add(
-        egui::Button::new(egui::RichText::new(label).color(text))
-            .fill(fill)
-            .stroke(stroke)
-            .min_size(Vec2::new(72.0, 28.0)),
-    )
-}
-
 fn compact_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
         egui::Button::new(egui::RichText::new(label).color(Color32::from_rgb(215, 222, 230)))
@@ -3551,15 +3365,6 @@ fn palette_action(ui: &mut egui::Ui, label: &str) -> egui::Response {
         )
         .fill(Color32::from_rgb(28, 33, 39))
         .stroke(Stroke::new(1.0, Color32::from_rgb(48, 56, 64))),
-    )
-}
-
-fn menu_action(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.add_sized(
-        Vec2::new(180.0, 27.0),
-        egui::Button::new(egui::RichText::new(label).color(Color32::from_rgb(216, 224, 232)))
-            .fill(Color32::from_rgb(28, 33, 39))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(48, 56, 64))),
     )
 }
 
