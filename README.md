@@ -275,7 +275,6 @@ mathematically impossible, such as an ideal-source conflict.
 - [ ] Guided tutorials with step-by-step wiring, code, simulation, and repair hints
 - [ ] Optional ngspice export/run/import for advanced simulation
 
----
 
 ## Contributing
 
