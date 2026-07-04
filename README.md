@@ -280,7 +280,7 @@ mathematically impossible, such as an ideal-source conflict.
 
 Issues and pull requests welcome. Please open an issue first for large changes.
 
----
+
 
 ## License
 
