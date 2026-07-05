@@ -291,4 +291,3 @@ MIT — see [LICENSE](LICENSE).
 *Built with [egui](https://github.com/emilk/egui) and [eframe](https://github.com/emilk/egui/tree/master/crates/eframe).*
 
 
-## 
