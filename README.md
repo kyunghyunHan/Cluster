@@ -286,7 +286,7 @@ Issues and pull requests welcome. Please open an issue first for large changes.
 
 MIT — see [LICENSE](LICENSE).
 
----
+
 
 *Built with [egui](https://github.com/emilk/egui) and [eframe](https://github.com/emilk/egui/tree/master/crates/eframe).*
 
