@@ -1083,6 +1083,8 @@ impl crate::CircuitApp {
             &self.wires,
             self.simulation_ui.ac_freq_hz as f64,
         );
+        simulation.transient =
+            crate::engine::transient::solve_transient(&self.components, &self.wires);
         let netlist = self.current_netlist();
         simulation.erc =
             crate::run_erc_with_netlist(&self.components, &self.wires, &simulation, &netlist);

@@ -53,6 +53,10 @@ pub struct DcResult {
     pub max_kcl_residual: f64,
     /// Maximum absolute voltage seen anywhere in the circuit (for display scaling)
     pub vmax: f64,
+    /// Number of nonlinear state iterations used for diode/LED/MOSFET companion states.
+    pub nonlinear_iterations: usize,
+    /// True when piecewise-linear device states stopped changing before the iteration limit.
+    pub nonlinear_converged: bool,
 }
 
 // ── Entry points ─────────────────────────────────────────────────────────────
@@ -704,32 +708,66 @@ pub fn solve_dc_detailed(
         mat.solve()
     };
 
-    let initial_diode_states = vec![false; diode_entries.len()];
-    let initial_mos_states = vec![false; mos_entries.len()];
-    let initial_solution = solve_with_states(&initial_diode_states, &initial_mos_states)?;
-    let initial = &initial_solution.x;
-    let initial_voltage = |mna_idx: usize| -> f64 {
-        if mna_idx == 0 {
-            0.0
-        } else {
-            initial.get(mna_idx - 1).copied().unwrap_or(0.0)
-        }
-    };
-    let diode_states = diode_entries
-        .iter()
-        .map(|d| initial_voltage(d.anode) - initial_voltage(d.cathode) >= d.vf)
-        .collect::<Vec<_>>();
-    let mos_states = mos_entries
-        .iter()
-        .map(|mos| {
-            if mos.pmos {
-                initial_voltage(mos.source) - initial_voltage(mos.gate) >= mos.vth
-            } else {
-                initial_voltage(mos.gate) - initial_voltage(mos.source) >= mos.vth
+    let mut diode_states = vec![false; diode_entries.len()];
+    let mut mos_states = vec![false; mos_entries.len()];
+    let mut solution = solve_with_states(&diode_states, &mos_states)?;
+    let has_iterated_nonlinear_devices = !diode_entries.is_empty() || !mos_entries.is_empty();
+    let mut nonlinear_iterations = 0usize;
+    let mut nonlinear_converged = !has_iterated_nonlinear_devices;
+
+    if has_iterated_nonlinear_devices {
+        for iteration in 1..=24 {
+            let previous_x = solution.x.clone();
+            let voltage = |mna_idx: usize| -> f64 {
+                if mna_idx == 0 {
+                    0.0
+                } else {
+                    previous_x.get(mna_idx - 1).copied().unwrap_or(0.0)
+                }
+            };
+            let next_diode_states = diode_entries
+                .iter()
+                .enumerate()
+                .map(|(index, d)| {
+                    let vd = voltage(d.anode) - voltage(d.cathode);
+                    if vd >= d.vf {
+                        true
+                    } else if vd <= d.vf - 0.025 {
+                        false
+                    } else {
+                        diode_states.get(index).copied().unwrap_or(false)
+                    }
+                })
+                .collect::<Vec<_>>();
+            let next_mos_states = mos_entries
+                .iter()
+                .enumerate()
+                .map(|(index, mos)| {
+                    let drive = if mos.pmos {
+                        voltage(mos.source) - voltage(mos.gate)
+                    } else {
+                        voltage(mos.gate) - voltage(mos.source)
+                    };
+                    if drive >= mos.vth {
+                        true
+                    } else if drive <= mos.vth - 0.050 {
+                        false
+                    } else {
+                        mos_states.get(index).copied().unwrap_or(false)
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            nonlinear_iterations = iteration;
+            if next_diode_states == diode_states && next_mos_states == mos_states {
+                nonlinear_converged = true;
+                break;
             }
-        })
-        .collect::<Vec<_>>();
-    let solution = solve_with_states(&diode_states, &mos_states)?;
+            diode_states = next_diode_states;
+            mos_states = next_mos_states;
+            solution = solve_with_states(&diode_states, &mos_states)?;
+        }
+    }
     let x = &solution.x;
 
     // ── 8. Decode results ─────────────────────────────────────────────────
@@ -923,6 +961,8 @@ pub fn solve_dc_detailed(
         component_power_role,
         max_kcl_residual: solution.max_kcl_residual,
         vmax: vmax.max(0.1),
+        nonlinear_iterations,
+        nonlinear_converged,
     })
 }
 

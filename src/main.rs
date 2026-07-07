@@ -4472,6 +4472,18 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
                 mna::format_current(dc.max_kcl_residual)
             ));
         }
+        if dc.nonlinear_iterations > 0 {
+            if dc.nonlinear_converged {
+                details.push(format!(
+                    "Nonlinear devices: piecewise model converged in {} iteration(s).",
+                    dc.nonlinear_iterations
+                ));
+            } else {
+                details.push(
+                    "Nonlinear devices: piecewise model reached the iteration limit; treat currents as approximate.".to_string(),
+                );
+            }
+        }
     }
     apply_engineering_checks(
         components,
@@ -4521,6 +4533,7 @@ fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
         dc,
         dc_error,
         ac: None,        // populated in current_simulation()
+        transient: None, // populated in current_simulation()
         erc: Vec::new(), // populated after construction via run_erc()
     }
 }

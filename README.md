@@ -112,9 +112,9 @@ Cluster uses Modified Nodal Analysis (MNA) to compute:
 - **Branch currents** — current through every component in amps
 - **Component power** — power dissipated in watts
 
-Simulated components: Resistor, Battery, Voltage/Current source, LED (Vf≈2V), Diode (Vf≈0.65V), Zener, Schottky, Switch (open/closed), Potentiometer, Fuse, Lamp, DC Motor approximation, NPN/PNP transistor (linearised), MOSFET (threshold switch), and relay coil/contact connectivity.
+Simulated components: Resistor, Battery, Voltage/Current source, LED (Vf≈2V), Diode (Vf≈0.65V), Zener, Schottky, Switch (open/closed), Potentiometer, Fuse, Lamp, DC Motor approximation, NPN/PNP transistor (simplified companion model), MOSFET (iterated threshold model), and relay coil/contact connectivity.
 
-The built-in solver is an educational DC operating-point solver. Capacitors are open in DC, inductors are short in DC, and transient effects such as RC charging, PWM, motor startup, and waveforms are not simulated. Symbolic components are marked as not simulated in the inspector and ERC.
+The built-in solver is an educational DC operating-point solver. Capacitors are open in DC and inductors are short in DC. A narrow transient MVP recognizes beginner RC charge/discharge circuits and PWM-like square-wave sources for RC smoothing previews. Motor startup, arbitrary waveforms, and full SPICE transient behavior are not simulated. Symbolic components are marked as not simulated in the inspector and ERC.
 
 Energized wires are highlighted in orange. Voltage labels can be toggled on
 wires. Open circuits can retain a valid node voltage while displaying `0 A`.
@@ -242,10 +242,12 @@ src/
 
 Cluster's MNA solver is educational-grade, not a drop-in SPICE replacement:
 
-- **DC operating point only** — no transient, AC, or frequency sweep
+- **Educational DC operating point** plus a narrow RC/PWM transient preview
 - Capacitors are open circuits in DC analysis
 - Inductors are short circuits in DC analysis
-- Transistors and MOSFETs use simplified linearised models
+- Diodes, LEDs, and MOSFETs use simplified iterated piecewise models
+- BJTs remain simplified companion models, not full Ebers-Moll transistor simulation
+- Transient analysis is limited to one recognized RC path and DC/PWM-like source values
 - Singular or non-convergent circuits return a safe failure (no panic)
 - A branched polyline may have different current on each segment; Cluster does
   not invent one net-wide current value in that case
@@ -289,5 +291,3 @@ MIT — see [LICENSE](LICENSE).
 
 
 *Built with [egui](https://github.com/emilk/egui) and [eframe](https://github.com/emilk/egui/tree/master/crates/eframe).*
-
-

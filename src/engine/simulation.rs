@@ -1,4 +1,5 @@
 use crate::engine::mna;
+use crate::engine::transient::TransientResult;
 use crate::engine::validation::ErcViolation;
 use crate::model::{Component, Wire};
 use std::collections::{HashMap, HashSet};
@@ -21,6 +22,7 @@ pub(crate) struct Simulation {
     pub(crate) dc: Option<mna::DcResult>,
     pub(crate) dc_error: Option<mna::SimulationError>,
     pub(crate) ac: Option<mna::AcResult>,
+    pub(crate) transient: Option<TransientResult>,
     pub(crate) erc: Vec<ErcViolation>,
 }
 

@@ -1,4 +1,5 @@
 use crate::engine::simulation::Simulation;
+use crate::engine::transient::TransientKind;
 use crate::engine::validation::{ErcSeverity, ErcViolation};
 use crate::ui::theme;
 use crate::ui::validation_panel::{ValidationPanelAction, render_validation_panel};
@@ -149,6 +150,9 @@ fn render_simulation_tab(ui: &mut egui::Ui, simulation: &Simulation) {
         if let Some(resistance) = simulation.resistance {
             metric(ui, "Load R", &format!("{resistance:.0} ohm"));
         }
+        if simulation.transient.is_some() {
+            metric(ui, "Transient", "RC/PWM preview");
+        }
     });
     if !simulation.explanation.is_empty() {
         ui.label(
@@ -163,6 +167,39 @@ fn render_simulation_tab(ui: &mut egui::Ui, simulation: &Simulation) {
                 .size(11.0)
                 .color(theme::WARNING),
         );
+    }
+    if let Some(transient) = &simulation.transient {
+        ui.label(
+            egui::RichText::new(&transient.summary)
+                .size(11.0)
+                .color(theme::TEXT_SECONDARY),
+        );
+        if let (Some(first), Some(last)) = (transient.samples.first(), transient.samples.last()) {
+            let kind = match transient.kind {
+                TransientKind::RcStep => "RC step",
+                TransientKind::PwmRc => "PWM RC",
+            };
+            ui.label(
+                egui::RichText::new(format!(
+                    "{kind}: source {} -> {}, capacitor {} at t={:.3}s -> {} at t={:.3}s",
+                    crate::engine::mna::format_voltage(first.source_v),
+                    crate::engine::mna::format_voltage(last.source_v),
+                    crate::engine::mna::format_voltage(first.v_cap),
+                    first.t_s,
+                    crate::engine::mna::format_voltage(last.v_cap),
+                    last.t_s
+                ))
+                .size(11.0)
+                .color(theme::TEXT_SECONDARY),
+            );
+        }
+        for limitation in &transient.limitations {
+            ui.label(
+                egui::RichText::new(format!("Simplified: {limitation}"))
+                    .size(10.5)
+                    .color(theme::TEXT_MUTED),
+            );
+        }
     }
 }
 
