@@ -1,4 +1,4 @@
-use crate::engine::validation::{ErcAutoFix, ErcRelated, ErcSeverity, ErcViolation};
+use crate::engine::validation::{ErcAutoFix, ErcRelated, ErcRule, ErcSeverity, ErcViolation};
 use eframe::egui;
 use egui::{Color32, Sense};
 
@@ -79,11 +79,27 @@ fn render_violation_row(
         ErcRelated::Schematic => "schematic".to_string(),
     };
 
+    // `SimulationSupportLimited` messages are formatted as `[<badge>] <rest>`
+    // (see `check_symbolic_components`) so the badge can render as a small
+    // chip instead of plain text, echoing the inspector's simulation-support
+    // pill.
+    let (badge, message) = if violation.rule == ErcRule::SimulationSupportLimited {
+        match violation.message.split_once("] ") {
+            Some((tag, rest)) if tag.starts_with('[') => (Some(&tag[1..]), rest),
+            _ => (None, violation.message.as_str()),
+        }
+    } else {
+        (None, violation.message.as_str())
+    };
+
     let mut action = None;
     ui.horizontal(|ui| {
+        if let Some(badge) = badge {
+            simulation_support_chip(ui, badge);
+        }
         let resp = ui.add(
             egui::Label::new(
-                egui::RichText::new(format!("{icon} {}", violation.message))
+                egui::RichText::new(format!("{icon} {message}"))
                     .size(10.5)
                     .color(col),
             )
@@ -123,6 +139,25 @@ fn render_violation_row(
         );
     }
     action
+}
+
+/// Small pill for a `SimulationSupport` label inside the ERC panel — kept
+/// visually distinct from severity color so it never reads as an error, only
+/// as a confidence-level tag (matches the inspector's simulation-support
+/// pill wording exactly).
+fn simulation_support_chip(ui: &mut egui::Ui, label: &str) {
+    egui::Frame::NONE
+        .fill(Color32::from_rgb(28, 34, 42))
+        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(56, 68, 80)))
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(label)
+                    .size(9.5)
+                    .color(Color32::from_rgb(150, 180, 210)),
+            );
+        });
 }
 
 fn severity_style(severity: ErcSeverity) -> (&'static str, Color32, &'static str) {

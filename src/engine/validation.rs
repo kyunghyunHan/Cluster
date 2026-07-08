@@ -860,11 +860,17 @@ fn check_symbolic_components(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>
             continue;
         }
         let meta = electrical_metadata(pin.component_kind);
+        // Every message is prefixed with `[<badge>]` using the same label
+        // text as the inspector's SimulationSupport pill, so the ERC panel
+        // and inspector always agree on the wording for a given support
+        // level. `render_violation_row` in the UI strips this prefix back
+        // out to render it as a small chip instead of plain text.
+        let badge = meta.simulation.label();
         let (severity, msg) = match meta.simulation {
             SimulationSupport::SymbolOnly => (
                 ErcSeverity::Info,
                 format!(
-                    "{} {} is a symbol only — no voltages or currents are computed for this part.",
+                    "[{badge}] {} {} is a symbol only — no voltages or currents are computed for this part.",
                     component_kind_short(pin.component_kind),
                     pin.component_label
                 ),
@@ -872,7 +878,7 @@ fn check_symbolic_components(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>
             SimulationSupport::DigitalOnly => (
                 ErcSeverity::Info,
                 format!(
-                    "{} {} is a digital logic element — analogue DC currents are not modelled.",
+                    "[{badge}] {} {} is a digital logic element — analogue DC currents are not modelled.",
                     component_kind_short(pin.component_kind),
                     pin.component_label
                 ),
@@ -880,7 +886,7 @@ fn check_symbolic_components(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>
             SimulationSupport::Unsupported => (
                 ErcSeverity::Info,
                 format!(
-                    "{} {} is not simulated. Connectivity and ERC are checked; \
+                    "[{badge}] {} {} is not simulated. Connectivity and ERC are checked; \
                      use ngspice for voltage/current results.",
                     component_kind_short(pin.component_kind),
                     pin.component_label
@@ -889,7 +895,7 @@ fn check_symbolic_components(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>
             SimulationSupport::ApproximateDc => (
                 ErcSeverity::Info,
                 format!(
-                    "{} {} uses an approximate DC model ({}). \
+                    "[{badge}] {} {} uses an approximate DC model ({}). \
                      Export to ngspice for accurate results.",
                     component_kind_short(pin.component_kind),
                     pin.component_label,

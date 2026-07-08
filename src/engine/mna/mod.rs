@@ -275,24 +275,32 @@ mod tests {
         assert!(result.is_none(), "Circuit without GND must not converge");
     }
 
-    // ── Open switch → no current path ────────────────────────────────────
-
-    #[test]
-    fn open_switch_blocks_current() {
-        // If solve_dc returns Some, the resistor current must be ≈ 0.
-        // If it returns None (singular), that's also acceptable.
+    // ── Switch open/closed ──────────────────────────────────────────────────
+    // Shared layout for both states. Every wire segment is routed so it never
+    // runs collinear through an unrelated pin — an earlier version of this
+    // layout accidentally shorted the battery/resistor through a pin lying on
+    // a "straight line" wire, which let a buggy assertion pass for the wrong
+    // reason. Route: BAT+ →(top, y=-160)→ SW.left, SW.right →(straight)→ R.A,
+    // R.B →(bottom, y=60)→ BAT-, BAT- → GND.
+    fn switch_test_circuit(switch_value: &str) -> (Vec<Component>, Vec<Wire>, u64) {
+        // Each component sits in its own x-lane (0, 160, 320) so that no
+        // component's ±half-width pin offset lands on another component's
+        // pin x-coordinate — that coincidence previously caused an L-shaped
+        // wire's bend point to land exactly on an unrelated pin and silently
+        // short it out (see history: this circuit used to false-pass with
+        // 9 mA "flowing" through an open switch).
         let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
         let sw = comp(
             2,
             ComponentKind::Switch,
-            Pos2::new(0.0, -120.0),
+            Pos2::new(160.0, -100.0),
             "SW1",
-            "open",
+            switch_value,
         );
         let r = comp(
             3,
             ComponentKind::Resistor,
-            Pos2::new(200.0, -120.0),
+            Pos2::new(320.0, -100.0),
             "R1",
             "1k",
         );
@@ -319,23 +327,50 @@ mod tests {
             .find(|p| p.role == PinRole::Ground)
             .unwrap()
             .pos;
+        let sw_left = sw_pins[0].pos;
+        let sw_right = sw_pins[1].pos;
+        let r_a = r_pins.iter().find(|p| p.label == "A").unwrap().pos;
+        let r_b = r_pins.iter().find(|p| p.label == "B").unwrap().pos;
 
         let wires = vec![
-            l_wire(10, bat_p, sw_pins[0].pos),
-            l_wire(11, sw_pins[1].pos, r_pins[1].pos),
-            l_wire(12, r_pins[0].pos, bat_n),
+            // BAT+ → SW.left: up along x=40 (no other pin at x=40), then
+            // across at y=-100 to x=120 (SW.left's lane; nothing else at
+            // y=-100 in that x range).
+            lseg(10, vec![bat_p, Pos2::new(bat_p.x, sw_left.y), sw_left]),
+            // SW.right → R.A directly; no other pin lies between them.
+            lseg(11, vec![sw_right, r_a]),
+            // R.B → BAT-, dropped to y=60 (a row no pin occupies) so it
+            // cannot re-cross SW or R.A on the way back.
+            lseg(
+                12,
+                vec![r_b, Pos2::new(r_b.x, 60.0), Pos2::new(bat_n.x, 60.0), bat_n],
+            ),
             lseg(13, vec![bat_n, gnd_pins[0].pos]),
         ];
 
-        let result = solve_dc(&[bat, sw, r, gnd], &wires);
-        if let Some(dc) = result {
-            let r_i = dc.branch_current.get(&3).copied().unwrap_or(0.0);
-            assert!(
-                r_i.abs() < 1e-6,
-                "Open switch should block current, got {r_i}"
-            );
-        }
-        // None (singular matrix) is also acceptable for an open circuit.
+        (vec![bat, sw, r, gnd], wires, 3)
+    }
+
+    #[test]
+    fn open_switch_blocks_current() {
+        let (components, wires, r_id) = switch_test_circuit("open");
+        let dc = solve_dc(&components, &wires).expect("open switch circuit should converge");
+        let r_i = dc.branch_current.get(&r_id).copied().unwrap_or(0.0);
+        assert!(
+            r_i.abs() < 1e-6,
+            "Open switch should block current, got {r_i}"
+        );
+    }
+
+    #[test]
+    fn closed_switch_conducts_current() {
+        let (components, wires, r_id) = switch_test_circuit("closed");
+        let dc = solve_dc(&components, &wires).expect("closed switch circuit should converge");
+        let r_i = dc.branch_current.get(&r_id).copied().unwrap_or(0.0);
+        assert!(
+            (r_i.abs() - 0.009).abs() < 0.001,
+            "Closed switch should pass ~9 mA through R1, got {r_i}"
+        );
     }
 
     #[test]
@@ -625,6 +660,72 @@ mod tests {
         );
     }
 
+    // ── Potentiometer: A→W modelled as a fixed half-value resistor ────────
+    #[test]
+    fn potentiometer_wiper_uses_half_resistance_value() {
+        let bat = comp(
+            1,
+            ComponentKind::Battery,
+            Pos2::new(0.0, 0.0),
+            "BAT1",
+            "10V",
+        );
+        let pot = comp(
+            2,
+            ComponentKind::Potentiometer,
+            Pos2::new(200.0, 0.0),
+            "RV1",
+            "10k",
+        );
+        let gnd = comp(
+            3,
+            ComponentKind::Ground,
+            Pos2::new(0.0, 120.0),
+            "GND1",
+            "0V",
+        );
+
+        let bat_pins = component_pin_defs(&bat);
+        let pot_pins = component_pin_defs(&pot);
+        let gnd_pins = component_pin_defs(&gnd);
+
+        let bat_p = bat_pins
+            .iter()
+            .find(|p| p.role == PinRole::Positive)
+            .unwrap()
+            .pos;
+        let bat_n = bat_pins
+            .iter()
+            .find(|p| p.role == PinRole::Ground)
+            .unwrap()
+            .pos;
+        let pot_a = pot_pins.iter().find(|p| p.label == "A").unwrap().pos;
+        let pot_w = pot_pins.iter().find(|p| p.label == "W").unwrap().pos;
+        let pot_b = pot_pins.iter().find(|p| p.label == "B").unwrap().pos;
+
+        let wires = vec![
+            l_wire(10, bat_p, pot_a),
+            l_wire(11, pot_w, bat_n),
+            lseg(12, vec![bat_n, gnd_pins[0].pos]),
+            // Tie the unused B terminal to A, as a real 2-terminal rheostat
+            // wiring would. The A-W companion resistor model does not use B
+            // in its equations, so this doesn't change the expected current —
+            // it only keeps B from being a fully isolated node.
+            lseg(13, vec![pot_b, pot_a]),
+        ];
+
+        let result = solve_dc(&[bat, pot, gnd], &wires);
+        let dc = result.expect("potentiometer A-W path should converge");
+
+        // A-W is modelled as half of the rated value: 10k * 0.5 = 5k.
+        // I = 10V / 5k = 2 mA.
+        let pot_i = dc.branch_current.get(&2).copied().unwrap_or(0.0);
+        assert!(
+            (pot_i.abs() - 0.002).abs() < 0.0005,
+            "Expected ~2 mA through potentiometer A-W, got {pot_i}"
+        );
+    }
+
     #[test]
     fn current_source_into_one_kilohm_sets_ohms_law_voltage() {
         let src = comp(1, ComponentKind::ISource, Pos2::new(0.0, 0.0), "I1", "10mA");
@@ -768,6 +869,63 @@ mod tests {
             solve_dc_detailed(&[bat1, bat2], &wires),
             Err(SimulationError::VoltageSourceConflict)
         ));
+    }
+
+    // ── Battery wired straight across GND (no load) ────────────────────────
+    // Both terminals land on the same GND net, so the ideal source cannot
+    // hold a nonzero potential across a zero-resistance path. The solver
+    // must fail safely (an error) instead of returning a fabricated huge
+    // current or NaN.
+    #[test]
+    fn battery_directly_to_gnd_fails_safely_instead_of_fabricating_current() {
+        let bat = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "BAT1", "9V");
+        let gnd1 = comp(
+            2,
+            ComponentKind::Ground,
+            Pos2::new(-32.0, 120.0),
+            "GND1",
+            "0V",
+        );
+        let gnd2 = comp(
+            3,
+            ComponentKind::Ground,
+            Pos2::new(32.0, 120.0),
+            "GND2",
+            "0V",
+        );
+
+        let bat_pins = component_pin_defs(&bat);
+        let gnd1_pins = component_pin_defs(&gnd1);
+        let gnd2_pins = component_pin_defs(&gnd2);
+
+        let bat_p = bat_pins
+            .iter()
+            .find(|p| p.role == PinRole::Positive)
+            .unwrap()
+            .pos;
+        let bat_n = bat_pins
+            .iter()
+            .find(|p| p.role == PinRole::Ground)
+            .unwrap()
+            .pos;
+
+        // Both battery terminals wired straight to (different) GND symbols —
+        // a direct short across the source with no load in between.
+        let wires = vec![
+            lseg(10, vec![bat_p, gnd1_pins[0].pos]),
+            lseg(11, vec![bat_n, gnd2_pins[0].pos]),
+        ];
+
+        match solve_dc_detailed(&[bat, gnd1, gnd2], &wires) {
+            Err(_) => {} // Reported as a structured error — acceptable.
+            Ok(dc) => {
+                let bat_i = dc.branch_current.get(&1).copied().unwrap_or(0.0);
+                assert!(
+                    bat_i.is_finite(),
+                    "Shorted source current must never be NaN/inf, got {bat_i}"
+                );
+            }
+        }
     }
 
     // ── SI value parser ───────────────────────────────────────────────────

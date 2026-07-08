@@ -856,7 +856,7 @@ impl eframe::App for CircuitApp {
                             ui.add_space(8.0);
                             section_title(ui, "Electrical Model");
                             metric_row(ui, "Model", metadata.model_name);
-                            metric_row(ui, "Simulation", metadata.simulation.label());
+                            simulation_support_row(ui, "Simulation", metadata.simulation);
                             if let Some(warning) = metadata.simulation.warning() {
                                 ui.label(
                                     egui::RichText::new(warning)
@@ -3427,6 +3427,31 @@ fn palette_action(ui: &mut egui::Ui, label: &str) -> egui::Response {
         .fill(Color32::from_rgb(28, 33, 39))
         .stroke(Stroke::new(1.0, Color32::from_rgb(48, 56, 64))),
     )
+}
+
+/// Simulation-support badge row for the inspector: a compact colored pill
+/// (not just plain text) so the confidence level of a component's model is
+/// scannable at a glance, matching the same badge style used for wire/pin
+/// status. `ExactDc` reads as neutral; every reduced-confidence level
+/// (`ApproximateDc`, `DigitalOnly`, `SymbolOnly`, `Unsupported`) reads as a
+/// warning, mirroring `SimulationSupport::needs_inspector_warning`.
+fn simulation_support_row(ui: &mut egui::Ui, label: &str, support: SimulationSupport) {
+    ui.horizontal(|ui| {
+        ui.set_width(ui.available_width());
+        ui.label(
+            egui::RichText::new(label)
+                .size(11.0)
+                .color(Color32::from_rgb(135, 146, 156)),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let tone = if support.needs_inspector_warning() {
+                StatusTone::Warning
+            } else {
+                StatusTone::Neutral
+            };
+            status_pill(ui, support.label(), tone);
+        });
+    });
 }
 
 fn status_pill(ui: &mut egui::Ui, text: &str, tone: StatusTone) {
