@@ -1,9 +1,14 @@
+pub(crate) mod app;
 pub(crate) mod bottom_dock;
 pub(crate) mod breadboard;
+pub(crate) mod canvas;
 pub(crate) mod canvas_overlay;
+pub(crate) mod inspector;
 pub(crate) mod left_palette;
+pub(crate) mod palette;
 pub(crate) mod right_inspector;
 pub(crate) mod status_bar;
 pub(crate) mod theme;
+pub(crate) mod toolbar;
 pub(crate) mod top_toolbar;
 pub(crate) mod validation_panel;
