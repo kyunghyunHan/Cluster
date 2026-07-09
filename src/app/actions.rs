@@ -659,7 +659,9 @@ impl crate::CircuitApp {
         for wire in self.wires.iter_mut() {
             if wire.points.len() > 2 {
                 let first = wire.points[0];
-                let last = *wire.points.last().unwrap();
+                let Some(&last) = wire.points.last() else {
+                    continue;
+                };
                 if old_pins.iter().any(|pin| first.distance(*pin) <= 20.0)
                     || old_pins.iter().any(|pin| last.distance(*pin) <= 20.0)
                 {
@@ -737,7 +739,7 @@ impl crate::CircuitApp {
     pub(crate) fn export_png(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         self.screenshot_pending = true;
-        self.status = "Capturing screenshot…".to_string();
+        self.status = "Capturing screenshot...".to_string();
     }
 
     pub(crate) fn export_spice_netlist(&mut self) {
@@ -826,6 +828,10 @@ impl crate::CircuitApp {
             .filter(|c| ids.contains(&c.id))
             .map(|c| (c.id, c.pos))
             .collect();
+        if positions.len() < 2 {
+            self.status = "Select at least 2 valid components to align.".to_string();
+            return;
+        }
 
         let target = match dir {
             AlignDir::Left => positions
@@ -863,7 +869,7 @@ impl crate::CircuitApp {
                 }
             }
         }
-        self.status = format!("Aligned {} components.", ids.len());
+        self.status = format!("Aligned {} components.", positions.len());
     }
 
     pub(crate) fn distribute_selected(&mut self, vertical: bool) {
@@ -882,10 +888,18 @@ impl crate::CircuitApp {
             .filter(|c| ids.contains(&c.id))
             .map(|c| (c.id, if vertical { c.pos.y } else { c.pos.x }))
             .collect();
-        ordered.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        if ordered.len() < 3 {
+            self.status = "Select at least 3 valid components to distribute.".to_string();
+            return;
+        }
+        ordered.sort_by(|a, b| a.1.total_cmp(&b.1));
 
-        let first = ordered.first().unwrap().1;
-        let last = ordered.last().unwrap().1;
+        let Some(first) = ordered.first().map(|(_, pos)| *pos) else {
+            return;
+        };
+        let Some(last) = ordered.last().map(|(_, pos)| *pos) else {
+            return;
+        };
         let step = (last - first) / (ordered.len() as f32 - 1.0);
 
         self.record_history();

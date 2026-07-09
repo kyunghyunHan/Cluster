@@ -537,20 +537,24 @@ impl eframe::App for CircuitApp {
                                     // Show top net voltages from MNA
                                     let mut net_v: Vec<f64> =
                                         dc.net_voltages.values().copied().collect();
-                                    net_v.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                                    net_v.sort_by(|a, b| b.total_cmp(a));
                                     net_v.dedup();
                                     if !net_v.is_empty() {
-                                        dc_metric_row(
-                                            ui,
-                                            "Max node V",
-                                            &mna::format_voltage(*net_v.first().unwrap()),
-                                        );
-                                        if net_v.len() > 1 {
+                                        if let Some(&max_voltage) = net_v.first() {
                                             dc_metric_row(
                                                 ui,
-                                                "Min node V",
-                                                &mna::format_voltage(*net_v.last().unwrap()),
+                                                "Max node V",
+                                                &mna::format_voltage(max_voltage),
                                             );
+                                        }
+                                        if net_v.len() > 1 {
+                                            if let Some(&min_voltage) = net_v.last() {
+                                                dc_metric_row(
+                                                    ui,
+                                                    "Min node V",
+                                                    &mna::format_voltage(min_voltage),
+                                                );
+                                            }
                                         }
                                     }
                                     dc_metric_row(
@@ -654,7 +658,7 @@ impl eframe::App for CircuitApp {
                                                 (label, p)
                                             })
                                             .collect();
-                                        powers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                                        powers.sort_by(|a, b| b.1.total_cmp(&a.1));
 
                                         for (label, power) in &powers {
                                             let frac = if dissipated_power > 1e-12 {
@@ -2143,7 +2147,9 @@ impl eframe::App for CircuitApp {
                                 for wire in self.wires.iter_mut() {
                                     if wire.points.len() > 2 {
                                         let first = wire.points[0];
-                                        let last = *wire.points.last().unwrap();
+                                        let Some(&last) = wire.points.last() else {
+                                            continue;
+                                        };
                                         if old_pins.iter().any(|p| first.distance(*p) <= 20.0)
                                             || old_pins.iter().any(|p| last.distance(*p) <= 20.0)
                                         {
@@ -2177,7 +2183,9 @@ impl eframe::App for CircuitApp {
                             for wire in self.wires.iter_mut() {
                                 if wire.points.len() > 2 {
                                     let first = wire.points[0];
-                                    let last = *wire.points.last().unwrap();
+                                    let Some(&last) = wire.points.last() else {
+                                        continue;
+                                    };
                                     if old_pins.iter().any(|p| first.distance(*p) <= 20.0)
                                         || old_pins.iter().any(|p| last.distance(*p) <= 20.0)
                                     {
@@ -2925,7 +2933,7 @@ impl eframe::App for CircuitApp {
                         let response = ui.add_sized(
                             Vec2::new(200.0, 22.0),
                             egui::TextEdit::singleline(&mut self.find_query)
-                                .hint_text("Label or value…"),
+                                .hint_text("Label or value..."),
                         );
                         if response.changed() {
                             let q = self.find_query.to_lowercase();
@@ -3972,7 +3980,9 @@ pub(crate) fn tidy_wire_points(wire: &mut Wire) {
         return;
     }
     let start = wire.points[0];
-    let end = *wire.points.last().unwrap();
+    let Some(&end) = wire.points.last() else {
+        return;
+    };
     let dx = (end.x - start.x).abs();
     let dy = (end.y - start.y).abs();
     let new_points = if dx < 0.5 || dy < 0.5 {
@@ -6108,7 +6118,7 @@ fn draw_title_block(
     let dc_col = Color32::from_rgb(100, 200, 160);
     if let Some(dc) = &simulation.dc {
         let mut nets: Vec<f64> = dc.net_voltages.values().copied().collect();
-        nets.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        nets.sort_by(|a, b| b.total_cmp(a));
         nets.dedup();
         if let Some(&vmax) = nets.first() {
             mono(70.0, format!("Vmax  {}", mna::format_voltage(vmax)), dc_col);

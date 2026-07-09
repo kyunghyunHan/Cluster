@@ -828,13 +828,11 @@ fn check_i2c_pullups(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
             if net_has_pullup(netlist, net_id) {
                 continue;
             }
-            let pin = netlist
-                .pins
-                .iter()
-                .find(|pin| {
-                    pin.net_id == net_id && pin.pin_name.to_ascii_uppercase().contains(signal)
-                })
-                .unwrap();
+            let Some(pin) = netlist.pins.iter().find(|pin| {
+                pin.net_id == net_id && pin.pin_name.to_ascii_uppercase().contains(signal)
+            }) else {
+                continue;
+            };
             v.push(ErcViolation {
                 rule: ErcRule::I2cPullupMissing,
                 severity: ErcSeverity::Warning,
@@ -1840,11 +1838,9 @@ fn check_i2c_pullup_values(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) 
                 if !on_power {
                     continue;
                 }
-                let pin = netlist
-                    .pins
-                    .iter()
-                    .find(|p| p.component_id == resistor_id)
-                    .unwrap();
+                let Some(pin) = netlist.pins.iter().find(|p| p.component_id == resistor_id) else {
+                    continue;
+                };
                 let ohms = parse_metric_value(&pin.component_value, "ohm");
                 if let Some(r) = ohms {
                     if r > 10_000.0 {
