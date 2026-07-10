@@ -24,6 +24,12 @@ pub(crate) struct BreadboardGuide {
     pub(crate) notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BreadboardAction {
+    Select(BreadboardRoute),
+    AddJumper(BreadboardRoute),
+}
+
 pub(crate) fn build_breadboard_guide(
     components: &[Component],
     netlist: &CircuitNetlist,
@@ -183,8 +189,8 @@ fn find_netlist_pin<'a>(
 pub(crate) fn render_breadboard_view(
     ui: &mut egui::Ui,
     guide: &BreadboardGuide,
-) -> Option<BreadboardRoute> {
-    let mut selected_route = None;
+) -> Option<BreadboardAction> {
+    let mut action = None;
     ui.horizontal(|ui| {
         status_pill(ui, "Schematic synced", BreadboardTone::Live);
         ui.label(
@@ -232,12 +238,26 @@ pub(crate) fn render_breadboard_view(
             );
             if ui
                 .add_sized(
-                    Vec2::new((ui.available_width() - 88.0).max(160.0), 20.0),
+                    Vec2::new((ui.available_width() - 132.0).max(160.0), 20.0),
                     egui::Button::new(egui::RichText::new(label).size(11.0)),
                 )
                 .clicked()
             {
-                selected_route = Some(route.clone());
+                action = Some(BreadboardAction::Select(route.clone()));
+            }
+            if route.connected {
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(egui::RichText::new("Wired").size(10.5)),
+                );
+            } else if ui
+                .add_sized(
+                    Vec2::new(42.0, 20.0),
+                    egui::Button::new(egui::RichText::new("Wire").size(10.5)),
+                )
+                .clicked()
+            {
+                action = Some(BreadboardAction::AddJumper(route.clone()));
             }
             ui.label(
                 egui::RichText::new(route.purpose)
@@ -259,7 +279,7 @@ pub(crate) fn render_breadboard_view(
         }
     }
 
-    selected_route
+    action
 }
 
 fn draw_breadboard_preview(painter: &egui::Painter, rect: Rect, guide: &BreadboardGuide) {

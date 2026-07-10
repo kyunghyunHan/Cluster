@@ -20,10 +20,12 @@ use crate::engine::validation::{
 use crate::model::*;
 use crate::storage::save::write_with_backup;
 use crate::ui::bottom_dock::{
-    BottomDockAction, BottomDockModel, BottomDockTab, PageTabsAction, render_bottom_dock,
-    render_page_tabs,
+    BottomDockAction, BottomDockModel, BottomDockTab, PageTabsAction, PcbDockSummary,
+    render_bottom_dock, render_page_tabs,
 };
-use crate::ui::breadboard::{BreadboardRoute, build_breadboard_guide, render_breadboard_view};
+use crate::ui::breadboard::{
+    BreadboardAction, BreadboardRoute, build_breadboard_guide, render_breadboard_view,
+};
 use crate::ui::canvas_overlay::draw_simulation_legend;
 use crate::ui::left_palette::{
     PaletteAction, PaletteTemplate, render_parts_palette, selected_part,
@@ -101,6 +103,26 @@ pub(crate) struct BreadboardUiState {
     pub(crate) open: bool,
 }
 
+pub(crate) struct PcbUiState {
+    pub(crate) board: crate::pcb::board::Board,
+    pub(crate) cad: Option<crate::model::cad::CadProjectData>,
+    pub(crate) drc: Vec<crate::pcb::drc::DrcViolation>,
+    pub(crate) ratsnest_count: usize,
+    pub(crate) last_sync_revision: u64,
+}
+
+impl Default for PcbUiState {
+    fn default() -> Self {
+        Self {
+            board: crate::pcb::board::Board::new_two_layer(80.0, 50.0),
+            cad: None,
+            drc: Vec::new(),
+            ratsnest_count: 0,
+            last_sync_revision: 0,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct HistoryState {
     pub(crate) undo: Vec<CircuitSnapshot>,
@@ -156,6 +178,7 @@ pub(crate) struct CircuitApp {
     pub(crate) simulation_ui: SimulationUiState,
     pub(crate) inspector_ui: InspectorState,
     pub(crate) breadboard_ui: BreadboardUiState,
+    pub(crate) pcb_ui: PcbUiState,
     // View
     pub(crate) zoom: f32,
     pub(crate) pan: Vec2,
@@ -224,6 +247,7 @@ impl CircuitApp {
             simulation_ui: SimulationUiState::default(),
             inspector_ui: InspectorState,
             breadboard_ui: BreadboardUiState::default(),
+            pcb_ui: PcbUiState::default(),
             zoom: 1.0,
             pan: Vec2::ZERO,
             clipboard: Vec::new(),
@@ -380,6 +404,7 @@ impl eframe::App for CircuitApp {
 
         let simulation = self.current_simulation();
         let inspector_netlist = self.current_netlist();
+        let pcb_summary = self.pcb_dock_summary();
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             let toolbar_action = render_top_toolbar(
@@ -1181,6 +1206,7 @@ impl eframe::App for CircuitApp {
                         has_components: !self.components.is_empty(),
                         simulation: &simulation,
                         breadboard_enabled: self.breadboard_ui.open,
+                        pcb: &pcb_summary,
                         status: &self.status,
                     },
                 ) {
@@ -1192,6 +1218,30 @@ impl eframe::App for CircuitApp {
                         BottomDockAction::OpenBreadboard => {
                             self.breadboard_ui.open = true;
                             self.ui_state.bottom_dock_tab = BottomDockTab::Breadboard;
+                        }
+                        BottomDockAction::UpdatePcb => {
+                            self.update_pcb_from_schematic();
+                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                        }
+                        BottomDockAction::AutoPlacePcb => {
+                            self.auto_place_pcb_footprints();
+                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                        }
+                        BottomDockAction::FitPcbBoard => {
+                            self.fit_pcb_board_to_contents();
+                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                        }
+                        BottomDockAction::RoutePcbRatsnest => {
+                            self.route_pcb_ratsnest();
+                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                        }
+                        BottomDockAction::SavePcbProject => {
+                            self.save_project_folder();
+                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                        }
+                        BottomDockAction::ExportPcbFabrication => {
+                            self.export_pcb_fabrication_files();
+                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
                         }
                     }
                 }
@@ -2921,7 +2971,7 @@ impl eframe::App for CircuitApp {
         if self.breadboard_ui.open {
             let mut open = self.breadboard_ui.open;
             let guide = build_breadboard_guide(&self.components, &inspector_netlist);
-            let mut selected_route: Option<BreadboardRoute> = None;
+            let mut breadboard_action: Option<BreadboardAction> = None;
             egui::Window::new("Breadboard View")
                 .open(&mut open)
                 .collapsible(true)
@@ -2929,20 +2979,17 @@ impl eframe::App for CircuitApp {
                 .default_pos(egui::Pos2::new(80.0, 120.0))
                 .default_size(Vec2::new(520.0, 420.0))
                 .show(ctx, |ui| {
-                    selected_route = render_breadboard_view(ui, &guide);
+                    breadboard_action = render_breadboard_view(ui, &guide);
                 });
-            if let Some(route) = selected_route {
-                self.hovered_net_wire = None;
-                self.highlighted_net_wires = inspector_netlist
-                    .wire_nets
-                    .iter()
-                    .filter_map(|(wire_id, net_id)| (*net_id == route.net_id).then_some(*wire_id))
-                    .collect();
-                self.selected = Some(Selection::Component(route.from_component_id));
-                self.status = format!(
-                    "Breadboard route: {} {} -> {} {}.",
-                    route.from_label, route.from_pin, route.to_label, route.to_pin
-                );
+            if let Some(action) = breadboard_action {
+                match action {
+                    BreadboardAction::Select(route) => {
+                        self.select_breadboard_route(&inspector_netlist, route);
+                    }
+                    BreadboardAction::AddJumper(route) => {
+                        self.connect_breadboard_route(route);
+                    }
+                }
             }
             self.breadboard_ui.open = open;
         }
@@ -11011,6 +11058,35 @@ mod tests {
     }
 
     #[test]
+    fn relay_flyback_auto_fix_places_and_wires_diode() {
+        let mut app = CircuitApp::new();
+        app.load_motor_relay_demo();
+        let simulation = app.current_simulation();
+        let fix = simulation
+            .erc
+            .iter()
+            .find(|violation| violation.message.contains("flyback diode"))
+            .and_then(|violation| violation.auto_fix())
+            .expect("relay flyback warning should offer auto fix");
+
+        app.apply_erc_auto_fix(fix);
+
+        let simulation = app.current_simulation();
+        assert!(
+            !simulation
+                .erc
+                .iter()
+                .any(|violation| violation.message.contains("flyback diode"))
+        );
+        assert!(
+            app.components
+                .iter()
+                .any(|component| component.kind == ComponentKind::Diode)
+        );
+        assert!(app.status.contains("flyback diode"));
+    }
+
+    #[test]
     fn beginner_validation_warns_i2c_without_pullups() {
         let mut app = CircuitApp::new();
         let esp32 = app.place_component(ComponentKind::Esp32, Pos2::new(300.0, 300.0));
@@ -11024,6 +11100,53 @@ mod tests {
         assert!(simulation.erc.iter().any(|violation| {
             violation.message.contains("I2C SCL") && violation.message.contains("pull-up")
         }));
+    }
+
+    #[test]
+    fn i2c_pullup_auto_fix_places_and_wires_resistors() {
+        let mut app = CircuitApp::new();
+        let esp32 = app.place_component(ComponentKind::Esp32, Pos2::new(300.0, 300.0));
+        let oled = app.place_component(ComponentKind::Oled, Pos2::new(600.0, 300.0));
+        app.add_wire_between(esp32, "GPIO21", oled, "SDA");
+        app.add_wire_between(esp32, "GPIO22", oled, "SCL");
+
+        let simulation = app.current_simulation();
+        let fix = simulation
+            .erc
+            .iter()
+            .find(|violation| {
+                violation.message.contains("I2C SDA") && violation.message.contains("pull-up")
+            })
+            .and_then(|violation| violation.auto_fix())
+            .expect("missing SDA pull-up should offer auto fix");
+
+        app.apply_erc_auto_fix(fix);
+
+        let simulation = app.current_simulation();
+        let pullup_messages = simulation
+            .erc
+            .iter()
+            .filter(|violation| {
+                violation.message.contains("I2C") && violation.message.contains("pull-up")
+            })
+            .map(|violation| violation.message.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            !simulation.erc.iter().any(|violation| {
+                violation.message.contains("I2C") && violation.message.contains("pull-up")
+            }),
+            "{pullup_messages:?}\n{}",
+            circuit_to_netlist_text(&build_circuit_netlist(&app.components, &app.wires))
+        );
+        let pullups = app
+            .components
+            .iter()
+            .filter(|component| {
+                component.kind == ComponentKind::Resistor && component.value == "4.7k"
+            })
+            .count();
+        assert_eq!(pullups, 2);
+        assert!(app.status.contains("wired"));
     }
 
     #[test]
@@ -12214,6 +12337,33 @@ mod tests {
     }
 
     #[test]
+    fn breadboard_route_can_add_missing_jumper_to_schematic() {
+        let mut app = CircuitApp::new();
+        app.load_esp32_oled_demo();
+        app.wires.clear();
+        app.mark_dirty();
+
+        let netlist = build_circuit_netlist(&app.components, &app.wires);
+        let guide = build_breadboard_guide(&app.components, &netlist);
+        let route = guide
+            .routes
+            .iter()
+            .find(|route| route.from_pin.contains("GPIO21") && route.to_pin == "SDA")
+            .cloned()
+            .expect("ESP32 OLED guide should expose SDA route");
+        assert!(!route.connected);
+
+        app.connect_breadboard_route(route);
+
+        let netlist = build_circuit_netlist(&app.components, &app.wires);
+        let guide = build_breadboard_guide(&app.components, &netlist);
+        assert!(guide.routes.iter().any(|route| {
+            route.from_pin.contains("GPIO21") && route.to_pin == "SDA" && route.connected
+        }));
+        assert!(app.status.contains("Added jumper"));
+    }
+
+    #[test]
     fn breadboard_guide_tracks_arduino_oled_i2c_jumpers() {
         let mut app = CircuitApp::new();
         app.load_arduino_oled_demo();
@@ -12231,6 +12381,101 @@ mod tests {
         assert!(guide.routes.iter().any(|route| {
             route.from_pin == "A5 SCL" && route.to_pin == "SCL" && route.purpose == "I2C clock"
         }));
+    }
+
+    #[test]
+    fn update_pcb_syncs_footprints_ratsnest_and_dirty_state() {
+        let mut app = CircuitApp::new();
+        app.load_led_demo();
+        app.update_pcb_from_schematic();
+
+        let summary = app.pcb_dock_summary();
+        assert!(summary.footprint_count >= 2, "{summary:?}");
+        assert!(summary.ratsnest_count > 0, "{summary:?}");
+        assert!(!summary.dirty, "{summary:?}");
+        assert!(app.status.contains("PCB updated"));
+
+        app.mark_dirty();
+        assert!(app.pcb_dock_summary().dirty);
+    }
+
+    #[test]
+    fn pcb_auto_place_and_route_reduce_unplaced_and_ratsnest_counts() {
+        let mut app = CircuitApp::new();
+        app.load_led_demo();
+        app.update_pcb_from_schematic();
+        let before = app.pcb_dock_summary();
+        assert!(before.unplaced_count > 0, "{before:?}");
+        assert!(before.ratsnest_count > 0, "{before:?}");
+
+        app.auto_place_pcb_footprints();
+        let placed = app.pcb_dock_summary();
+        assert_eq!(placed.unplaced_count, 0, "{placed:?}");
+        assert!(
+            app.pcb_ui
+                .board
+                .footprints
+                .iter()
+                .all(|footprint| footprint.placed),
+            "{:?}",
+            app.pcb_ui.board.footprints
+        );
+
+        app.route_pcb_ratsnest();
+        let routed = app.pcb_dock_summary();
+        assert_eq!(routed.ratsnest_count, 0, "{routed:?}");
+        assert!(!app.pcb_ui.board.tracks.is_empty());
+        assert!(app.status.contains("track"));
+    }
+
+    #[test]
+    fn pcb_fit_board_contains_placed_footprints_and_tracks() {
+        let mut app = CircuitApp::new();
+        app.load_led_demo();
+        app.update_pcb_from_schematic();
+        app.auto_place_pcb_footprints();
+        app.route_pcb_ratsnest();
+
+        if let Some(footprint) = app.pcb_ui.board.footprints.first_mut() {
+            footprint.position.x = 130.0;
+            footprint.position.y = 90.0;
+        }
+        app.fit_pcb_board_to_contents();
+
+        let summary = app.pcb_dock_summary();
+        assert!(summary.preview.width_mm >= 25.0, "{summary:?}");
+        assert!(summary.preview.height_mm >= 20.0, "{summary:?}");
+        assert!(summary.preview.footprints.iter().all(|footprint| {
+            footprint.x_mm >= 0.0
+                && footprint.y_mm >= 0.0
+                && footprint.x_mm <= summary.preview.width_mm
+                && footprint.y_mm <= summary.preview.height_mm
+        }));
+        assert!(app.status.contains("Fit PCB board"));
+    }
+
+    #[test]
+    fn project_folder_save_writes_schematic_board_and_project_json() {
+        let root =
+            std::env::temp_dir().join(format!("cluster-project-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+
+        let mut app = CircuitApp::new();
+        app.load_led_demo();
+        app.update_pcb_from_schematic();
+        app.auto_place_pcb_footprints();
+        app.route_pcb_ratsnest();
+        app.save_project_folder_to(&root).unwrap();
+
+        assert!(root.join("schematic.json").exists());
+        assert!(root.join("board.json").exists());
+        assert!(root.join("project.json").exists());
+        let board_json = fs::read_to_string(root.join("board.json")).unwrap();
+        assert!(board_json.contains("\"tracks\""));
+        let project_json = fs::read_to_string(root.join("project.json")).unwrap();
+        assert!(project_json.contains("\"document_revision\""));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

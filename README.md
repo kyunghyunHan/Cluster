@@ -55,7 +55,7 @@ The Breadboard View is a beginner wiring assistant synced from the schematic net
 - Arduino A5 SCL -> OLED/Sensor SCL
 - VCC/3V3/5V and common GND rails
 
-Clicking a guided jumper highlights the matching schematic net so learners can connect the abstract schematic to the physical breadboard wiring.
+Clicking a guided jumper highlights the matching schematic net so learners can connect the abstract schematic to the physical breadboard wiring. Missing guided jumpers also expose a **Wire** action that adds the matching schematic wire between the mapped pins.
 
 ### Supported Components
 - **Microcontrollers**: ESP32, ESP32-S3, ESP32-C3, Arduino Uno, Raspberry Pi Pico
@@ -78,7 +78,14 @@ Cluster now has the first internal data model needed for PCB work:
 - Initial DRC checks for minimum track width and via sizes
 - Gerber/Excellon string generators for future file export
 
-This is groundwork, not a finished PCB editor UI yet. The intended MVP is footprint placement, ratsnest display, manual track drawing, vias, two copper layers, DRC, and Gerber/Excellon export.
+The bottom dock PCB tab can now run **Update PCB** from the current schematic,
+sync generated footprints, auto-place footprints, show a compact PCB preview
+with footprints/tracks/ratsnest lines, fit the board outline to placed content,
+add simple straight tracks from unrouted ratsnest edges, save a `project.cluster/`
+folder, export Gerber/Excellon/BOM/CPL fabrication files, and show DRC
+error/warning counts. This is still short of the full PCB editor; the intended
+MVP remains interactive footprint placement, routed-track editing, vias, two
+copper layers, and DRC navigation.
 
 ### Validation (ERC)
 
@@ -104,6 +111,9 @@ Cluster runs automatic Electrical Rule Checks after every change:
 - Relay coil without a flyback diode
 
 Clicking a validation message selects the offending component or wire on the canvas.
+Several warnings include one-click repair actions. I2C pull-up repair places
+and wires two 4.7k resistors to the controller logic rail, and relay flyback
+repair places and wires a reverse-biased diode across COIL+/COIL-.
 
 ### DC Simulation
 
@@ -156,6 +166,9 @@ does not infer application behavior for arbitrary modules.
 - Legacy files without endpoint metadata are migrated once on load: wire ends
   that land on pins become explicit `PinRef`s, while ambiguous mid-wire
   crossings stay unconnected and are reported in load notes.
+- The PCB dock can save a `project.cluster/` folder containing `schematic.json`,
+  `board.json`, and `project.json`; repeated saves use the same backup-safe
+  write path as normal circuit saves.
 
 ---
 
@@ -277,15 +290,17 @@ mathematically impossible, such as an ideal-source conflict.
 ## Roadmap
 
 - [x] Beginner ESP32/Arduino example gallery in the palette
-- [x] First Breadboard View wiring assistant for ESP32/Arduino I2C circuits
+- [x] First Breadboard View wiring assistant for ESP32/Arduino I2C circuits, including missing-jumper auto-wire actions
 - [x] Phase 1 CAD model groundwork: SymbolInstance, Footprint, NetClass, Board, Track, Via, DRC, Gerber/Excellon scaffolding
+- [x] First PCB bottom dock workflow: Update PCB, generated footprints, preview, auto-place, board fit, ratsnest route helper, DRC summary, project save, fabrication export
+- [x] ERC auto-fix wiring for I2C pull-ups and relay flyback diodes
 - [ ] Stabilize schematic netlist for PCB: explicit junctions, no-connect markers, local/global net labels, multi-page net merge
 - [ ] Pin-type ERC: output-output conflict, power input not driven, unconnected input, floating net, MCU overvoltage, I2C/SPI/UART mismatch
-- [ ] PCB editor MVP: Update PCB, footprint placement, ratsnest, manual tracks, vias, two-layer board
+- [ ] PCB editor MVP: interactive footprint placement, manual track editing, vias, two-layer board
 - [ ] DRC panel with clickable track/pad/via/edge/silkscreen violations
 - [ ] Gerber RS-274X, Excellon drill, pick-and-place CSV, and strengthened BOM export
 - [ ] JSON/TOML library manager for symbols, footprints, and real parts
-- [ ] Full breadboard placement with jumper editing, power rails, zoom, and pin highlighting
+- [ ] Full breadboard placement with editable physical jumpers, power rails, zoom, and pin highlighting
 - [ ] Guided tutorials with step-by-step wiring, code, simulation, and repair hints
 - [ ] Optional ngspice export/run/import for advanced simulation
 

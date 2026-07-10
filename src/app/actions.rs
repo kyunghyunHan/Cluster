@@ -1,11 +1,21 @@
 use crate::app::{AlignDir, Selection, Tool};
 use crate::engine::validation::ErcAutoFix;
 use crate::engine::{mna, netlist::build_circuit_netlist, simulation as simulation_engine};
+use crate::model::cad::CadProjectData;
 use crate::model::*;
-use crate::storage::save::write_with_backup;
+use crate::pcb::board::BoardOutline;
+use crate::pcb::drc::{DrcSeverity, run_drc_with_nets};
+use crate::pcb::layer::BoardLayer;
+use crate::pcb::track::TrackSegment;
+use crate::storage::save::{ProjectFolderLayout, write_with_backup};
+use crate::ui::bottom_dock::{
+    PcbDockSummary, PcbPreviewData, PcbPreviewFootprint, PcbPreviewRatsnest, PcbPreviewTrack,
+};
+use crate::ui::breadboard::BreadboardRoute;
 use egui::{Pos2, Rect, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::Path;
 
 impl crate::CircuitApp {
     // ── ID / label helpers ───────────────────────────────────────────────────
@@ -352,6 +362,7 @@ impl crate::CircuitApp {
         let target_id = match fix {
             ErcAutoFix::AddLedSeriesResistor { component_id }
             | ErcAutoFix::AddI2cPullups { component_id }
+            | ErcAutoFix::AddRelayFlybackDiode { component_id }
             | ErcAutoFix::AddGpioDriverNote { component_id }
             | ErcAutoFix::AddLevelShifterNote { component_id } => component_id,
         };
@@ -382,9 +393,9 @@ impl crate::CircuitApp {
             }
             ErcAutoFix::AddI2cPullups { .. } => {
                 let sda = self
-                    .place_component(ComponentKind::Resistor, base_pos + Vec2::new(-120.0, -90.0));
+                    .place_component(ComponentKind::Resistor, base_pos + Vec2::new(220.0, -90.0));
                 let scl = self
-                    .place_component(ComponentKind::Resistor, base_pos + Vec2::new(-40.0, -90.0));
+                    .place_component(ComponentKind::Resistor, base_pos + Vec2::new(220.0, -40.0));
                 for id in [sda, scl] {
                     if let Some(component) = self
                         .components
@@ -394,9 +405,14 @@ impl crate::CircuitApp {
                         component.value = "4.7k".to_string();
                     }
                 }
+                let wired = self.wire_i2c_pullup_fix(target_id, sda, scl);
                 self.selected = Some(Selection::Component(sda));
-                self.status =
-                    "Auto fix placed two 4.7k pull-up resistors. Wire them from SDA/SCL to logic VCC.".to_string();
+                self.status = if wired {
+                    "Auto fix added and wired two 4.7k I2C pull-ups.".to_string()
+                } else {
+                    "Auto fix placed two 4.7k pull-ups. Wire them from SDA/SCL to logic VCC."
+                        .to_string()
+                };
             }
             ErcAutoFix::AddGpioDriverNote { .. } => {
                 let id = self.place_note(
@@ -405,6 +421,14 @@ impl crate::CircuitApp {
                 );
                 self.selected = Some(Selection::Component(id));
                 self.status = "Auto fix added a driver suggestion note.".to_string();
+            }
+            ErcAutoFix::AddRelayFlybackDiode { .. } => {
+                let diode =
+                    self.place_component(ComponentKind::Diode, base_pos + Vec2::new(-120.0, 0.0));
+                self.add_wire_between(diode, "A", target_id, "COIL-");
+                self.add_wire_between(diode, "B", target_id, "COIL+");
+                self.selected = Some(Selection::Component(diode));
+                self.status = "Auto fix added a flyback diode across the relay coil.".to_string();
             }
             ErcAutoFix::AddLevelShifterNote { .. } => {
                 let id = self.place_note(
@@ -416,6 +440,39 @@ impl crate::CircuitApp {
             }
         }
         self.mark_dirty();
+    }
+
+    fn wire_i2c_pullup_fix(
+        &mut self,
+        target_id: u64,
+        sda_resistor: u64,
+        scl_resistor: u64,
+    ) -> bool {
+        let Some((bus_id, sda_pin, scl_pin, power_pin)) = self.i2c_pullup_anchor(target_id) else {
+            return false;
+        };
+        self.add_wire_between(sda_resistor, "A", bus_id, sda_pin);
+        self.add_wire_between(sda_resistor, "B", bus_id, power_pin);
+        self.add_wire_between(scl_resistor, "A", bus_id, scl_pin);
+        self.add_wire_between(scl_resistor, "B", bus_id, power_pin);
+        true
+    }
+
+    fn i2c_pullup_anchor(
+        &self,
+        target_id: u64,
+    ) -> Option<(u64, &'static str, &'static str, &'static str)> {
+        let target = self
+            .components
+            .iter()
+            .find(|component| component.id == target_id)?;
+        if let Some(mapping) = i2c_mapping_for_kind(target.kind) {
+            return Some((target.id, mapping.0, mapping.1, mapping.2));
+        }
+        self.components.iter().find_map(|component| {
+            let mapping = i2c_mapping_for_kind(component.kind)?;
+            Some((component.id, mapping.0, mapping.1, mapping.2))
+        })
     }
 
     pub(crate) fn add_wire(&mut self, points: Vec<Pos2>) {
@@ -604,6 +661,470 @@ impl crate::CircuitApp {
             corner_v
         };
         self.add_wire(vec![a, corner, b]);
+    }
+
+    pub(crate) fn select_breadboard_route(
+        &mut self,
+        netlist: &CircuitNetlist,
+        route: BreadboardRoute,
+    ) {
+        self.hovered_net_wire = None;
+        self.highlighted_net_wires = netlist
+            .wire_nets
+            .iter()
+            .filter_map(|(wire_id, net_id)| (*net_id == route.net_id).then_some(*wire_id))
+            .collect();
+        self.selected = Some(Selection::Component(route.from_component_id));
+        self.status = format!(
+            "Breadboard route: {} {} -> {} {}.",
+            route.from_label, route.from_pin, route.to_label, route.to_pin
+        );
+    }
+
+    pub(crate) fn connect_breadboard_route(&mut self, route: BreadboardRoute) {
+        if route.connected {
+            let netlist = self.current_netlist();
+            self.select_breadboard_route(&netlist, route);
+            return;
+        }
+        let from_pin = route.from_pin.clone();
+        let to_pin = route.to_pin.clone();
+        self.add_wire_between(
+            route.from_component_id,
+            &from_pin,
+            route.to_component_id,
+            &to_pin,
+        );
+        self.selected = Some(Selection::Component(route.from_component_id));
+        self.status = format!(
+            "Added jumper: {} {} -> {} {}.",
+            route.from_label, from_pin, route.to_label, to_pin
+        );
+    }
+
+    pub(crate) fn update_pcb_from_schematic(&mut self) {
+        let netlist = self.current_netlist();
+        let cad = CadProjectData::from_schematic(&self.components, &netlist);
+        self.pcb_ui
+            .board
+            .update_from_schematic(&cad.symbols, &cad.nets);
+        self.refresh_pcb_analysis(&cad);
+        self.pcb_ui.cad = Some(cad);
+        self.pcb_ui.last_sync_revision = self.circuit_revision;
+        self.dirty_flags.pcb_sync_dirty = false;
+
+        let summary = self.pcb_dock_summary();
+        self.status = format!(
+            "PCB updated: {} footprint(s), {} ratsnest edge(s), {} DRC error(s).",
+            summary.footprint_count, summary.ratsnest_count, summary.drc_errors
+        );
+    }
+
+    pub(crate) fn auto_place_pcb_footprints(&mut self) {
+        self.ensure_pcb_synced();
+        let board_width = self
+            .pcb_ui
+            .board
+            .outline
+            .points
+            .iter()
+            .map(|point| point.x)
+            .fold(80.0_f32, f32::max);
+        let start_x = 8.0;
+        let start_y = 8.0;
+        let step_x = 14.0;
+        let step_y = 10.0;
+        let usable_width = (board_width - start_x * 2.0).max(step_x);
+        let per_row = (usable_width / step_x).floor().max(1.0) as usize;
+        for (index, footprint) in self.pcb_ui.board.footprints.iter_mut().enumerate() {
+            let col = index % per_row;
+            let row = index / per_row;
+            footprint.position = crate::model::cad::Point2::new(
+                start_x + col as f32 * step_x,
+                start_y + row as f32 * step_y,
+            );
+            footprint.placed = true;
+        }
+        self.refresh_pcb_analysis_from_current();
+        self.status = format!(
+            "Auto-placed {} PCB footprint(s).",
+            self.pcb_ui.board.footprints.len()
+        );
+    }
+
+    pub(crate) fn fit_pcb_board_to_contents(&mut self) {
+        self.ensure_pcb_synced();
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+
+        for footprint in &self.pcb_ui.board.footprints {
+            min_x = min_x.min(footprint.position.x);
+            min_y = min_y.min(footprint.position.y);
+            max_x = max_x.max(footprint.position.x);
+            max_y = max_y.max(footprint.position.y);
+        }
+        for track in &self.pcb_ui.board.tracks {
+            for point in [track.start, track.end] {
+                min_x = min_x.min(point.x);
+                min_y = min_y.min(point.y);
+                max_x = max_x.max(point.x);
+                max_y = max_y.max(point.y);
+            }
+        }
+        for via in &self.pcb_ui.board.vias {
+            min_x = min_x.min(via.position.x);
+            min_y = min_y.min(via.position.y);
+            max_x = max_x.max(via.position.x);
+            max_y = max_y.max(via.position.y);
+        }
+
+        if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite() {
+            self.status = "No PCB geometry to fit.".to_string();
+            return;
+        }
+
+        let margin = 6.0_f32;
+        let shift_x = margin - min_x;
+        let shift_y = margin - min_y;
+        for footprint in &mut self.pcb_ui.board.footprints {
+            footprint.position.x += shift_x;
+            footprint.position.y += shift_y;
+        }
+        for track in &mut self.pcb_ui.board.tracks {
+            track.start.x += shift_x;
+            track.start.y += shift_y;
+            track.end.x += shift_x;
+            track.end.y += shift_y;
+        }
+        for via in &mut self.pcb_ui.board.vias {
+            via.position.x += shift_x;
+            via.position.y += shift_y;
+        }
+
+        let width = (max_x - min_x + margin * 2.0).max(25.0);
+        let height = (max_y - min_y + margin * 2.0).max(20.0);
+        self.pcb_ui.board.outline = BoardOutline::rectangular(width, height);
+        self.refresh_pcb_analysis_from_current();
+        self.status = format!("Fit PCB board to {:.1} x {:.1} mm.", width, height);
+    }
+
+    pub(crate) fn route_pcb_ratsnest(&mut self) {
+        self.ensure_pcb_synced();
+        let Some(cad) = self.pcb_ui.cad.clone() else {
+            self.status = "Update PCB before routing ratsnest.".to_string();
+            return;
+        };
+        let footprint_by_id = self
+            .pcb_ui
+            .board
+            .footprints
+            .iter()
+            .map(|footprint| (footprint.id, footprint.position))
+            .collect::<HashMap<_, _>>();
+        let mut next_id = self
+            .pcb_ui
+            .board
+            .tracks
+            .iter()
+            .map(|track| track.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut added = 0usize;
+        for ratsnest in self.pcb_ui.board.ratsnest_edges(&cad.nets) {
+            if self
+                .pcb_ui
+                .board
+                .tracks
+                .iter()
+                .any(|track| track.net_id == ratsnest.net_id)
+            {
+                continue;
+            }
+            let (Some(start), Some(end)) = (
+                footprint_by_id.get(&ratsnest.from_footprint_id).copied(),
+                footprint_by_id.get(&ratsnest.to_footprint_id).copied(),
+            ) else {
+                continue;
+            };
+            self.pcb_ui.board.tracks.push(TrackSegment {
+                id: next_id,
+                net_id: ratsnest.net_id,
+                layer: BoardLayer::FrontCopper,
+                start,
+                end,
+                width_mm: self.pcb_ui.board.design_rules.min_track_width_mm.max(0.25),
+            });
+            next_id += 1;
+            added += 1;
+        }
+        self.refresh_pcb_analysis(&cad);
+        self.pcb_ui.cad = Some(cad);
+        self.status = if added == 0 {
+            "No unrouted ratsnest edges needed a new track.".to_string()
+        } else {
+            format!("Added {added} straight PCB track(s) from ratsnest.")
+        };
+    }
+
+    pub(crate) fn export_pcb_fabrication_files(&mut self) {
+        self.ensure_pcb_synced();
+        let Some(mut cad) = self.pcb_ui.cad.clone() else {
+            self.status = "Update PCB before fabrication export.".to_string();
+            return;
+        };
+        cad.board = Some(self.pcb_ui.board.clone());
+        let writes = [
+            (
+                "cluster_pcb_F_Cu.gbr",
+                crate::export::gerber::gerber_for_layer(
+                    &self.pcb_ui.board,
+                    BoardLayer::FrontCopper,
+                ),
+            ),
+            (
+                "cluster_pcb_B_Cu.gbr",
+                crate::export::gerber::gerber_for_layer(&self.pcb_ui.board, BoardLayer::BackCopper),
+            ),
+            (
+                "cluster_pcb_Edge_Cuts.gbr",
+                crate::export::gerber::gerber_for_layer(&self.pcb_ui.board, BoardLayer::EdgeCuts),
+            ),
+            (
+                "cluster_pcb.drl",
+                crate::export::gerber::excellon_drill(&self.pcb_ui.board),
+            ),
+            ("cluster_pcb_bom.csv", crate::export::gerber::bom_csv(&cad)),
+            ("cluster_pcb_cpl.csv", crate::export::gerber::cpl_csv(&cad)),
+        ];
+        for (path, contents) in writes {
+            if let Err(error) = fs::write(path, contents) {
+                self.status = format!("PCB export failed at {path}: {error}");
+                return;
+            }
+        }
+        self.status =
+            "Exported PCB Gerber, drill, BOM, and CPL files in the project folder.".to_string();
+    }
+
+    pub(crate) fn save_project_folder(&mut self) {
+        match self.save_project_folder_to("project.cluster") {
+            Ok(()) => {
+                self.history_state.dirty = false;
+                self.last_autorecover_revision = self.circuit_revision;
+                self.status =
+                    "Saved project.cluster with schematic, PCB, and CAD data.".to_string();
+            }
+            Err(error) => {
+                self.status = format!("Project save failed: {error}");
+            }
+        }
+    }
+
+    pub(crate) fn save_project_folder_to(&mut self, root: impl AsRef<Path>) -> Result<(), String> {
+        self.save_current_page();
+        self.ensure_pcb_synced();
+        let layout = ProjectFolderLayout::new(root.as_ref());
+        layout.create_dirs()?;
+
+        let mut cad = if let Some(cad) = self.pcb_ui.cad.clone() {
+            cad
+        } else {
+            let netlist = self.current_netlist();
+            CadProjectData::from_schematic(&self.components, &netlist)
+        };
+        cad.board = Some(self.pcb_ui.board.clone());
+        cad.properties.insert(
+            "document_revision".to_string(),
+            self.circuit_revision.to_string(),
+        );
+
+        let schematic_json = serde_json::to_string_pretty(&SavedCircuit::from_app(self))
+            .map_err(|error| error.to_string())?;
+        let board_json =
+            serde_json::to_string_pretty(&self.pcb_ui.board).map_err(|error| error.to_string())?;
+        let project_json = serde_json::to_string_pretty(&cad).map_err(|error| error.to_string())?;
+
+        write_with_backup_path(&layout.schematic_json, &schematic_json)?;
+        write_with_backup_path(&layout.board_json, &board_json)?;
+        write_with_backup_path(&layout.project_json, &project_json)?;
+        Ok(())
+    }
+
+    fn ensure_pcb_synced(&mut self) {
+        if self.pcb_ui.cad.is_none()
+            || self.pcb_ui.last_sync_revision != self.circuit_revision
+            || self.dirty_flags.pcb_sync_dirty
+        {
+            self.update_pcb_from_schematic();
+        }
+    }
+
+    fn refresh_pcb_analysis_from_current(&mut self) {
+        if let Some(cad) = self.pcb_ui.cad.clone() {
+            self.refresh_pcb_analysis(&cad);
+            self.pcb_ui.cad = Some(cad);
+        }
+    }
+
+    fn refresh_pcb_analysis(&mut self, cad: &CadProjectData) {
+        self.pcb_ui.ratsnest_count = self.unrouted_pcb_ratsnest(cad).len();
+        self.pcb_ui.drc = run_drc_with_nets(&self.pcb_ui.board, &cad.nets);
+    }
+
+    fn unrouted_pcb_ratsnest(&self, cad: &CadProjectData) -> Vec<crate::pcb::board::RatsnestEdge> {
+        self.pcb_ui
+            .board
+            .ratsnest_edges(&cad.nets)
+            .into_iter()
+            .filter(|edge| {
+                !self
+                    .pcb_ui
+                    .board
+                    .tracks
+                    .iter()
+                    .any(|track| track.net_id == edge.net_id)
+                    && !self
+                        .pcb_ui
+                        .board
+                        .vias
+                        .iter()
+                        .any(|via| via.net_id == edge.net_id)
+            })
+            .collect()
+    }
+
+    pub(crate) fn pcb_dock_summary(&self) -> PcbDockSummary {
+        let drc_errors = self
+            .pcb_ui
+            .drc
+            .iter()
+            .filter(|violation| violation.severity == DrcSeverity::Error)
+            .count();
+        let drc_warnings = self
+            .pcb_ui
+            .drc
+            .iter()
+            .filter(|violation| violation.severity == DrcSeverity::Warning)
+            .count();
+        PcbDockSummary {
+            footprint_count: self.pcb_ui.board.footprints.len(),
+            unplaced_count: self
+                .pcb_ui
+                .board
+                .footprints
+                .iter()
+                .filter(|footprint| !footprint.placed)
+                .count(),
+            ratsnest_count: self.pcb_ui.ratsnest_count,
+            drc_errors,
+            drc_warnings,
+            dirty: self.dirty_flags.pcb_sync_dirty
+                || self.pcb_ui.last_sync_revision != self.circuit_revision,
+            footprints: self
+                .pcb_ui
+                .board
+                .footprints
+                .iter()
+                .map(|footprint| {
+                    let placed = if footprint.placed {
+                        "placed"
+                    } else {
+                        "unplaced"
+                    };
+                    format!(
+                        "{} {} ({:.1},{:.1})",
+                        footprint.reference, placed, footprint.position.x, footprint.position.y
+                    )
+                })
+                .collect(),
+            ratsnest: self
+                .pcb_ui
+                .cad
+                .as_ref()
+                .map(|cad| {
+                    self.unrouted_pcb_ratsnest(cad)
+                        .into_iter()
+                        .map(|edge| {
+                            format!(
+                                "N{}: F{} -> F{}",
+                                edge.net_id, edge.from_footprint_id, edge.to_footprint_id
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            drc: self
+                .pcb_ui
+                .drc
+                .iter()
+                .map(|violation| format!("{:?}: {}", violation.severity, violation.title))
+                .collect(),
+            preview: self.pcb_preview_data(),
+        }
+    }
+
+    fn pcb_preview_data(&self) -> PcbPreviewData {
+        let (width_mm, height_mm) = pcb_outline_size(&self.pcb_ui.board.outline);
+        let footprint_positions = self
+            .pcb_ui
+            .board
+            .footprints
+            .iter()
+            .map(|footprint| (footprint.id, footprint.position))
+            .collect::<HashMap<_, _>>();
+        let ratsnest = self
+            .pcb_ui
+            .cad
+            .as_ref()
+            .map(|cad| {
+                self.unrouted_pcb_ratsnest(cad)
+                    .into_iter()
+                    .filter_map(|edge| {
+                        let start = footprint_positions.get(&edge.from_footprint_id)?;
+                        let end = footprint_positions.get(&edge.to_footprint_id)?;
+                        Some(PcbPreviewRatsnest {
+                            start_x_mm: start.x,
+                            start_y_mm: start.y,
+                            end_x_mm: end.x,
+                            end_y_mm: end.y,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        PcbPreviewData {
+            width_mm,
+            height_mm,
+            footprints: self
+                .pcb_ui
+                .board
+                .footprints
+                .iter()
+                .map(|footprint| PcbPreviewFootprint {
+                    reference: footprint.reference.clone(),
+                    x_mm: footprint.position.x,
+                    y_mm: footprint.position.y,
+                    placed: footprint.placed,
+                })
+                .collect(),
+            tracks: self
+                .pcb_ui
+                .board
+                .tracks
+                .iter()
+                .map(|track| PcbPreviewTrack {
+                    start_x_mm: track.start.x,
+                    start_y_mm: track.start.y,
+                    end_x_mm: track.end.x,
+                    end_y_mm: track.end.y,
+                    front_layer: track.layer == BoardLayer::FrontCopper,
+                })
+                .collect(),
+            ratsnest,
+        }
     }
 
     pub(crate) fn pin_pos(&self, component_id: u64, label: &str) -> Option<Pos2> {
@@ -1193,6 +1714,40 @@ impl crate::CircuitApp {
         }
         pages
     }
+}
+
+fn i2c_mapping_for_kind(kind: ComponentKind) -> Option<(&'static str, &'static str, &'static str)> {
+    match kind {
+        ComponentKind::Esp32 => Some(("GPIO21 SDA", "GPIO22 SCL", "3V3")),
+        ComponentKind::Esp32S3 => Some(("GPIO2 SDA", "GPIO3 SCL", "3V3")),
+        ComponentKind::Esp32C3 => Some(("GPIO1 SDA", "GPIO2 SCL", "3V3")),
+        ComponentKind::ArduinoUno => Some(("A4 SDA", "A5 SCL", "5V")),
+        ComponentKind::RaspberryPiPico => Some(("GP4 SDA", "GP5 SCL", "3V3")),
+        ComponentKind::Stm32BluePill => Some(("PB7 SDA", "PB6 SCL", "3V3")),
+        ComponentKind::Stm32Nucleo64 => Some(("D14 PB9 SDA", "D15 PB8 SCL", "3V3")),
+        _ => None,
+    }
+}
+
+fn pcb_outline_size(outline: &BoardOutline) -> (f32, f32) {
+    let max_x = outline
+        .points
+        .iter()
+        .map(|point| point.x)
+        .fold(0.0, f32::max);
+    let max_y = outline
+        .points
+        .iter()
+        .map(|point| point.y)
+        .fold(0.0, f32::max);
+    (max_x, max_y)
+}
+
+fn write_with_backup_path(path: &Path, content: &str) -> Result<(), String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| format!("Path is not valid UTF-8: {}", path.display()))?;
+    write_with_backup(path, content)
 }
 
 // ── SavedCircuit serialization helpers ──────────────────────────────────────

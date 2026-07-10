@@ -309,6 +309,7 @@ impl ErcRule {
 pub(crate) enum ErcAutoFix {
     AddLedSeriesResistor { component_id: u64 },
     AddI2cPullups { component_id: u64 },
+    AddRelayFlybackDiode { component_id: u64 },
     AddGpioDriverNote { component_id: u64 },
     AddLevelShifterNote { component_id: u64 },
 }
@@ -353,6 +354,7 @@ impl ErcViolation {
                 Some(ErcAutoFix::AddLedSeriesResistor { component_id })
             }
             ErcRule::I2cPullupMissing => Some(ErcAutoFix::AddI2cPullups { component_id }),
+            ErcRule::RelayFlybackMissing => Some(ErcAutoFix::AddRelayFlybackDiode { component_id }),
             ErcRule::GpioDirectLoad => Some(ErcAutoFix::AddGpioDriverNote { component_id }),
             ErcRule::GpioOvervoltage5v | ErcRule::Rail5vTo3v3 | ErcRule::PowerRailConflict => {
                 Some(ErcAutoFix::AddLevelShifterNote { component_id })

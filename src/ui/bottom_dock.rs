@@ -4,7 +4,7 @@ use crate::engine::validation::{ErcSeverity, ErcViolation};
 use crate::ui::theme;
 use crate::ui::validation_panel::{ValidationPanelAction, render_validation_panel};
 use eframe::egui;
-use egui::Color32;
+use egui::{Color32, Pos2, Rect, Stroke, StrokeKind, Vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PageTabsAction {
@@ -18,7 +18,56 @@ pub(crate) enum BottomDockTab {
     Erc,
     Simulation,
     Breadboard,
+    Pcb,
     Logs,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PcbDockSummary {
+    pub(crate) footprint_count: usize,
+    pub(crate) unplaced_count: usize,
+    pub(crate) ratsnest_count: usize,
+    pub(crate) drc_errors: usize,
+    pub(crate) drc_warnings: usize,
+    pub(crate) dirty: bool,
+    pub(crate) footprints: Vec<String>,
+    pub(crate) ratsnest: Vec<String>,
+    pub(crate) drc: Vec<String>,
+    pub(crate) preview: PcbPreviewData,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PcbPreviewData {
+    pub(crate) width_mm: f32,
+    pub(crate) height_mm: f32,
+    pub(crate) footprints: Vec<PcbPreviewFootprint>,
+    pub(crate) tracks: Vec<PcbPreviewTrack>,
+    pub(crate) ratsnest: Vec<PcbPreviewRatsnest>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PcbPreviewFootprint {
+    pub(crate) reference: String,
+    pub(crate) x_mm: f32,
+    pub(crate) y_mm: f32,
+    pub(crate) placed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PcbPreviewTrack {
+    pub(crate) start_x_mm: f32,
+    pub(crate) start_y_mm: f32,
+    pub(crate) end_x_mm: f32,
+    pub(crate) end_y_mm: f32,
+    pub(crate) front_layer: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PcbPreviewRatsnest {
+    pub(crate) start_x_mm: f32,
+    pub(crate) start_y_mm: f32,
+    pub(crate) end_x_mm: f32,
+    pub(crate) end_y_mm: f32,
 }
 
 pub(crate) struct BottomDockModel<'a> {
@@ -27,6 +76,7 @@ pub(crate) struct BottomDockModel<'a> {
     pub(crate) has_components: bool,
     pub(crate) simulation: &'a Simulation,
     pub(crate) breadboard_enabled: bool,
+    pub(crate) pcb: &'a PcbDockSummary,
     pub(crate) status: &'a str,
 }
 
@@ -34,6 +84,12 @@ pub(crate) enum BottomDockAction {
     SetTab(BottomDockTab),
     Validation(ValidationPanelAction),
     OpenBreadboard,
+    UpdatePcb,
+    AutoPlacePcb,
+    FitPcbBoard,
+    RoutePcbRatsnest,
+    ExportPcbFabrication,
+    SavePcbProject,
 }
 
 pub(crate) fn render_page_tabs(
@@ -84,6 +140,7 @@ pub(crate) fn render_bottom_dock(
                 (BottomDockTab::Erc, erc_tab_label(model.violations)),
                 (BottomDockTab::Simulation, "Simulation".to_string()),
                 (BottomDockTab::Breadboard, "Breadboard".to_string()),
+                (BottomDockTab::Pcb, pcb_tab_label(model.pcb)),
                 (BottomDockTab::Logs, "Logs".to_string()),
             ] {
                 if theme::tool_button(ui, &label, model.active_tab == tab).clicked() {
@@ -117,6 +174,7 @@ pub(crate) fn render_bottom_dock(
                     }
                 });
             }
+            BottomDockTab::Pcb => render_pcb_tab(ui, model.pcb, &mut action),
             BottomDockTab::Logs => {
                 ui.label(
                     egui::RichText::new(if model.status.is_empty() {
@@ -131,6 +189,194 @@ pub(crate) fn render_bottom_dock(
         }
     });
     action
+}
+
+fn pcb_tab_label(summary: &PcbDockSummary) -> String {
+    if summary.dirty {
+        "PCB *".to_string()
+    } else if summary.ratsnest_count > 0 {
+        format!("PCB ({})", summary.ratsnest_count)
+    } else {
+        "PCB".to_string()
+    }
+}
+
+fn render_pcb_tab(
+    ui: &mut egui::Ui,
+    summary: &PcbDockSummary,
+    action: &mut Option<BottomDockAction>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        if ui.small_button("Update PCB").clicked() {
+            *action = Some(BottomDockAction::UpdatePcb);
+        }
+        if ui.small_button("Auto-place").clicked() {
+            *action = Some(BottomDockAction::AutoPlacePcb);
+        }
+        if ui.small_button("Fit board").clicked() {
+            *action = Some(BottomDockAction::FitPcbBoard);
+        }
+        if ui.small_button("Route ratsnest").clicked() {
+            *action = Some(BottomDockAction::RoutePcbRatsnest);
+        }
+        if ui.small_button("Save project").clicked() {
+            *action = Some(BottomDockAction::SavePcbProject);
+        }
+        if ui.small_button("Export fab").clicked() {
+            *action = Some(BottomDockAction::ExportPcbFabrication);
+        }
+        metric(ui, "Footprints", &summary.footprint_count.to_string());
+        metric(ui, "Unplaced", &summary.unplaced_count.to_string());
+        metric(ui, "Ratsnest", &summary.ratsnest_count.to_string());
+        metric(ui, "DRC errors", &summary.drc_errors.to_string());
+        metric(ui, "Warnings", &summary.drc_warnings.to_string());
+    });
+    ui.add_space(4.0);
+    let message = if summary.dirty {
+        "Schematic changed. Update PCB to refresh footprints, ratsnest, and DRC."
+    } else if summary.footprint_count == 0 {
+        "No PCB footprints yet. Add supported schematic parts, then update PCB."
+    } else if summary.ratsnest_count > 0 {
+        "Footprints are synced. Ratsnest shows connections that still need routing."
+    } else {
+        "PCB data is synced with the current schematic."
+    };
+    ui.label(
+        egui::RichText::new(message)
+            .size(11.0)
+            .color(theme::TEXT_SECONDARY),
+    );
+    ui.add_space(4.0);
+    render_pcb_preview(ui, &summary.preview);
+    ui.add_space(4.0);
+    ui.columns(3, |columns| {
+        detail_list(&mut columns[0], "Footprints", &summary.footprints);
+        detail_list(&mut columns[1], "Ratsnest", &summary.ratsnest);
+        detail_list(&mut columns[2], "DRC", &summary.drc);
+    });
+}
+
+fn render_pcb_preview(ui: &mut egui::Ui, preview: &PcbPreviewData) {
+    let desired = Vec2::new(ui.available_width().max(120.0), 130.0);
+    let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, Color32::from_rgb(18, 24, 31));
+    painter.rect_stroke(
+        rect,
+        4.0,
+        Stroke::new(1.0, Color32::from_rgb(50, 61, 74)),
+        StrokeKind::Inside,
+    );
+
+    if preview.width_mm <= 0.1 || preview.height_mm <= 0.1 {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "No PCB preview",
+            egui::FontId::proportional(11.0),
+            theme::TEXT_MUTED,
+        );
+        return;
+    }
+
+    let margin = 10.0;
+    let board_scale = ((rect.width() - margin * 2.0) / preview.width_mm)
+        .min((rect.height() - margin * 2.0) / preview.height_mm)
+        .max(0.1);
+    let board_size = Vec2::new(
+        preview.width_mm * board_scale,
+        preview.height_mm * board_scale,
+    );
+    let board_rect = Rect::from_center_size(rect.center(), board_size);
+    painter.rect_filled(board_rect, 2.0, Color32::from_rgb(24, 70, 55));
+    painter.rect_stroke(
+        board_rect,
+        2.0,
+        Stroke::new(1.3, Color32::from_rgb(120, 170, 145)),
+        StrokeKind::Inside,
+    );
+
+    let map = |x_mm: f32, y_mm: f32| -> Pos2 {
+        Pos2::new(
+            board_rect.left() + x_mm * board_scale,
+            board_rect.top() + y_mm * board_scale,
+        )
+    };
+
+    for track in &preview.tracks {
+        let color = if track.front_layer {
+            Color32::from_rgb(220, 115, 85)
+        } else {
+            Color32::from_rgb(95, 155, 225)
+        };
+        painter.line_segment(
+            [
+                map(track.start_x_mm, track.start_y_mm),
+                map(track.end_x_mm, track.end_y_mm),
+            ],
+            Stroke::new(2.0, color),
+        );
+    }
+
+    for ratsnest in &preview.ratsnest {
+        painter.line_segment(
+            [
+                map(ratsnest.start_x_mm, ratsnest.start_y_mm),
+                map(ratsnest.end_x_mm, ratsnest.end_y_mm),
+            ],
+            Stroke::new(1.0, Color32::from_rgb(210, 205, 95)),
+        );
+    }
+
+    for footprint in &preview.footprints {
+        let center = map(footprint.x_mm, footprint.y_mm);
+        let size = Vec2::splat(if footprint.placed { 8.0 } else { 6.0 });
+        let fp_rect = Rect::from_center_size(center, size);
+        let color = if footprint.placed {
+            Color32::from_rgb(230, 230, 210)
+        } else {
+            Color32::from_rgb(125, 132, 142)
+        };
+        painter.rect_filled(fp_rect, 1.0, color);
+        painter.text(
+            center + Vec2::new(0.0, 8.0),
+            egui::Align2::CENTER_TOP,
+            &footprint.reference,
+            egui::FontId::proportional(8.5),
+            Color32::from_rgb(220, 225, 230),
+        );
+    }
+}
+
+fn detail_list(ui: &mut egui::Ui, title: &str, rows: &[String]) {
+    ui.label(
+        egui::RichText::new(title)
+            .size(10.5)
+            .strong()
+            .color(theme::TEXT_SECONDARY),
+    );
+    if rows.is_empty() {
+        ui.label(
+            egui::RichText::new("None")
+                .size(10.0)
+                .color(theme::TEXT_MUTED),
+        );
+        return;
+    }
+    for row in rows.iter().take(5) {
+        ui.label(
+            egui::RichText::new(row)
+                .size(10.0)
+                .color(theme::TEXT_SECONDARY),
+        );
+    }
+    if rows.len() > 5 {
+        ui.label(
+            egui::RichText::new(format!("+{} more", rows.len() - 5))
+                .size(10.0)
+                .color(theme::TEXT_MUTED),
+        );
+    }
 }
 
 fn render_simulation_tab(ui: &mut egui::Ui, simulation: &Simulation) {

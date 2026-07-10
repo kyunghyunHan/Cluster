@@ -6,6 +6,7 @@ use crate::pcb::layer::{BoardLayer, default_two_layer_stackup};
 use crate::pcb::track::TrackSegment;
 use crate::pcb::via::Via;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 pub(crate) const BOARD_SCHEMA_VERSION: u32 = 1;
 
@@ -148,6 +149,35 @@ impl Board {
     }
 
     pub(crate) fn update_from_schematic(&mut self, symbols: &[SymbolInstance], nets: &[CadNet]) {
+        let symbol_ids = symbols
+            .iter()
+            .map(|symbol| symbol.instance_id)
+            .collect::<HashSet<_>>();
+        self.footprints.retain(|footprint| {
+            footprint
+                .symbol_instance_id
+                .is_none_or(|symbol_id| symbol_ids.contains(&symbol_id))
+        });
+
+        let symbol_by_id = symbols
+            .iter()
+            .map(|symbol| (symbol.instance_id, symbol))
+            .collect::<HashMap<_, _>>();
+        for footprint in &mut self.footprints {
+            let Some(symbol_id) = footprint.symbol_instance_id else {
+                continue;
+            };
+            let Some(symbol) = symbol_by_id.get(&symbol_id) else {
+                continue;
+            };
+            if let Some(footprint_id) = &symbol.footprint_link {
+                footprint.reference = symbol.reference.clone();
+                footprint.footprint_id = footprint_id.clone();
+                footprint.position = Point2::new(symbol.position.x * 0.1, symbol.position.y * 0.1);
+                footprint.rotation_deg = symbol.rotation_deg as f32;
+            }
+        }
+
         let mut next_id = self
             .footprints
             .iter()
@@ -288,5 +318,48 @@ mod tests {
         assert_eq!(board.footprints.len(), 2);
         assert!(board.footprints.iter().all(|footprint| !footprint.placed));
         assert_eq!(board.ratsnest_edges(&nets).len(), 1);
+    }
+
+    #[test]
+    fn update_from_schematic_prunes_removed_and_updates_existing_footprints() {
+        use crate::model::cad::SymbolInstance;
+
+        let mut board = Board::new_two_layer(50.0, 30.0);
+        let first = SymbolInstance {
+            instance_id: 1,
+            symbol_id: "Device:R".to_string(),
+            reference: "R1".to_string(),
+            value: "1k".to_string(),
+            position: Point2::new(10.0, 10.0),
+            rotation_deg: 0,
+            fields: Default::default(),
+            footprint_link: Some("R_THT_Axial".to_string()),
+        };
+        let second = SymbolInstance {
+            instance_id: 2,
+            symbol_id: "Device:LED".to_string(),
+            reference: "LED1".to_string(),
+            value: "red".to_string(),
+            position: Point2::new(30.0, 10.0),
+            rotation_deg: 0,
+            fields: Default::default(),
+            footprint_link: Some("LED_THT_5mm".to_string()),
+        };
+
+        board.update_from_schematic(&[first.clone(), second], &[]);
+        assert_eq!(board.footprints.len(), 2);
+
+        let mut moved = first;
+        moved.reference = "R10".to_string();
+        moved.position = Point2::new(80.0, 50.0);
+        moved.rotation_deg = 90;
+        board.update_from_schematic(&[moved], &[]);
+
+        assert_eq!(board.footprints.len(), 1);
+        let footprint = &board.footprints[0];
+        assert_eq!(footprint.symbol_instance_id, Some(1));
+        assert_eq!(footprint.reference, "R10");
+        assert_eq!(footprint.position, Point2::new(8.0, 5.0));
+        assert_eq!(footprint.rotation_deg, 90.0);
     }
 }
