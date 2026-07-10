@@ -109,6 +109,7 @@ pub(crate) struct PcbUiState {
     pub(crate) drc: Vec<crate::pcb::drc::DrcViolation>,
     pub(crate) ratsnest_count: usize,
     pub(crate) last_sync_revision: u64,
+    pub(crate) selected_drc_index: Option<usize>,
 }
 
 impl Default for PcbUiState {
@@ -119,6 +120,7 @@ impl Default for PcbUiState {
             drc: Vec::new(),
             ratsnest_count: 0,
             last_sync_revision: 0,
+            selected_drc_index: None,
         }
     }
 }
@@ -1235,8 +1237,16 @@ impl eframe::App for CircuitApp {
                             self.route_pcb_ratsnest();
                             self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
                         }
+                        BottomDockAction::SelectPcbDrc(index) => {
+                            self.select_pcb_drc_violation(index);
+                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                        }
                         BottomDockAction::SavePcbProject => {
                             self.save_project_folder();
+                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                        }
+                        BottomDockAction::LoadPcbProject => {
+                            self.load_project_folder();
                             self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
                         }
                         BottomDockAction::ExportPcbFabrication => {
@@ -12474,6 +12484,92 @@ mod tests {
         assert!(board_json.contains("\"tracks\""));
         let project_json = fs::read_to_string(root.join("project.json")).unwrap();
         assert!(project_json.contains("\"document_revision\""));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pcb_drc_selection_updates_summary_preview_and_schematic_focus() {
+        let mut app = CircuitApp::new();
+        app.load_led_demo();
+        app.update_pcb_from_schematic();
+        let footprint = app.pcb_ui.board.footprints.first().cloned().unwrap();
+        app.pcb_ui.board.outline = crate::pcb::board::BoardOutline::rectangular(1.0, 1.0);
+        let cad = app.pcb_ui.cad.clone().unwrap();
+        app.pcb_ui.drc = crate::pcb::drc::run_drc_with_nets(&app.pcb_ui.board, &cad.nets);
+        let drc_index = app
+            .pcb_ui
+            .drc
+            .iter()
+            .position(|violation| violation.object_id == Some(footprint.id))
+            .expect("footprint outside board should be tied to the footprint object");
+
+        app.select_pcb_drc_violation(drc_index);
+        let summary = app.pcb_dock_summary();
+
+        assert!(summary.drc.iter().any(|row| row.selected));
+        assert!(
+            summary
+                .preview
+                .diagnostics
+                .iter()
+                .any(|marker| marker.selected)
+        );
+        assert_eq!(
+            app.selected,
+            footprint
+                .symbol_instance_id
+                .map(crate::app::Selection::Component)
+        );
+        assert!(app.status.contains("Selected PCB DRC"));
+    }
+
+    #[test]
+    fn pcb_fabrication_export_is_blocked_by_drc_errors() {
+        let mut app = CircuitApp::new();
+        app.load_led_demo();
+        app.update_pcb_from_schematic();
+        app.pcb_ui
+            .board
+            .tracks
+            .push(crate::pcb::track::TrackSegment {
+                id: 999,
+                net_id: 1,
+                layer: crate::pcb::layer::BoardLayer::FrontCopper,
+                start: crate::model::cad::Point2::new(0.01, 0.01),
+                end: crate::model::cad::Point2::new(4.0, 0.01),
+                width_mm: 0.01,
+            });
+        let cad = app.pcb_ui.cad.clone().unwrap();
+        app.pcb_ui.drc = crate::pcb::drc::run_drc_with_nets(&app.pcb_ui.board, &cad.nets);
+
+        app.export_pcb_fabrication_files();
+
+        assert!(app.status.contains("export blocked"), "{}", app.status);
+    }
+
+    #[test]
+    fn project_folder_load_restores_schematic_board_and_pcb_analysis() {
+        let root =
+            std::env::temp_dir().join(format!("cluster-project-load-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+
+        let mut saved_app = CircuitApp::new();
+        saved_app.load_led_demo();
+        saved_app.update_pcb_from_schematic();
+        saved_app.auto_place_pcb_footprints();
+        saved_app.route_pcb_ratsnest();
+        saved_app.save_project_folder_to(&root).unwrap();
+        let saved_component_count = saved_app.components.len();
+        let saved_track_count = saved_app.pcb_ui.board.tracks.len();
+
+        let mut loaded_app = CircuitApp::new();
+        loaded_app.load_project_folder_from(&root).unwrap();
+
+        assert_eq!(loaded_app.components.len(), saved_component_count);
+        assert_eq!(loaded_app.pcb_ui.board.tracks.len(), saved_track_count);
+        assert!(!loaded_app.pcb_dock_summary().dirty);
+        assert!(loaded_app.pcb_ui.cad.is_some());
 
         let _ = fs::remove_dir_all(&root);
     }

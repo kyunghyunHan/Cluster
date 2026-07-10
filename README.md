@@ -80,12 +80,14 @@ Cluster now has the first internal data model needed for PCB work:
 
 The bottom dock PCB tab can now run **Update PCB** from the current schematic,
 sync generated footprints, auto-place footprints, show a compact PCB preview
-with footprints/tracks/ratsnest lines, fit the board outline to placed content,
-add simple straight tracks from unrouted ratsnest edges, save a `project.cluster/`
-folder, export Gerber/Excellon/BOM/CPL fabrication files, and show DRC
-error/warning counts. This is still short of the full PCB editor; the intended
-MVP remains interactive footprint placement, routed-track editing, vias, two
-copper layers, and DRC navigation.
+with footprints/tracks/ratsnest lines, mark DRC locations in the preview, fit
+the board outline to placed content, add simple straight tracks from unrouted
+ratsnest edges, save/load a `project.cluster/` folder, export
+Gerber/Excellon/BOM/CPL fabrication files, and show selectable DRC
+error/warning rows. Fabrication export is blocked while PCB DRC errors remain.
+This is still short of the full PCB editor; the intended MVP remains
+interactive footprint placement, routed-track editing, vias, two copper layers,
+and richer DRC navigation.
 
 ### Validation (ERC)
 
@@ -166,9 +168,9 @@ does not infer application behavior for arbitrary modules.
 - Legacy files without endpoint metadata are migrated once on load: wire ends
   that land on pins become explicit `PinRef`s, while ambiguous mid-wire
   crossings stay unconnected and are reported in load notes.
-- The PCB dock can save a `project.cluster/` folder containing `schematic.json`,
-  `board.json`, and `project.json`; repeated saves use the same backup-safe
-  write path as normal circuit saves.
+- The PCB dock can save and load a `project.cluster/` folder containing
+  `schematic.json`, `board.json`, and `project.json`; repeated saves use the
+  same backup-safe write path as normal circuit saves.
 
 ---
 
@@ -292,13 +294,14 @@ mathematically impossible, such as an ideal-source conflict.
 - [x] Beginner ESP32/Arduino example gallery in the palette
 - [x] First Breadboard View wiring assistant for ESP32/Arduino I2C circuits, including missing-jumper auto-wire actions
 - [x] Phase 1 CAD model groundwork: SymbolInstance, Footprint, NetClass, Board, Track, Via, DRC, Gerber/Excellon scaffolding
-- [x] First PCB bottom dock workflow: Update PCB, generated footprints, preview, auto-place, board fit, ratsnest route helper, DRC summary, project save, fabrication export
+- [x] First PCB bottom dock workflow: Update PCB, generated footprints, preview with DRC markers, selectable DRC rows, auto-place, board fit, ratsnest route helper, DRC-gated fabrication export
 - [x] ERC auto-fix wiring for I2C pull-ups and relay flyback diodes
 - [ ] Stabilize schematic netlist for PCB: explicit junctions, no-connect markers, local/global net labels, multi-page net merge
 - [ ] Pin-type ERC: output-output conflict, power input not driven, unconnected input, floating net, MCU overvoltage, I2C/SPI/UART mismatch
 - [ ] PCB editor MVP: interactive footprint placement, manual track editing, vias, two-layer board
-- [ ] DRC panel with clickable track/pad/via/edge/silkscreen violations
-- [ ] Gerber RS-274X, Excellon drill, pick-and-place CSV, and strengthened BOM export
+- [ ] DRC panel with fuller clickable track/pad/via/edge/silkscreen navigation
+- [ ] Gerber RS-274X, Excellon drill, pick-and-place CSV, and further strengthened BOM export
+- [x] Project folder save/load for schematic, board, and CAD JSON
 - [ ] JSON/TOML library manager for symbols, footprints, and real parts
 - [ ] Full breadboard placement with editable physical jumpers, power rails, zoom, and pin highlighting
 - [ ] Guided tutorials with step-by-step wiring, code, simulation, and repair hints

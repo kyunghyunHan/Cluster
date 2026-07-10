@@ -1,15 +1,16 @@
 use crate::app::{AlignDir, Selection, Tool};
 use crate::engine::validation::ErcAutoFix;
 use crate::engine::{mna, netlist::build_circuit_netlist, simulation as simulation_engine};
-use crate::model::cad::CadProjectData;
+use crate::model::cad::{CadProjectData, Point2};
 use crate::model::*;
-use crate::pcb::board::BoardOutline;
+use crate::pcb::board::{Board, BoardOutline};
 use crate::pcb::drc::{DrcSeverity, run_drc_with_nets};
 use crate::pcb::layer::BoardLayer;
 use crate::pcb::track::TrackSegment;
 use crate::storage::save::{ProjectFolderLayout, write_with_backup};
 use crate::ui::bottom_dock::{
-    PcbDockSummary, PcbPreviewData, PcbPreviewFootprint, PcbPreviewRatsnest, PcbPreviewTrack,
+    PcbDockSummary, PcbDrcRow, PcbDrcSeverity, PcbPreviewData, PcbPreviewDiagnostic,
+    PcbPreviewFootprint, PcbPreviewRatsnest, PcbPreviewTrack,
 };
 use crate::ui::breadboard::BreadboardRoute;
 use egui::{Pos2, Rect, Vec2};
@@ -711,6 +712,7 @@ impl crate::CircuitApp {
         self.refresh_pcb_analysis(&cad);
         self.pcb_ui.cad = Some(cad);
         self.pcb_ui.last_sync_revision = self.circuit_revision;
+        self.pcb_ui.selected_drc_index = None;
         self.dirty_flags.pcb_sync_dirty = false;
 
         let summary = self.pcb_dock_summary();
@@ -871,6 +873,16 @@ impl crate::CircuitApp {
 
     pub(crate) fn export_pcb_fabrication_files(&mut self) {
         self.ensure_pcb_synced();
+        let drc_errors = self
+            .pcb_ui
+            .drc
+            .iter()
+            .filter(|violation| violation.severity == DrcSeverity::Error)
+            .count();
+        if drc_errors > 0 {
+            self.status = format!("PCB export blocked: fix {drc_errors} DRC error(s) first.");
+            return;
+        }
         let Some(mut cad) = self.pcb_ui.cad.clone() else {
             self.status = "Update PCB before fabrication export.".to_string();
             return;
@@ -923,6 +935,17 @@ impl crate::CircuitApp {
         }
     }
 
+    pub(crate) fn load_project_folder(&mut self) {
+        match self.load_project_folder_from("project.cluster") {
+            Ok(()) => {
+                self.status = "Loaded project.cluster schematic and PCB data.".to_string();
+            }
+            Err(error) => {
+                self.status = format!("Project load failed: {error}");
+            }
+        }
+    }
+
     pub(crate) fn save_project_folder_to(&mut self, root: impl AsRef<Path>) -> Result<(), String> {
         self.save_current_page();
         self.ensure_pcb_synced();
@@ -953,6 +976,93 @@ impl crate::CircuitApp {
         Ok(())
     }
 
+    pub(crate) fn load_project_folder_from(
+        &mut self,
+        root: impl AsRef<Path>,
+    ) -> Result<(), String> {
+        self.backup_dirty_work("project load");
+        let layout = ProjectFolderLayout::new(root.as_ref());
+        let schematic_json = fs::read_to_string(&layout.schematic_json)
+            .map_err(|error| format!("Read {}: {error}", layout.schematic_json.display()))?;
+        let board_json = fs::read_to_string(&layout.board_json)
+            .map_err(|error| format!("Read {}: {error}", layout.board_json.display()))?;
+        let project_json = fs::read_to_string(&layout.project_json)
+            .map_err(|error| format!("Read {}: {error}", layout.project_json.display()))?;
+
+        let saved = serde_json::from_str::<SavedCircuit>(&schematic_json)
+            .map_err(|error| format!("Parse schematic.json: {error}"))?;
+        let (snapshot, load_notes) = saved.into_snapshot()?;
+        let board = serde_json::from_str::<Board>(&board_json)
+            .map_err(|error| format!("Parse board.json: {error}"))?;
+        let mut cad = serde_json::from_str::<CadProjectData>(&project_json)
+            .map_err(|error| format!("Parse project.json: {error}"))?;
+        cad.board = Some(board.clone());
+
+        self.record_history();
+        self.restore_snapshot(snapshot);
+        self.pcb_ui.board = board;
+        self.pcb_ui.cad = Some(cad.clone());
+        self.pcb_ui.last_sync_revision = self.circuit_revision;
+        self.pcb_ui.selected_drc_index = None;
+        self.refresh_pcb_analysis(&cad);
+        self.history_state.dirty = false;
+        self.cached_simulation = None;
+        self.cached_netlist = None;
+        self.last_autorecover_revision = self.circuit_revision;
+        self.dirty_flags.geometry_dirty = false;
+        self.dirty_flags.connectivity_dirty = false;
+        self.dirty_flags.validation_dirty = false;
+        self.dirty_flags.simulation_dirty = true;
+        self.dirty_flags.pcb_sync_dirty = false;
+        self.pending_fit = true;
+        if !load_notes.is_empty() {
+            self.status = format!(
+                "Loaded project with {} schematic repair note(s).",
+                load_notes.len()
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn select_pcb_drc_violation(&mut self, index: usize) {
+        self.ensure_pcb_synced();
+        let Some(violation) = self.pcb_ui.drc.get(index).cloned() else {
+            self.status = format!("PCB DRC item {index} is no longer available.");
+            self.pcb_ui.selected_drc_index = None;
+            return;
+        };
+        self.pcb_ui.selected_drc_index = Some(index);
+        if let Some(object_id) = violation.object_id
+            && let Some(component_id) = self
+                .pcb_ui
+                .board
+                .footprints
+                .iter()
+                .find(|footprint| footprint.id == object_id)
+                .and_then(|footprint| footprint.symbol_instance_id)
+        {
+            self.selected = Some(Selection::Component(component_id));
+            if let Some(component) = self
+                .components
+                .iter()
+                .find(|component| component.id == component_id)
+            {
+                self.pan =
+                    self.canvas.rect.center().to_vec2() - component.pos.to_vec2() * self.zoom;
+            }
+            self.status = format!("Selected PCB DRC: {}.", violation.title);
+            return;
+        }
+        self.status = if let Some(location) = violation.location {
+            format!(
+                "Selected PCB DRC: {} at {:.1},{:.1} mm.",
+                violation.title, location.x, location.y
+            )
+        } else {
+            format!("Selected PCB DRC: {}.", violation.title)
+        };
+    }
+
     fn ensure_pcb_synced(&mut self) {
         if self.pcb_ui.cad.is_none()
             || self.pcb_ui.last_sync_revision != self.circuit_revision
@@ -972,6 +1082,13 @@ impl crate::CircuitApp {
     fn refresh_pcb_analysis(&mut self, cad: &CadProjectData) {
         self.pcb_ui.ratsnest_count = self.unrouted_pcb_ratsnest(cad).len();
         self.pcb_ui.drc = run_drc_with_nets(&self.pcb_ui.board, &cad.nets);
+        if self
+            .pcb_ui
+            .selected_drc_index
+            .is_some_and(|index| index >= self.pcb_ui.drc.len())
+        {
+            self.pcb_ui.selected_drc_index = None;
+        }
     }
 
     fn unrouted_pcb_ratsnest(&self, cad: &CadProjectData) -> Vec<crate::pcb::board::RatsnestEdge> {
@@ -1060,7 +1177,13 @@ impl crate::CircuitApp {
                 .pcb_ui
                 .drc
                 .iter()
-                .map(|violation| format!("{:?}: {}", violation.severity, violation.title))
+                .enumerate()
+                .map(|(index, violation)| PcbDrcRow {
+                    index,
+                    severity: pcb_drc_severity(violation.severity),
+                    title: violation.title.clone(),
+                    selected: self.pcb_ui.selected_drc_index == Some(index),
+                })
                 .collect(),
             preview: self.pcb_preview_data(),
         }
@@ -1124,7 +1247,56 @@ impl crate::CircuitApp {
                 })
                 .collect(),
             ratsnest,
+            diagnostics: self
+                .pcb_ui
+                .drc
+                .iter()
+                .enumerate()
+                .filter_map(|(index, violation)| {
+                    let point = self.pcb_drc_point(violation)?;
+                    Some(PcbPreviewDiagnostic {
+                        x_mm: point.x,
+                        y_mm: point.y,
+                        severity: pcb_drc_severity(violation.severity),
+                        selected: self.pcb_ui.selected_drc_index == Some(index),
+                    })
+                })
+                .collect(),
         }
+    }
+
+    fn pcb_drc_point(&self, violation: &crate::pcb::drc::DrcViolation) -> Option<Point2> {
+        if let Some(location) = violation.location {
+            return Some(location);
+        }
+        let object_id = violation.object_id?;
+        if let Some(footprint) = self
+            .pcb_ui
+            .board
+            .footprints
+            .iter()
+            .find(|footprint| footprint.id == object_id)
+        {
+            return Some(footprint.position);
+        }
+        if let Some(track) = self
+            .pcb_ui
+            .board
+            .tracks
+            .iter()
+            .find(|track| track.id == object_id)
+        {
+            return Some(Point2::new(
+                (track.start.x + track.end.x) * 0.5,
+                (track.start.y + track.end.y) * 0.5,
+            ));
+        }
+        self.pcb_ui
+            .board
+            .vias
+            .iter()
+            .find(|via| via.id == object_id)
+            .map(|via| via.position)
     }
 
     pub(crate) fn pin_pos(&self, component_id: u64, label: &str) -> Option<Pos2> {
@@ -1741,6 +1913,13 @@ fn pcb_outline_size(outline: &BoardOutline) -> (f32, f32) {
         .map(|point| point.y)
         .fold(0.0, f32::max);
     (max_x, max_y)
+}
+
+fn pcb_drc_severity(severity: DrcSeverity) -> PcbDrcSeverity {
+    match severity {
+        DrcSeverity::Error => PcbDrcSeverity::Error,
+        DrcSeverity::Warning => PcbDrcSeverity::Warning,
+    }
 }
 
 fn write_with_backup_path(path: &Path, content: &str) -> Result<(), String> {

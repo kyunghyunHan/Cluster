@@ -32,7 +32,7 @@ pub(crate) struct PcbDockSummary {
     pub(crate) dirty: bool,
     pub(crate) footprints: Vec<String>,
     pub(crate) ratsnest: Vec<String>,
-    pub(crate) drc: Vec<String>,
+    pub(crate) drc: Vec<PcbDrcRow>,
     pub(crate) preview: PcbPreviewData,
 }
 
@@ -43,6 +43,21 @@ pub(crate) struct PcbPreviewData {
     pub(crate) footprints: Vec<PcbPreviewFootprint>,
     pub(crate) tracks: Vec<PcbPreviewTrack>,
     pub(crate) ratsnest: Vec<PcbPreviewRatsnest>,
+    pub(crate) diagnostics: Vec<PcbPreviewDiagnostic>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PcbDrcRow {
+    pub(crate) index: usize,
+    pub(crate) severity: PcbDrcSeverity,
+    pub(crate) title: String,
+    pub(crate) selected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PcbDrcSeverity {
+    Error,
+    Warning,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +85,14 @@ pub(crate) struct PcbPreviewRatsnest {
     pub(crate) end_y_mm: f32,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PcbPreviewDiagnostic {
+    pub(crate) x_mm: f32,
+    pub(crate) y_mm: f32,
+    pub(crate) severity: PcbDrcSeverity,
+    pub(crate) selected: bool,
+}
+
 pub(crate) struct BottomDockModel<'a> {
     pub(crate) active_tab: BottomDockTab,
     pub(crate) violations: &'a [ErcViolation],
@@ -88,8 +111,10 @@ pub(crate) enum BottomDockAction {
     AutoPlacePcb,
     FitPcbBoard,
     RoutePcbRatsnest,
+    SelectPcbDrc(usize),
     ExportPcbFabrication,
     SavePcbProject,
+    LoadPcbProject,
 }
 
 pub(crate) fn render_page_tabs(
@@ -222,6 +247,9 @@ fn render_pcb_tab(
         if ui.small_button("Save project").clicked() {
             *action = Some(BottomDockAction::SavePcbProject);
         }
+        if ui.small_button("Load project").clicked() {
+            *action = Some(BottomDockAction::LoadPcbProject);
+        }
         if ui.small_button("Export fab").clicked() {
             *action = Some(BottomDockAction::ExportPcbFabrication);
         }
@@ -252,7 +280,7 @@ fn render_pcb_tab(
     ui.columns(3, |columns| {
         detail_list(&mut columns[0], "Footprints", &summary.footprints);
         detail_list(&mut columns[1], "Ratsnest", &summary.ratsnest);
-        detail_list(&mut columns[2], "DRC", &summary.drc);
+        drc_list(&mut columns[2], &summary.drc, action);
     });
 }
 
@@ -328,6 +356,27 @@ fn render_pcb_preview(ui: &mut egui::Ui, preview: &PcbPreviewData) {
         );
     }
 
+    for diagnostic in &preview.diagnostics {
+        let center = map(diagnostic.x_mm, diagnostic.y_mm);
+        let color = match diagnostic.severity {
+            PcbDrcSeverity::Error => Color32::from_rgb(245, 80, 80),
+            PcbDrcSeverity::Warning => Color32::from_rgb(245, 190, 70),
+        };
+        let radius = if diagnostic.selected { 6.5 } else { 4.5 };
+        painter.circle_stroke(center, radius, Stroke::new(1.8, color));
+        painter.line_segment(
+            [center - Vec2::splat(radius), center + Vec2::splat(radius)],
+            Stroke::new(1.0, color),
+        );
+        painter.line_segment(
+            [
+                center + Vec2::new(-radius, radius),
+                center + Vec2::new(radius, -radius),
+            ],
+            Stroke::new(1.0, color),
+        );
+    }
+
     for footprint in &preview.footprints {
         let center = map(footprint.x_mm, footprint.y_mm);
         let size = Vec2::splat(if footprint.placed { 8.0 } else { 6.0 });
@@ -344,6 +393,46 @@ fn render_pcb_preview(ui: &mut egui::Ui, preview: &PcbPreviewData) {
             &footprint.reference,
             egui::FontId::proportional(8.5),
             Color32::from_rgb(220, 225, 230),
+        );
+    }
+}
+
+fn drc_list(ui: &mut egui::Ui, rows: &[PcbDrcRow], action: &mut Option<BottomDockAction>) {
+    ui.label(
+        egui::RichText::new("DRC")
+            .size(10.5)
+            .strong()
+            .color(theme::TEXT_SECONDARY),
+    );
+    if rows.is_empty() {
+        ui.label(
+            egui::RichText::new("None")
+                .size(10.0)
+                .color(theme::TEXT_MUTED),
+        );
+        return;
+    }
+    for row in rows.iter().take(5) {
+        let prefix = match row.severity {
+            PcbDrcSeverity::Error => "ERR",
+            PcbDrcSeverity::Warning => "WARN",
+        };
+        let color = match row.severity {
+            PcbDrcSeverity::Error => theme::ERROR,
+            PcbDrcSeverity::Warning => theme::WARNING,
+        };
+        let text = egui::RichText::new(format!("{prefix}: {}", row.title))
+            .size(10.0)
+            .color(color);
+        if ui.selectable_label(row.selected, text).clicked() {
+            *action = Some(BottomDockAction::SelectPcbDrc(row.index));
+        }
+    }
+    if rows.len() > 5 {
+        ui.label(
+            egui::RichText::new(format!("+{} more", rows.len() - 5))
+                .size(10.0)
+                .color(theme::TEXT_MUTED),
         );
     }
 }
