@@ -93,7 +93,7 @@ fn build_circuit_netlist_with_page_scopes(
         }
     }
 
-    for contact in wire_contact_points(components, wires)
+    for contact in wire_endpoint_contact_points(wires)
         .into_iter()
         .chain(annotations.junctions.iter().copied())
     {
@@ -370,6 +370,15 @@ fn wire_contact_points(components: &[Component], wires: &[Wire]) -> Vec<Pos2> {
     points
 }
 
+fn wire_endpoint_contact_points(wires: &[Wire]) -> Vec<Pos2> {
+    let mut points = Vec::new();
+    for wire in wires {
+        points.extend(wire.points.first().copied());
+        points.extend(wire.points.last().copied());
+    }
+    points
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,7 +395,7 @@ mod tests {
     }
 
     fn wire(id: u64, points: Vec<Pos2>) -> Wire {
-        Wire { id, points }
+        Wire::new(id, points)
     }
 
     // ── Basic wire-to-pin connection ─────────────────────────────────────
@@ -533,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn component_pin_touching_wire_midpoint_joins_wire_net() {
+    fn component_pin_touching_wire_midpoint_does_not_join_wire_net() {
         let resistor = comp(
             10,
             ComponentKind::Resistor,
@@ -560,8 +569,8 @@ mod tests {
             .iter()
             .find(|pin| pin.component_id == 10 && pin.pin_name == "A")
             .unwrap();
-        assert!(pin.connected_by_wire);
-        assert_eq!(netlist.wire_nets[&11], pin.net_id);
+        assert!(!pin.connected_by_wire);
+        assert_ne!(netlist.wire_nets[&11], pin.net_id);
     }
 
     // ── Floating wire has no component pins ──────────────────────────────

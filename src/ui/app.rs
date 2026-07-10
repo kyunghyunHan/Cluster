@@ -108,6 +108,31 @@ pub(crate) struct HistoryState {
     pub(crate) dirty: bool,
 }
 
+#[derive(Default, Clone, Copy)]
+pub(crate) struct DirtyFlags {
+    pub(crate) geometry_dirty: bool,
+    pub(crate) connectivity_dirty: bool,
+    pub(crate) validation_dirty: bool,
+    pub(crate) simulation_dirty: bool,
+    pub(crate) pcb_sync_dirty: bool,
+}
+
+impl DirtyFlags {
+    pub(crate) fn mark_document_changed(&mut self) {
+        self.geometry_dirty = true;
+        self.connectivity_dirty = true;
+        self.validation_dirty = true;
+        self.simulation_dirty = true;
+        self.pcb_sync_dirty = true;
+    }
+
+    pub(crate) fn clear_analysis(&mut self) {
+        self.connectivity_dirty = false;
+        self.validation_dirty = false;
+        self.simulation_dirty = false;
+    }
+}
+
 pub(crate) struct CircuitApp {
     pub(crate) components: Vec<Component>,
     pub(crate) wires: Vec<Wire>,
@@ -150,6 +175,7 @@ pub(crate) struct CircuitApp {
     // Pin snap preview (world pos of pin we're about to snap to)
     pub(crate) snap_target: Option<Pos2>,
     pub(crate) circuit_revision: u64,
+    pub(crate) dirty_flags: DirtyFlags,
     pub(crate) cached_netlist: Option<(u64, CircuitNetlist)>,
     pub(crate) cached_simulation: Option<(u64, u32, Simulation)>,
     pub(crate) cached_connected_pins: Option<(u64, Vec<(i32, i32)>)>,
@@ -208,6 +234,7 @@ impl CircuitApp {
             highlighted_net_wires: HashSet::new(),
             snap_target: None,
             circuit_revision: 1,
+            dirty_flags: DirtyFlags::default(),
             cached_netlist: None,
             cached_simulation: None,
             cached_connected_pins: None,
@@ -2371,10 +2398,7 @@ impl eframe::App for CircuitApp {
                 for w in &self.clipboard_wires.clone() {
                     let new_wire_id = self.next_id();
                     let pts: Vec<Pos2> = w.points.iter().map(|&p| p + offset).collect();
-                    self.wires.push(Wire {
-                        id: new_wire_id,
-                        points: pts,
-                    });
+                    self.wires.push(Wire::new(new_wire_id, pts));
                 }
                 self.multi_selected = new_ids.iter().copied().collect();
                 self.selected = None;
@@ -11198,10 +11222,14 @@ mod tests {
                         SavedPoint { x: 100.0, y: 100.0 },
                         SavedPoint { x: 160.0, y: 100.0 },
                     ],
+                    start: None,
+                    end: None,
                 },
                 SavedWire {
                     id: 4,
                     points: vec![SavedPoint { x: 0.0, y: 0.0 }],
+                    start: None,
+                    end: None,
                 },
             ],
             junction_dots: Vec::new(),
@@ -11856,18 +11884,9 @@ mod tests {
         let r2_b = r2_pins.iter().find(|pin| pin.label == "B").unwrap().pos;
         let components = vec![bat, r1, r2];
         let wires = vec![
-            Wire {
-                id: 10,
-                points: vec![bat_p, r2_a, r1_a],
-            },
-            Wire {
-                id: 11,
-                points: vec![r1_b, Pos2::new(r1_b.x, 80.0), bat_n],
-            },
-            Wire {
-                id: 12,
-                points: vec![r2_b, Pos2::new(r2_b.x, 120.0), bat_n],
-            },
+            Wire::new(10, vec![bat_p, r2_a, r1_a]),
+            Wire::new(11, vec![r1_b, Pos2::new(r1_b.x, 80.0), bat_n]),
+            Wire::new(12, vec![r2_b, Pos2::new(r2_b.x, 120.0), bat_n]),
         ];
 
         let sim = analyze_circuit(&components, &wires);

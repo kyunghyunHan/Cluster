@@ -246,28 +246,22 @@ mod tests {
         let cp = component_pin_defs(&c);
         let gp = component_pin_defs(&gnd)[0].pos;
         let wires = vec![
-            Wire {
-                id: 1,
-                points: vec![
+            Wire::new(
+                1,
+                vec![
                     sp.iter().find(|p| p.role == PinRole::Positive).unwrap().pos,
                     rp[0].pos,
                 ],
-            },
-            Wire {
-                id: 2,
-                points: vec![rp[1].pos, cp[0].pos],
-            },
-            Wire {
-                id: 3,
-                points: vec![cp[1].pos, gp],
-            },
-            Wire {
-                id: 4,
-                points: vec![
+            ),
+            Wire::new(2, vec![rp[1].pos, cp[0].pos]),
+            Wire::new(3, vec![cp[1].pos, gp]),
+            Wire::new(
+                4,
+                vec![
                     sp.iter().find(|p| p.role == PinRole::Ground).unwrap().pos,
                     gp,
                 ],
-            },
+            ),
         ];
         let transient = solve_transient(&[src, r, c, gnd], &wires).expect("RC transient");
         assert_eq!(transient.kind, TransientKind::RcStep);
@@ -310,28 +304,22 @@ mod tests {
         let cp = component_pin_defs(&c);
         let gp = component_pin_defs(&gnd)[0].pos;
         let wires = vec![
-            Wire {
-                id: 1,
-                points: vec![
+            Wire::new(
+                1,
+                vec![
                     sp.iter().find(|p| p.role == PinRole::Positive).unwrap().pos,
                     rp[0].pos,
                 ],
-            },
-            Wire {
-                id: 2,
-                points: vec![rp[1].pos, cp[0].pos],
-            },
-            Wire {
-                id: 3,
-                points: vec![cp[1].pos, gp],
-            },
-            Wire {
-                id: 4,
-                points: vec![
+            ),
+            Wire::new(2, vec![rp[1].pos, cp[0].pos]),
+            Wire::new(3, vec![cp[1].pos, gp]),
+            Wire::new(
+                4,
+                vec![
                     sp.iter().find(|p| p.role == PinRole::Ground).unwrap().pos,
                     gp,
                 ],
-            },
+            ),
         ];
         let transient = solve_transient(&[src, r, c, gnd], &wires).expect("PWM RC transient");
         assert_eq!(transient.kind, TransientKind::PwmRc);

@@ -38,6 +38,7 @@ impl crate::CircuitApp {
 
     pub(crate) fn mark_dirty(&mut self) {
         self.history_state.dirty = true;
+        self.dirty_flags.mark_document_changed();
         self.invalidate_analysis_cache();
     }
 

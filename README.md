@@ -121,6 +121,10 @@ wires. Open circuits can retain a valid node voltage while displaying `0 A`.
 When one stored wire polyline contains a branch and therefore carries different
 currents on different segments, Cluster suppresses a misleading single current
 arrow and reports that the current varies at the junction.
+The DC result model now keeps graph-oriented fields alongside the legacy UI
+fields: `node_voltages`, `component_currents`, `wire_segment_currents`, and
+`component_power`. Segment current is shown only when the solver can associate
+that segment with an unambiguous branch current.
 
 ### Built-in ESP32/Arduino Lessons
 
@@ -144,9 +148,14 @@ does not infer application behavior for arbitrary modules.
 
 ### Save & Load
 - JSON format with schema version tracking
+- Schema v4 stores explicit wire endpoints (`Pin`, `Junction`, or `FreePoint`)
+  separately from the drawn polyline points.
 - Automatic `.bak` backup before every manual save
 - Autosave to `cluster_autorecover.json` every 30 seconds
 - Corrupt or old-schema files are repaired on load — never silently discarded
+- Legacy files without endpoint metadata are migrated once on load: wire ends
+  that land on pins become explicit `PinRef`s, while ambiguous mid-wire
+  crossings stay unconnected and are reported in load notes.
 
 ---
 
@@ -183,7 +192,10 @@ README, and MIT license.
 1. Press **W** or click the wire tool in the toolbar.
 2. Click a component pin to start a wire.
 3. Click another pin to complete the connection.
-4. Wires snap to pins automatically. T-junctions are detected and merged.
+4. Wires snap to pins automatically. A wire passing over an unrelated pin does
+   not connect to that pin.
+5. Crossing wires are visually distinct from junction dots. A crossing is not
+   electrical unless an explicit junction/branch point exists there.
 
 ### Keyboard Shortcuts
 
@@ -219,11 +231,11 @@ src/
   model/
     component.rs        # ComponentKind enum, Component struct
     pin.rs              # PinRole, CircuitPin, NetlistPin
-    wire.rs             # Wire
+    wire.rs             # Wire, explicit endpoints, connectivity IDs
     net.rs              # Net, CircuitNetlist
     circuit.rs          # Counters, snapshots, save/load types
   engine/
-    netlist.rs          # Netlist builder (union-find, T-junction detection)
+    netlist.rs          # Netlist builder (endpoint contacts + explicit junctions)
     validation.rs       # ERC rules engine (10+ rules)
     simulation.rs       # Simulation result wrapper
     mna.rs              # Modified Nodal Analysis DC solver

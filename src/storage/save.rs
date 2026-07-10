@@ -1,12 +1,13 @@
 #![allow(dead_code)]
 use crate::model::{
-    Component, ComponentKind, Counters, SavedComponent, SavedPoint, SavedWire, Wire,
+    Component, ComponentKind, Counters, PinRef, SavedComponent, SavedPoint, SavedWire, Wire,
+    WireEndpoint, component_pin_defs,
 };
 use egui::Pos2;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectFolderLayout {
@@ -74,6 +75,8 @@ pub(crate) fn saved_wires_from(wires: &[Wire]) -> Vec<SavedWire> {
                 .iter()
                 .map(|p| SavedPoint { x: p.x, y: p.y })
                 .collect(),
+            start: Some(wire.start.saved()),
+            end: Some(wire.end.saved()),
         })
         .collect()
 }
@@ -153,7 +156,18 @@ pub(crate) fn repair_saved_page(
             used_ids.insert(id);
             load_notes.push("Reassigned duplicate wire id.".to_string());
         }
-        wires.push(Wire { id, points });
+        let start = sw
+            .start
+            .map(WireEndpoint::from_saved)
+            .unwrap_or_else(|| infer_legacy_endpoint(points[0], &components, load_notes));
+        let end = sw.end.map(WireEndpoint::from_saved).unwrap_or_else(|| {
+            infer_legacy_endpoint(
+                *points.last().unwrap_or(&points[0]),
+                &components,
+                load_notes,
+            )
+        });
+        wires.push(Wire::with_endpoints(id, points, start, end));
     }
 
     let max_id = components
@@ -164,6 +178,41 @@ pub(crate) fn repair_saved_page(
         .unwrap_or(0);
     let next_id = saved_next_id.max(max_id + 1).max(repair_id);
     (name, components, wires, next_id, saved_counters)
+}
+
+fn infer_legacy_endpoint(
+    point: Pos2,
+    components: &[Component],
+    load_notes: &mut Vec<String>,
+) -> WireEndpoint {
+    let mut best: Option<(f32, PinRef)> = None;
+    for component in components {
+        for pin in component_pin_defs(component) {
+            let distance = point.distance(pin.pos);
+            if distance <= 1.0
+                && best
+                    .as_ref()
+                    .is_none_or(|(best_distance, _)| distance < *best_distance)
+            {
+                best = Some((
+                    distance,
+                    PinRef {
+                        component_id: component.id,
+                        pin_name: pin.label.to_string(),
+                    },
+                ));
+            }
+        }
+    }
+    if let Some((_, pin)) = best {
+        load_notes.push(format!(
+            "Migrated legacy wire endpoint to explicit PinRef {}.{}.",
+            pin.component_id, pin.pin_name
+        ));
+        WireEndpoint::Pin(pin)
+    } else {
+        WireEndpoint::FreePoint(point)
+    }
 }
 
 fn component_kind_short_label(kind: ComponentKind) -> &'static str {

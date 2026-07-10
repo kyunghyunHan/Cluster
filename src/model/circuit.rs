@@ -1,5 +1,5 @@
 use super::component::{Component, ComponentKind};
-use super::wire::Wire;
+use super::wire::{SavedWireEndpoint, Wire};
 use egui::Vec2;
 use serde::{Deserialize, Serialize};
 
@@ -97,6 +97,10 @@ pub(crate) struct SavedComponent {
 pub(crate) struct SavedWire {
     pub(crate) id: u64,
     pub(crate) points: Vec<SavedPoint>,
+    #[serde(default)]
+    pub(crate) start: Option<SavedWireEndpoint>,
+    #[serde(default)]
+    pub(crate) end: Option<SavedWireEndpoint>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

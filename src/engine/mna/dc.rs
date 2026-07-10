@@ -29,12 +29,16 @@ use super::models::{BjtEntry, DiodeEntry, IsEntry, MosEntry, NetMap, ResEntry, V
 pub struct DcResult {
     /// net_root → voltage in Volts (GND net = 0.0 V)
     pub net_voltages: HashMap<usize, f64>,
+    /// NetId → voltage in Volts. New graph-oriented alias for `net_voltages`.
+    pub node_voltages: HashMap<usize, f64>,
     /// component_id → voltage across the component (V_a − V_b)
     pub component_voltage: HashMap<u64, f64>,
     /// component_id → conventional current through the component (A).
     ///
     /// **This is the authoritative current source for visualisation.**
     pub branch_current: HashMap<u64, f64>,
+    /// ComponentBranchId/component_id → conventional current through the component (A).
+    pub component_currents: HashMap<u64, f64>,
     /// component_id → power dissipated (W, always ≥ 0)
     pub component_power: HashMap<u64, f64>,
     /// wire_id → net voltage (V)
@@ -47,6 +51,8 @@ pub struct DcResult {
     pub wire_current: HashMap<u64, f64>,
     /// Wires whose single displayed current is unambiguous (no mid-wire branch).
     pub wire_current_known: HashSet<u64>,
+    /// WireSegmentId → conventional current through that solved segment (A).
+    pub wire_segment_currents: HashMap<u64, f64>,
     /// component_id → power role
     pub component_power_role: HashMap<u64, ComponentPowerRole>,
     /// Maximum absolute KCL residual across solved non-ground nodes (A)
@@ -944,20 +950,38 @@ pub fn solve_dc_detailed(
         }
     }
 
+    let mut wire_segment_currents = HashMap::new();
+    for wire in wires {
+        if wire_current_known.contains(&wire.id)
+            && let Some(&current) = wire_current.get(&wire.id)
+        {
+            for (segment_index, _) in wire.points.windows(2).enumerate() {
+                let segment_id = wire
+                    .id
+                    .saturating_mul(1_000)
+                    .saturating_add(segment_index as u64 + 1);
+                wire_segment_currents.insert(segment_id, current);
+            }
+        }
+    }
+
     let vmax = net_voltages
         .values()
         .map(|v| v.abs())
         .fold(0.0_f64, f64::max);
 
     Ok(DcResult {
+        node_voltages: net_voltages.clone(),
         net_voltages,
         component_voltage,
+        component_currents: branch_current.clone(),
         branch_current,
         component_power,
         wire_voltage,
         wire_net_root,
         wire_current,
         wire_current_known,
+        wire_segment_currents,
         component_power_role,
         max_kcl_residual: solution.max_kcl_residual,
         vmax: vmax.max(0.1),

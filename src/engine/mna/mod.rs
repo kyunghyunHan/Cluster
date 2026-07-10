@@ -49,16 +49,13 @@ mod tests {
 
     // Helper: multi-point wire.
     fn lseg(id: u64, points: Vec<Pos2>) -> Wire {
-        Wire { id, points }
+        Wire::new(id, points)
     }
 
     // Build an L-shaped wire from point a to b via a corner at (b.x, a.y).
     fn l_wire(id: u64, a: Pos2, b: Pos2) -> Wire {
         let corner = Pos2::new(b.x, a.y);
-        Wire {
-            id,
-            points: vec![a, corner, b],
-        }
+        Wire::new(id, vec![a, corner, b])
     }
 
     // ── Single resistor across a battery ─────────────────────────────────
@@ -1032,10 +1029,7 @@ mod regression {
     }
     fn wire(id: u64, a: Pos2, b: Pos2) -> Wire {
         let corner = Pos2::new(b.x, a.y);
-        Wire {
-            id,
-            points: vec![a, corner, b],
-        }
+        Wire::new(id, vec![a, corner, b])
     }
 
     // ── Crossing wires are NOT electrically connected ─────────────────────
@@ -1046,14 +1040,8 @@ mod regression {
         // Horizontal wire: (0,0)→(100,0)
         // Vertical wire:   (50,-50)→(50,50)
         // They cross at (50,0) but neither wire has an endpoint there.
-        let w1 = Wire {
-            id: 1,
-            points: vec![Pos2::new(0.0, 0.0), Pos2::new(100.0, 0.0)],
-        };
-        let w2 = Wire {
-            id: 2,
-            points: vec![Pos2::new(50.0, -50.0), Pos2::new(50.0, 50.0)],
-        };
+        let w1 = Wire::new(1, vec![Pos2::new(0.0, 0.0), Pos2::new(100.0, 0.0)]);
+        let w2 = Wire::new(2, vec![Pos2::new(50.0, -50.0), Pos2::new(50.0, 50.0)]);
         // Battery + resistor in two separate branches — no shared net expected
         let bat = comp(
             10,
@@ -1149,10 +1137,7 @@ mod regression {
             .unwrap()
             .pos;
         // Only bat+ → R_A connected; R_B is floating (no return path to bat-).
-        let wires = vec![Wire {
-            id: 1,
-            points: vec![bat_plus, r_a],
-        }];
+        let wires = vec![Wire::new(1, vec![bat_plus, r_a])];
         let dc = solve_dc(&[bat, r], &wires)
             .expect("open circuit (battery ref = GND) should still solve");
         let i = dc.branch_current.get(&1u64).copied().unwrap_or(99.0);
@@ -1188,20 +1173,17 @@ mod regression {
         let r_b = r_pins.iter().find(|p| p.label == "B").unwrap().pos; // (240,0)
         let wires = vec![
             // Top wire: bat+ straight to R_A (no other pins lie on this segment)
-            Wire {
-                id: 1,
-                points: vec![bat_plus, r_a],
-            },
+            Wire::new(1, vec![bat_plus, r_a]),
             // Return wire routed below y=-80 so it avoids the other component pins
-            Wire {
-                id: 2,
-                points: vec![
+            Wire::new(
+                2,
+                vec![
                     r_b,
                     Pos2::new(r_b.x, -80.0),
                     Pos2::new(bat_neg.x, -80.0),
                     bat_neg,
                 ],
-            },
+            ),
         ];
         let dc = solve_dc(&[bat, r], &wires).expect("series circuit must solve");
         assert!(
@@ -1260,18 +1242,9 @@ mod regression {
         let c_a = c_pins.get(0).map(|p| p.pos).unwrap();
         let c_b = c_pins.get(1).map(|p| p.pos).unwrap();
         let wires = vec![
-            Wire {
-                id: 1,
-                points: vec![src_pos, c_a],
-            },
-            Wire {
-                id: 2,
-                points: vec![c_b, Pos2::new(c_b.x, gnd_pin.y), gnd_pin],
-            },
-            Wire {
-                id: 3,
-                points: vec![src_neg, Pos2::new(src_neg.x, gnd_pin.y), gnd_pin],
-            },
+            Wire::new(1, vec![src_pos, c_a]),
+            Wire::new(2, vec![c_b, Pos2::new(c_b.x, gnd_pin.y), gnd_pin]),
+            Wire::new(3, vec![src_neg, Pos2::new(src_neg.x, gnd_pin.y), gnd_pin]),
         ];
         if let Some(ac) = solve_ac(&[c, src, gnd], &wires, 1000.0) {
             let z = ac.component_impedance.get(&1).copied().unwrap_or(0.0);
@@ -1331,22 +1304,10 @@ mod regression {
         // Connect both positives together and both negatives together (to GND).
         let node_pos = Pos2::new(60.0, 40.0);
         let wires = vec![
-            Wire {
-                id: 1,
-                points: vec![b9_pos, Pos2::new(b9_pos.x, node_pos.y), node_pos],
-            },
-            Wire {
-                id: 2,
-                points: vec![b5_pos, Pos2::new(b5_pos.x, node_pos.y), node_pos],
-            },
-            Wire {
-                id: 3,
-                points: vec![b9_neg, Pos2::new(b9_neg.x, gnd_pin.y), gnd_pin],
-            },
-            Wire {
-                id: 4,
-                points: vec![b5_neg, Pos2::new(b5_neg.x, gnd_pin.y), gnd_pin],
-            },
+            Wire::new(1, vec![b9_pos, Pos2::new(b9_pos.x, node_pos.y), node_pos]),
+            Wire::new(2, vec![b5_pos, Pos2::new(b5_pos.x, node_pos.y), node_pos]),
+            Wire::new(3, vec![b9_neg, Pos2::new(b9_neg.x, gnd_pin.y), gnd_pin]),
+            Wire::new(4, vec![b5_neg, Pos2::new(b5_neg.x, gnd_pin.y), gnd_pin]),
         ];
 
         let result = solve_dc_detailed(&[bat9, bat5, gnd], &wires);

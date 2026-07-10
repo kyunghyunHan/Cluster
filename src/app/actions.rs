@@ -433,9 +433,26 @@ impl crate::CircuitApp {
         for ep in endpoints {
             self.split_wire_at_point(ep);
         }
+        let start = self.infer_wire_endpoint(points[0]);
+        let end = self.infer_wire_endpoint(*points.last().unwrap_or(&points[0]));
         let id = self.next_id();
-        self.wires.push(Wire { id, points });
+        self.wires
+            .push(Wire::with_endpoints(id, points, start, end));
         self.status = "Wire placed.".to_string();
+    }
+
+    pub(crate) fn infer_wire_endpoint(&self, point: Pos2) -> WireEndpoint {
+        for component in &self.components {
+            for pin in component_pin_defs(component) {
+                if point.distance(pin.pos) <= 1.0 {
+                    return WireEndpoint::Pin(PinRef {
+                        component_id: component.id,
+                        pin_name: pin.label.to_string(),
+                    });
+                }
+            }
+        }
+        WireEndpoint::FreePoint(point)
     }
 
     pub(crate) fn split_wire_at_point(&mut self, point: Pos2) {
@@ -454,15 +471,21 @@ impl crate::CircuitApp {
             }
         }
         if let Some((wi, si)) = split_target {
+            let old_start = self.wires[wi].start.clone();
+            let old_end = self.wires[wi].end.clone();
             let mut first = self.wires[wi].points[..=si].to_vec();
             first.push(point);
             let mut second = vec![point];
             second.extend_from_slice(&self.wires[wi].points[si + 1..]);
             self.wires[wi].points = crate::simplify_wire(first);
+            self.wires[wi].start = old_start;
+            self.wires[wi].end = WireEndpoint::FreePoint(point);
             let new_id = self.next_id();
             self.wires.push(Wire {
                 id: new_id,
                 points: crate::simplify_wire(second),
+                start: WireEndpoint::FreePoint(point),
+                end: old_end,
             });
         }
     }
@@ -1103,6 +1126,8 @@ impl crate::CircuitApp {
         simulation.erc =
             crate::run_erc_with_netlist(&self.components, &self.wires, &simulation, &netlist);
         self.cached_simulation = Some((self.circuit_revision, ac_key, simulation.clone()));
+        self.dirty_flags.validation_dirty = false;
+        self.dirty_flags.simulation_dirty = false;
         simulation
     }
 
@@ -1114,6 +1139,7 @@ impl crate::CircuitApp {
         }
         let netlist = build_circuit_netlist(&self.components, &self.wires);
         self.cached_netlist = Some((self.circuit_revision, netlist.clone()));
+        self.dirty_flags.connectivity_dirty = false;
         netlist
     }
 
@@ -1187,7 +1213,7 @@ impl SavedCircuit {
             })
             .collect::<Vec<_>>();
         Self {
-            schema_version: 3,
+            schema_version: 4,
             next_id: app.next_id,
             counters: app.counters.clone(),
             components: saved_components_from(&app.components),
@@ -1200,7 +1226,7 @@ impl SavedCircuit {
     }
 
     pub(crate) fn into_snapshot(self) -> Result<(CircuitSnapshot, Vec<String>), String> {
-        if self.schema_version > 3 {
+        if self.schema_version > 4 {
             return Err(format!(
                 "Unsupported schema version {}.",
                 self.schema_version
@@ -1305,6 +1331,8 @@ fn saved_wires_from(wires: &[Wire]) -> Vec<SavedWire> {
                     y: point.y,
                 })
                 .collect(),
+            start: Some(wire.start.saved()),
+            end: Some(wire.end.saved()),
         })
         .collect()
 }
@@ -1390,7 +1418,18 @@ fn repair_saved_page(
             used_ids.insert(id);
             load_notes.push("Reassigned duplicate wire id.".to_string());
         }
-        wires.push(Wire { id, points });
+        let start = wire
+            .start
+            .map(WireEndpoint::from_saved)
+            .unwrap_or_else(|| infer_legacy_endpoint(points[0], &components, load_notes));
+        let end = wire.end.map(WireEndpoint::from_saved).unwrap_or_else(|| {
+            infer_legacy_endpoint(
+                *points.last().unwrap_or(&points[0]),
+                &components,
+                load_notes,
+            )
+        });
+        wires.push(Wire::with_endpoints(id, points, start, end));
     }
 
     let max_id = components
@@ -1401,6 +1440,41 @@ fn repair_saved_page(
         .unwrap_or(0);
     let next_id = saved_next_id.max(max_id + 1).max(repair_id);
     (name, components, wires, next_id, saved_counters)
+}
+
+fn infer_legacy_endpoint(
+    point: Pos2,
+    components: &[Component],
+    load_notes: &mut Vec<String>,
+) -> WireEndpoint {
+    let mut best: Option<(f32, PinRef)> = None;
+    for component in components {
+        for pin in component_pin_defs(component) {
+            let distance = point.distance(pin.pos);
+            if distance <= 1.0
+                && best
+                    .as_ref()
+                    .is_none_or(|(best_distance, _)| distance < *best_distance)
+            {
+                best = Some((
+                    distance,
+                    PinRef {
+                        component_id: component.id,
+                        pin_name: pin.label.to_string(),
+                    },
+                ));
+            }
+        }
+    }
+    if let Some((_, pin)) = best {
+        load_notes.push(format!(
+            "Migrated legacy wire endpoint to explicit PinRef {}.{}.",
+            pin.component_id, pin.pin_name
+        ));
+        WireEndpoint::Pin(pin)
+    } else {
+        WireEndpoint::FreePoint(point)
+    }
 }
 
 fn validate_saved_annotations(

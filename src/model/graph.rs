@@ -3,9 +3,7 @@
 //! The graph replaces fuzzy Pos2 distance matching with typed node IDs.
 //! Rules enforced by the builder:
 //! - Wires crossing without an explicit junction do **not** connect.
-//! - T-junctions (wire endpoint on another wire's interior) **do** connect;
-//!   the crossed wire is split at that point into two `WireSegment`s.
-//! - Component pins connect only when their position snaps to a graph node.
+//! - Component pins connect only when a wire endpoint stores a `PinRef`.
 //! - Netlist generation uses [`NodeId`], not Pos2 proximity.
 
 use egui::Pos2;
@@ -261,7 +259,7 @@ pub(crate) fn build_schematic_graph(
     explicit_junctions: &[Pos2],
 ) -> SchematicGraph {
     use crate::model::ComponentKind;
-    use crate::model::{component_pin_defs, point_touches_wire_segment};
+    use crate::model::{WireEndpoint, component_pin_defs, point_touches_wire_segment};
 
     const SNAP: f32 = 1.0;
 
@@ -279,33 +277,28 @@ pub(crate) fn build_schematic_graph(
     for &pos in explicit_junctions {
         add_unique_pos(&mut pos_list, pos);
     }
-    for comp in components {
-        for pin in component_pin_defs(comp) {
-            add_unique_pos(&mut pos_list, pin.pos);
-        }
-    }
-
-    // T-junction detection: any existing node position that lies on a wire's
-    // interior also becomes a node on that wire (splitting it).
-    // Repeat to fixpoint (usually 1 pass).
-    loop {
-        let before = pos_list.len();
-        let snapshot = pos_list.clone();
-        for &contact in &snapshot {
-            for wire in wires {
-                for seg in wire.points.windows(2) {
-                    let (a, b) = (seg[0], seg[1]);
-                    if contact.distance(a) > SNAP
-                        && contact.distance(b) > SNAP
-                        && point_touches_wire_segment(contact, a, b)
-                    {
-                        add_unique_pos(&mut pos_list, contact);
+    let pin_position = |component_id: u64, pin_name: &str| -> Option<Pos2> {
+        components
+            .iter()
+            .find(|component| component.id == component_id)
+            .and_then(|component| {
+                component_pin_defs(component)
+                    .into_iter()
+                    .find(|pin| pin.label == pin_name)
+                    .map(|pin| pin.pos)
+            })
+    };
+    for wire in wires {
+        for endpoint in [&wire.start, &wire.end] {
+            match endpoint {
+                WireEndpoint::Pin(pin) => {
+                    if let Some(pos) = pin_position(pin.component_id, &pin.pin_name) {
+                        add_unique_pos(&mut pos_list, pos);
                     }
                 }
+                WireEndpoint::FreePoint(pos) => add_unique_pos(&mut pos_list, *pos),
+                WireEndpoint::Junction(_) => {}
             }
-        }
-        if pos_list.len() == before {
-            break;
         }
     }
 
@@ -331,38 +324,6 @@ pub(crate) fn build_schematic_graph(
                     position: pos,
                     explicit: true,
                 });
-            }
-        }
-    }
-
-    for wire in wires {
-        let endpoints: Vec<Pos2> = [wire.points.first(), wire.points.last()]
-            .into_iter()
-            .flatten()
-            .copied()
-            .collect();
-        for ep in endpoints {
-            for other in wires {
-                if std::ptr::eq(wire as *const _, other as *const _) {
-                    continue;
-                }
-                for seg in other.points.windows(2) {
-                    let (a, b) = (seg[0], seg[1]);
-                    if ep.distance(a) > SNAP
-                        && ep.distance(b) > SNAP
-                        && point_touches_wire_segment(ep, a, b)
-                    {
-                        if let Some(nid) = find_node_id_in(&nodes, ep) {
-                            if !junctions.iter().any(|j: &Junction| j.node_id == nid) {
-                                junctions.push(Junction {
-                                    node_id: nid,
-                                    position: ep,
-                                    explicit: false,
-                                });
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -428,14 +389,32 @@ pub(crate) fn build_schematic_graph(
 
     // ── 5. Build PinConnections ───────────────────────────────────────────────
     let mut pin_connections: Vec<PinConnection> = Vec::new();
-    for comp in components {
-        for pin in component_pin_defs(comp) {
-            if let Some(nid) = find_node_id_in(&nodes, pin.pos) {
-                pin_connections.push(PinConnection {
-                    component_id: comp.id,
-                    pin_name: pin.label.to_string(),
-                    node_id: nid,
-                });
+    for wire in wires {
+        let endpoint_positions = [
+            (&wire.start, wire.points.first().copied()),
+            (&wire.end, wire.points.last().copied()),
+        ];
+        for (endpoint, fallback_pos) in endpoint_positions {
+            if let WireEndpoint::Pin(pin_ref) = endpoint {
+                let Some(pos) =
+                    pin_position(pin_ref.component_id, &pin_ref.pin_name).or(fallback_pos)
+                else {
+                    continue;
+                };
+                if let Some(nid) = find_node_id_in(&nodes, pos) {
+                    let connection = PinConnection {
+                        component_id: pin_ref.component_id,
+                        pin_name: pin_ref.pin_name.clone(),
+                        node_id: nid,
+                    };
+                    if !pin_connections.iter().any(|existing| {
+                        existing.component_id == connection.component_id
+                            && existing.pin_name == connection.pin_name
+                            && existing.node_id == connection.node_id
+                    }) {
+                        pin_connections.push(connection);
+                    }
+                }
             }
         }
     }
