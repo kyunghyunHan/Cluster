@@ -207,6 +207,20 @@ fn svg_component(
         ComponentKind::MotorDriver => svg_module_box(out, cx, cy, &s, color, "MD", 55.0, 55.0),
         ComponentKind::Optocoupler => svg_ic_box(out, cx, cy, &s, color, "OC"),
         ComponentKind::GenericIc => svg_ic_box(out, cx, cy, &s, color, "IC"),
+        ComponentKind::Custom => {
+            let def = c
+                .part_id
+                .as_deref()
+                .and_then(crate::model::custom_part::custom_part);
+            let title = def
+                .as_ref()
+                .map(|def| def.chip_label.clone())
+                .unwrap_or_else(|| "PART".to_string());
+            let half = def
+                .map(|def| (def.size.x * 0.5, def.size.y * 0.5))
+                .unwrap_or((60.0, 40.0));
+            svg_module_box(out, cx, cy, &s, color, &title, half.0, half.1);
+        }
     }
 }
 

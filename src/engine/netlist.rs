@@ -391,6 +391,7 @@ mod tests {
             rotation: 0,
             label: label.to_string(),
             value: value.to_string(),
+            part_id: None,
         }
     }
 

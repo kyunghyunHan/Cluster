@@ -67,6 +67,9 @@ pub(crate) enum ComponentKind {
     Buzzer,
     NeoPixel,
     PirSensor,
+    /// User-defined part loaded from a `cluster_parts/*.json` file.
+    /// The concrete definition is looked up via `Component::part_id`.
+    Custom,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +80,9 @@ pub(crate) struct Component {
     pub(crate) rotation: i32,
     pub(crate) label: String,
     pub(crate) value: String,
+    /// Registry id of the custom part definition; `Some` only when
+    /// `kind == ComponentKind::Custom`.
+    pub(crate) part_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +231,7 @@ pub(crate) fn electrical_metadata(kind: ComponentKind) -> ElectricalMetadata {
         ),
         NeoPixel => (Some(3), Unsupported, "WS2812 LED — ERC only"),
         PirSensor => (Some(3), Unsupported, "PIR sensor — ERC only"),
+        Custom => (None, SymbolOnly, "User-defined part — symbol only"),
     };
 
     let (voltage_range, max_current, needs_current_limit, needs_driver) = match kind {

@@ -626,7 +626,8 @@ pub fn solve_dc_detailed(
             | ComponentKind::Oled
             | ComponentKind::Sensor
             | ComponentKind::NeoPixel
-            | ComponentKind::PirSensor => {}
+            | ComponentKind::PirSensor
+            | ComponentKind::Custom => {}
         }
     }
 

@@ -44,6 +44,7 @@ mod tests {
             rotation: 0,
             label: label.to_string(),
             value: value.to_string(),
+            part_id: None,
         }
     }
 
@@ -1025,6 +1026,7 @@ mod regression {
             rotation: 0,
             label: label.to_string(),
             value: value.to_string(),
+            part_id: None,
         }
     }
     fn wire(id: u64, a: Pos2, b: Pos2) -> Wire {

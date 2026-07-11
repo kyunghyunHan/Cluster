@@ -8,6 +8,11 @@ pub(crate) enum PaletteAction {
         kind: ComponentKind,
         label: &'static str,
     },
+    PlaceCustomPart {
+        part_id: String,
+    },
+    ReloadCustomParts,
+    CreateSamplePart,
     LoadTemplate(PaletteTemplate),
 }
 
@@ -36,9 +41,11 @@ pub(crate) fn render_parts_palette(
     ui: &mut egui::Ui,
     filter: &str,
     selected: Option<ComponentKind>,
+    selected_custom_part: Option<&str>,
 ) -> Option<PaletteAction> {
     let mut action = None;
     template_section(ui, &mut action);
+    my_parts_section(ui, filter, selected_custom_part, &mut action);
     if let Some(kind) = selected {
         part_section(
             ui,
@@ -402,6 +409,64 @@ const fn part(
     }
 }
 
+/// User parts loaded from `cluster_parts/*.json`. Always rendered (even when
+/// empty) so the folder workflow is discoverable from the palette itself.
+fn my_parts_section(
+    ui: &mut egui::Ui,
+    filter: &str,
+    selected_custom_part: Option<&str>,
+    action: &mut Option<PaletteAction>,
+) {
+    use crate::model::{custom_part, custom_part_list};
+
+    let needle = filter.to_lowercase();
+    palette_frame(ui, "My Parts", PaletteSectionMode::Open, |ui| {
+        let parts = custom_part_list();
+        if parts.is_empty() {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Drop part JSON files into {}/ and press Reload.",
+                    crate::model::CUSTOM_PARTS_DIR
+                ))
+                .size(9.0)
+                .color(Color32::from_rgb(145, 156, 168)),
+            );
+        }
+        for (part_id, name) in &parts {
+            if !needle.is_empty()
+                && !name.to_lowercase().contains(&needle)
+                && !part_id.to_lowercase().contains(&needle)
+            {
+                continue;
+            }
+            let description = custom_part(part_id)
+                .map(|def| {
+                    if def.description.is_empty() {
+                        format!("{} pins", def.left_pins.len() + def.right_pins.len())
+                    } else {
+                        def.description
+                    }
+                })
+                .unwrap_or_default();
+            let is_selected = selected_custom_part == Some(part_id.as_str());
+            if palette_card(ui, "USR", name, &description, is_selected).clicked() {
+                *action = Some(PaletteAction::PlaceCustomPart {
+                    part_id: part_id.clone(),
+                });
+            }
+        }
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            if ui.small_button("Reload").clicked() {
+                *action = Some(PaletteAction::ReloadCustomParts);
+            }
+            if ui.small_button("Create sample part").clicked() {
+                *action = Some(PaletteAction::CreateSamplePart);
+            }
+        });
+    });
+}
+
 fn template_section(ui: &mut egui::Ui, action: &mut Option<PaletteAction>) {
     palette_frame(ui, "Start from template", PaletteSectionMode::Open, |ui| {
         for (label, template) in [
@@ -501,6 +566,16 @@ fn part_button(
     selected: Option<ComponentKind>,
 ) -> egui::Response {
     let is_selected = selected == Some(part.kind);
+    palette_card(ui, part.icon, part.name, part.description, is_selected)
+}
+
+fn palette_card(
+    ui: &mut egui::Ui,
+    icon: &str,
+    name: &str,
+    description: &str,
+    is_selected: bool,
+) -> egui::Response {
     let (fill, stroke, color) = if is_selected {
         (
             Color32::from_rgb(38, 70, 82),
@@ -528,21 +603,13 @@ fn part_button(
                         ui.add_sized(
                             Vec2::new(32.0, 24.0),
                             egui::Label::new(
-                                egui::RichText::new(part.icon)
-                                    .size(10.5)
-                                    .strong()
-                                    .color(color),
+                                egui::RichText::new(icon).size(10.5).strong().color(color),
                             ),
                         );
                         ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(name).size(10.5).strong().color(color));
                             ui.label(
-                                egui::RichText::new(part.name)
-                                    .size(10.5)
-                                    .strong()
-                                    .color(color),
-                            );
-                            ui.label(
-                                egui::RichText::new(part.description)
+                                egui::RichText::new(description)
                                     .size(9.0)
                                     .color(Color32::from_rgb(145, 156, 168)),
                             );

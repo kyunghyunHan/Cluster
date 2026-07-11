@@ -253,7 +253,27 @@ impl crate::CircuitApp {
                 self.counters.pir += 1;
                 format!("PIR{}", self.counters.pir)
             }
+            ComponentKind::Custom => self.next_custom_label(None),
         }
+    }
+
+    /// Next reference label for a custom part: the definition's `label_prefix`
+    /// (default "U") plus one past the highest numeric suffix currently used
+    /// with that prefix. Scanning existing labels (instead of a counter)
+    /// self-heals after deletes and works for any user-chosen prefix.
+    pub(crate) fn next_custom_label(&self, part_id: Option<&str>) -> String {
+        let prefix = part_id
+            .and_then(custom_part)
+            .map(|def| def.label_prefix)
+            .unwrap_or_else(|| "U".to_string());
+        let highest = self
+            .components
+            .iter()
+            .filter_map(|component| component.label.strip_prefix(&prefix))
+            .filter_map(|suffix| suffix.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        format!("{prefix}{}", highest + 1)
     }
 
     pub(crate) fn default_value(kind: ComponentKind) -> String {
@@ -322,6 +342,9 @@ impl crate::CircuitApp {
             ComponentKind::Buzzer => "5V active".to_string(),
             ComponentKind::NeoPixel => "WS2812B".to_string(),
             ComponentKind::PirSensor => "HC-SR501".to_string(),
+            // Placement of custom parts goes through `place_custom_component`,
+            // which fills the value from the part definition.
+            ComponentKind::Custom => String::new(),
         }
     }
 
@@ -343,6 +366,73 @@ impl crate::CircuitApp {
             rotation: 0,
             label,
             value: Self::default_value(kind),
+            part_id: None,
+        });
+        id
+    }
+
+    pub(crate) fn add_custom_component(&mut self, part_id: &str, pos: Pos2) {
+        self.record_history();
+        self.place_custom_component(part_id, pos);
+        self.status = "Custom part placed. Drag to reposition, R to rotate.".to_string();
+    }
+
+    /// Rescan `cluster_parts/` and report the outcome in the status bar.
+    /// Reloading only adds or replaces definitions; parts already placed on
+    /// the canvas pick up new pin layouts immediately because pin lookups go
+    /// through the registry on every frame.
+    pub(crate) fn reload_custom_parts(&mut self) {
+        let dir = Path::new(CUSTOM_PARTS_DIR);
+        let (loaded, notes) = load_custom_parts_dir(dir);
+        self.status = if notes.is_empty() {
+            format!("Loaded {loaded} custom part(s) from {CUSTOM_PARTS_DIR}/.")
+        } else {
+            format!(
+                "Loaded {loaded} custom part(s); skipped: {}",
+                notes.join(" | ")
+            )
+        };
+        // Pin layouts may have changed; the document itself did not.
+        self.invalidate_analysis_cache();
+    }
+
+    /// Write an example part file the user can copy and edit, then reload.
+    /// Never overwrites an existing file.
+    pub(crate) fn create_sample_custom_part(&mut self) {
+        let dir = Path::new(CUSTOM_PARTS_DIR);
+        if let Err(error) = fs::create_dir_all(dir) {
+            self.status = format!("Cannot create {CUSTOM_PARTS_DIR}/: {error}");
+            return;
+        }
+        let path = dir.join("sample-bme280.json");
+        if path.exists() {
+            self.status = format!("{} already exists. Edit it or copy it.", path.display());
+            return;
+        }
+        if let Err(error) = fs::write(&path, sample_part_json()) {
+            self.status = format!("Cannot write {}: {error}", path.display());
+            return;
+        }
+        let (loaded, _) = load_custom_parts_dir(dir);
+        self.status = format!(
+            "Created {} and loaded {loaded} part(s). Edit the JSON to make your own.",
+            path.display()
+        );
+        self.invalidate_analysis_cache();
+    }
+
+    pub(crate) fn place_custom_component(&mut self, part_id: &str, pos: Pos2) -> u64 {
+        let def = custom_part(part_id);
+        let label = self.next_custom_label(Some(part_id));
+        let id = self.next_id();
+        self.components.push(Component {
+            id,
+            kind: ComponentKind::Custom,
+            pos,
+            rotation: 0,
+            label,
+            value: def.map(|def| def.default_value).unwrap_or_default(),
+            part_id: Some(part_id.to_string()),
         });
         id
     }
@@ -2048,6 +2138,7 @@ fn saved_components_from(components: &[Component]) -> Vec<SavedComponent> {
             rotation: component.rotation,
             label: component.label.clone(),
             value: component.value.clone(),
+            part_id: component.part_id.clone(),
         })
         .collect()
 }
@@ -2108,6 +2199,17 @@ fn repair_saved_page(
                 component.label
             ));
         }
+        if component.kind == ComponentKind::Custom
+            && component.part_id.as_deref().and_then(custom_part).is_none()
+        {
+            load_notes.push(format!(
+                "Custom part definition {} is not loaded; {} keeps its wiring but has no pins. \
+                 Put the part's JSON file in {} and reload.",
+                component.part_id.as_deref().unwrap_or("(missing id)"),
+                component.label,
+                CUSTOM_PARTS_DIR,
+            ));
+        }
         components.push(Component {
             id,
             kind: component.kind,
@@ -2120,6 +2222,7 @@ fn repair_saved_page(
                 component.label
             },
             value: component.value,
+            part_id: component.part_id,
         });
     }
 

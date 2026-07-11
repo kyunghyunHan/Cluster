@@ -1,6 +1,7 @@
 pub(crate) mod cad;
 pub(crate) mod circuit;
 pub(crate) mod component;
+pub(crate) mod custom_part;
 pub(crate) mod graph;
 pub(crate) mod library;
 pub(crate) mod net;
@@ -13,6 +14,10 @@ pub(crate) use circuit::{
     SavedNoConnectMarker, SavedPage, SavedPoint, SavedWire,
 };
 pub(crate) use component::{Component, ComponentKind, SimulationSupport, electrical_metadata};
+pub(crate) use custom_part::{
+    CUSTOM_PARTS_DIR, CustomPartDef, custom_part, custom_part_count, custom_part_list,
+    load_custom_parts_dir, sample_part_json,
+};
 pub(crate) use graph::{
     Branch, BranchKind, Junction, NodeId, PinConnection as GraphPinConnection, SchematicGraph,
     SchematicNet as GraphNet, SchematicNode, WireSegment, build_schematic_graph,

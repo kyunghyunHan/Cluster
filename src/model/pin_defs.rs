@@ -66,6 +66,15 @@ pub(crate) fn component_size(component: &Component) -> Vec2 {
         ComponentKind::Buzzer => (60.0, 60.0),
         ComponentKind::NeoPixel => (60.0, 60.0),
         ComponentKind::PirSensor => (80.0, 80.0),
+        ComponentKind::Custom => {
+            let size = component
+                .part_id
+                .as_deref()
+                .and_then(super::custom_part::custom_part)
+                .map(|def| def.size)
+                .unwrap_or(Vec2::new(120.0, 80.0));
+            (size.x, size.y)
+        }
         ComponentKind::TextNote => {
             let lines = component.value.lines().count().max(1) as f32;
             let longest = component
@@ -774,6 +783,12 @@ pub(crate) fn component_pin_defs(component: &Component) -> Vec<CircuitPin> {
             module_pin(rect, "OUT", PinRole::Output, false, 3, 1),
             module_pin(rect, "GND", PinRole::Ground, false, 3, 2),
         ],
+        ComponentKind::Custom => component
+            .part_id
+            .as_deref()
+            .and_then(super::custom_part::custom_part)
+            .map(|def| module_pin_defs(rect, &def.left_pins, &def.right_pins))
+            .unwrap_or_default(),
         ComponentKind::TextNote => vec![],
         _ => vec![
             CircuitPin {

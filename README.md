@@ -57,6 +57,42 @@ The Breadboard View is a beginner wiring assistant synced from the schematic net
 
 Clicking a guided jumper highlights the matching schematic net so learners can connect the abstract schematic to the physical breadboard wiring. Missing guided jumpers also expose a **Wire** action that adds the matching schematic wire between the mapped pins.
 
+### Custom Parts (My Parts)
+
+You can add your own parts without touching the code. Each part is one JSON
+file in a `cluster_parts/` folder next to where you run Cluster:
+
+```json
+{
+  "id": "user:bme280",
+  "name": "BME280 Sensor",
+  "chip_label": "BME280",
+  "description": "Temperature/humidity/pressure sensor breakout (I2C)",
+  "label_prefix": "U",
+  "default_value": "BME280",
+  "pins": [
+    { "name": "VCC", "role": "positive", "side": "left" },
+    { "name": "GND", "role": "ground",   "side": "left" },
+    { "name": "SDA", "role": "i2c",      "side": "right" },
+    { "name": "SCL", "role": "i2c",      "side": "right" }
+  ]
+}
+```
+
+- Only `id`, `name`, and `pins` are required. Body size is derived from the
+  pin count unless you set `width`/`height`.
+- Pin `role` is one of: `passive`, `positive`, `power_out`, `ground`,
+  `digital`, `i2c`, `control`, `output`, `input`, `bidirectional`,
+  `open_collector`, `no_connect`. Roles feed the same ERC rules as built-in
+  parts (e.g. ground rails, I2C pull-up checks).
+- Parts appear in the **My Parts** palette section. **Reload** rescans the
+  folder; **Create sample part** writes this BME280 example to copy from.
+- Custom parts wire, netlist, ERC-check, save, and load like built-in module
+  parts. They are **symbol-only** for simulation (no DC model).
+- Circuits store the part `id`; opening a circuit on a machine without the
+  JSON file keeps the component and its wiring and adds a load note telling
+  you which file to restore.
+
 ### Supported Components
 - **Microcontrollers**: ESP32, ESP32-S3, ESP32-C3, Arduino Uno, Raspberry Pi Pico
 - **Passives**: Resistor, Capacitor, Inductor, Potentiometer, Thermistor, Varistor
@@ -242,9 +278,10 @@ The ERC (Electrical Rules Check) panel at the bottom shows errors and warnings i
 
 ```
 src/
-  main.rs               # App entry point, UI event loop, canvas drawing
+  main.rs               # App entry point
   model/
     component.rs        # ComponentKind enum, Component struct
+    custom_part.rs      # User part JSON schema, registry, cluster_parts/ loader
     pin.rs              # PinRole, CircuitPin, NetlistPin
     wire.rs             # Wire, explicit endpoints, connectivity IDs
     net.rs              # Net, CircuitNetlist
@@ -253,8 +290,17 @@ src/
     netlist.rs          # Netlist builder (endpoint contacts + explicit junctions)
     validation.rs       # ERC rules engine (10+ rules)
     simulation.rs       # Simulation result wrapper
-    mna.rs              # Modified Nodal Analysis DC solver
+    mna/                # Modified Nodal Analysis DC solver
   ui/
+    app/
+      mod.rs            # CircuitApp state + main update loop
+      canvas_helpers.rs # Hit testing, snapping, wire geometry
+      widgets.rs        # Status pills, buttons, lesson report
+      energize.rs       # Wire energize/connectivity analysis
+      overlays.rs       # Minimap, grid, simulation summary
+      symbols.rs        # Component symbol drawing
+      util.rs           # Arduino/SPICE/BOM generation helpers
+      tests.rs          # App-level tests
     validation_panel.rs # ERC panel UI renderer
   storage/
     save.rs             # Serialisation helpers, backup write
@@ -302,7 +348,8 @@ mathematically impossible, such as an ideal-source conflict.
 - [ ] DRC panel with fuller clickable track/pad/via/edge/silkscreen navigation
 - [ ] Gerber RS-274X, Excellon drill, pick-and-place CSV, and further strengthened BOM export
 - [x] Project folder save/load for schematic, board, and CAD JSON
-- [ ] JSON/TOML library manager for symbols, footprints, and real parts
+- [x] First JSON custom-part library: `cluster_parts/*.json` schematic symbols with pins/roles, palette section, save/load round-trip
+- [ ] Library manager phase 2: footprint definitions, per-project libraries, in-app part editor
 - [ ] Full breadboard placement with editable physical jumpers, power rails, zoom, and pin highlighting
 - [ ] Guided tutorials with step-by-step wiring, code, simulation, and repair hints
 - [ ] Optional ngspice export/run/import for advanced simulation

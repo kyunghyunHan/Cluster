@@ -91,6 +91,10 @@ pub(crate) struct SavedComponent {
     pub(crate) rotation: i32,
     pub(crate) label: String,
     pub(crate) value: String,
+    /// Custom part definition id; absent for built-in kinds (schema <= v4
+    /// files never contain it, so old circuits load unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) part_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

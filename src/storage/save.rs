@@ -60,6 +60,7 @@ pub(crate) fn saved_components_from(components: &[Component]) -> Vec<SavedCompon
             rotation: c.rotation,
             label: c.label.clone(),
             value: c.value.clone(),
+            part_id: c.part_id.clone(),
         })
         .collect()
 }
@@ -116,6 +117,21 @@ pub(crate) fn repair_saved_page(
                 sc.label
             ));
         }
+        if sc.kind == ComponentKind::Custom
+            && sc
+                .part_id
+                .as_deref()
+                .and_then(crate::model::custom_part::custom_part)
+                .is_none()
+        {
+            load_notes.push(format!(
+                "Custom part definition {} is not loaded; {} keeps its wiring but has no pins. \
+                 Put the part's JSON file in {} and reload.",
+                sc.part_id.as_deref().unwrap_or("(missing id)"),
+                sc.label,
+                crate::model::custom_part::CUSTOM_PARTS_DIR,
+            ));
+        }
         components.push(Component {
             id,
             kind: sc.kind,
@@ -128,6 +144,7 @@ pub(crate) fn repair_saved_page(
                 sc.label
             },
             value: sc.value,
+            part_id: sc.part_id,
         });
     }
 

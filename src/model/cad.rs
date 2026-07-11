@@ -236,6 +236,7 @@ mod tests {
             rotation: 450,
             label: "R1".to_string(),
             value: "10k".to_string(),
+            part_id: None,
         };
 
         let symbol = SymbolInstance::from_component(&component);
