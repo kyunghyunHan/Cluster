@@ -1,6 +1,6 @@
 use crate::engine::mna::DcResult;
 use crate::model::Wire;
-use crate::ui::app::CanvasView;
+use crate::ui::canvas::CanvasView;
 use crate::ui::theme;
 use egui::{Color32, Painter, Pos2, Rect, Stroke};
 
@@ -71,13 +71,13 @@ impl CurrentFlowCache {
         revision: u64,
         wires: &[Wire],
         dc: Option<&DcResult>,
-    ) {
+    ) -> bool {
         if self.revision == revision {
-            return;
+            return false;
         }
         self.revision = revision;
         self.wires.clear();
-        let Some(dc) = dc else { return };
+        let Some(dc) = dc else { return true };
         for wire in wires {
             let known = dc.wire_current_known.contains(&wire.id);
             let fallback = known
@@ -121,6 +121,7 @@ impl CurrentFlowCache {
                 });
             }
         }
+        true
     }
 }
 
@@ -150,15 +151,27 @@ pub(crate) struct FlowRenderInput<'a> {
     pub(crate) settings: &'a CurrentFlowSettings,
     pub(crate) selected_wire: Option<u64>,
     pub(crate) highlighted_wires: &'a std::collections::HashSet<u64>,
+    pub(crate) startup_progress: f32,
 }
 
-/// Returns true only when moving particles were actually rendered.
-pub(crate) fn render_current_flow(cache: &CurrentFlowCache, input: FlowRenderInput<'_>) -> bool {
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FlowRenderStats {
+    pub(crate) needs_repaint: bool,
+    pub(crate) particle_count: usize,
+    pub(crate) visible_wire_count: usize,
+}
+
+pub(crate) fn render_current_flow(
+    cache: &CurrentFlowCache,
+    input: FlowRenderInput<'_>,
+) -> FlowRenderStats {
     if !input.settings.enabled || input.view.zoom < 0.12 {
-        return false;
+        return FlowRenderStats::default();
     }
     let static_only = input.view.zoom < 0.32;
     let mut animated = false;
+    let mut particle_count = 0;
+    let mut visible_wire_count = 0;
     for wire in &cache.wires {
         let screen_bounds = Rect::from_two_pos(
             input.view.to_screen(wire.world_bounds.min),
@@ -170,9 +183,10 @@ pub(crate) fn render_current_flow(cache: &CurrentFlowCache, input: FlowRenderInp
         }
         let current = wire.uniform_signed_current();
         let Some(current) = current else { continue };
-        if current.abs() < input.settings.minimum_visible_current_a || !current.is_finite() {
+        if !current_is_visible(input.settings, current) {
             continue;
         }
+        visible_wire_count += 1;
         let emphasized = input.selected_wire == Some(wire.wire_id)
             || input.highlighted_wires.contains(&wire.wire_id);
         let level = ((current.abs() / input.settings.minimum_visible_current_a)
@@ -193,11 +207,12 @@ pub(crate) fn render_current_flow(cache: &CurrentFlowCache, input: FlowRenderInp
                 ],
                 Stroke::new(
                     if emphasized { 4.5 } else { 3.2 },
-                    theme::CURRENT_GLOW.gamma_multiply(alpha as f32 / 255.0),
+                    theme::CURRENT_GLOW
+                        .gamma_multiply(alpha as f32 / 255.0 * input.startup_progress),
                 ),
             );
         }
-        if static_only {
+        if static_only || input.startup_progress < 0.55 {
             continue;
         }
         animated = true;
@@ -208,6 +223,7 @@ pub(crate) fn render_current_flow(cache: &CurrentFlowCache, input: FlowRenderInp
             FlowQuality::High => 54.0,
         };
         let count = ((screen_length / spacing).ceil() as usize).clamp(1, 180);
+        particle_count += count;
         let speed = (22.0 + 58.0 * level).min(90.0) * input.settings.speed_multiplier;
         let direction = current.signum() as f32;
         for particle in 0..count {
@@ -233,7 +249,15 @@ pub(crate) fn render_current_flow(cache: &CurrentFlowCache, input: FlowRenderInp
             }
         }
     }
-    animated
+    FlowRenderStats {
+        needs_repaint: animated || (input.startup_progress < 1.0 && visible_wire_count > 0),
+        particle_count,
+        visible_wire_count,
+    }
+}
+
+pub(crate) fn current_is_visible(settings: &CurrentFlowSettings, current: f64) -> bool {
+    settings.enabled && current.is_finite() && current.abs() >= settings.minimum_visible_current_a
 }
 
 fn point_and_tangent(wire: &WireFlowGeometry, distance: f32) -> Option<(Pos2, egui::Vec2)> {
@@ -302,5 +326,60 @@ mod tests {
         let changed_wire = Wire::new(3, vec![Pos2::ZERO, Pos2::new(200.0, 0.0)]);
         cache.rebuild_if_needed(9, &[changed_wire], Some(&dc));
         assert_eq!(cache.wires[0].total_length, original_length);
+    }
+
+    #[test]
+    fn closed_loop_current_is_visible_but_open_current_is_not() {
+        let settings = CurrentFlowSettings::default();
+        assert!(current_is_visible(&settings, 0.009));
+        assert!(!current_is_visible(&settings, 0.0));
+    }
+
+    #[test]
+    fn reversed_source_preserves_negative_particle_direction() {
+        let geometry = WireFlowGeometry {
+            wire_id: 5,
+            segments: vec![FlowSegment {
+                start: Pos2::ZERO,
+                end: Pos2::new(20.0, 0.0),
+                start_distance: 0.0,
+                length: 20.0,
+                signed_current_a: Some(-0.004),
+            }],
+            total_length: 20.0,
+            world_bounds: Rect::from_min_max(Pos2::ZERO, Pos2::new(20.0, 0.0)),
+        };
+        assert!(
+            geometry
+                .uniform_signed_current()
+                .is_some_and(|current| current < 0.0)
+        );
+    }
+
+    #[test]
+    fn parallel_branches_keep_independent_magnitudes() {
+        let branch = |id, current| WireFlowGeometry {
+            wire_id: id,
+            segments: vec![FlowSegment {
+                start: Pos2::ZERO,
+                end: Pos2::new(20.0, 0.0),
+                start_distance: 0.0,
+                length: 20.0,
+                signed_current_a: Some(current),
+            }],
+            total_length: 20.0,
+            world_bounds: Rect::from_min_max(Pos2::ZERO, Pos2::new(20.0, 0.0)),
+        };
+        assert_eq!(branch(1, 0.010).uniform_signed_current(), Some(0.010));
+        assert_eq!(branch(2, 0.005).uniform_signed_current(), Some(0.005));
+    }
+
+    #[test]
+    fn disabled_animation_suppresses_even_finite_current() {
+        let settings = CurrentFlowSettings {
+            enabled: false,
+            ..CurrentFlowSettings::default()
+        };
+        assert!(!current_is_visible(&settings, 0.01));
     }
 }

@@ -36,6 +36,7 @@ Cluster is **easier than KiCad**, **smarter than Fritzing**, and **focused on re
 ### Circuit Design
 - Drag-and-drop component palette with search
 - Orthogonal wire routing with T-junction detection
+- Smart Wiring highlights compatible destinations and warns about suspicious pin-role connections without blocking manual wiring
 - Grid snapping and zoom/pan
 - Breadboard View wiring assistant for ESP32/Arduino I2C examples
 - CAD data model groundwork for symbols, footprints, net classes, board layers, tracks, vias, and DRC
@@ -174,6 +175,10 @@ fields: `node_voltages`, `component_currents`, `wire_segment_currents`, and
 `component_power`. Segment current is shown only when the solver can associate
 that segment with an unambiguous branch current.
 
+Debug builds also expose **View → Performance overlay**, showing FPS, rendered
+versus total canvas items, MNA/ERC/netlist timings, flow particle count, and
+simulation/netlist/flow cache hit state without triggering additional solves.
+
 ### Built-in ESP32/Arduino Lessons
 
 - Example Gallery entries are available from the left palette.
@@ -292,6 +297,11 @@ src/
     simulation.rs       # Simulation result wrapper
     mna/                # Modified Nodal Analysis DC solver
   ui/
+    canvas/              # View transform, grid/background, and incremental canvas responsibility boundaries
+      view.rs            # World/screen conversion and viewport helpers
+      background.rs      # Canvas surface and zoom-aware grid
+      interaction.rs     # Smart Wiring compatibility guidance boundary
+      current_flow.rs    # Canvas-owned current-flow rendering boundary
     app/
       mod.rs            # CircuitApp state + main update loop
       canvas_helpers.rs # Hit testing, snapping, wire geometry

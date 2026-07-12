@@ -1,102 +1,11 @@
 use super::*;
 
-/// Canvas coordinate transform: world ↔ screen.
-///
-/// World positions are the stored component/wire positions.
-/// Screen positions are egui painter pixel positions.
-/// At zoom=1 and pan=ZERO the two spaces are identical.
-#[derive(Clone, Copy)]
-pub(crate) struct CanvasView {
-    pub(crate) zoom: f32,
-    pub(crate) pan: Vec2,
-    pub(crate) origin: Pos2, // canvas rect.min
-}
-
-impl CanvasView {
-    pub(crate) fn to_screen(&self, world: Pos2) -> Pos2 {
-        self.origin + (world - self.origin) * self.zoom + self.pan
-    }
-
-    pub(crate) fn to_world(&self, screen: Pos2) -> Pos2 {
-        self.origin + ((screen - self.origin) - self.pan) / self.zoom
-    }
-
-    pub(crate) fn scale_f(&self, f: f32) -> f32 {
-        (f * self.zoom).clamp(f * 0.4, f * 2.0)
-    }
-}
-
 pub(crate) fn snap_pos(pos: Pos2, _rect: Rect, grid: f32, snap: bool) -> Pos2 {
     if snap {
         Pos2::new((pos.x / grid).round() * grid, (pos.y / grid).round() * grid)
     } else {
         pos
     }
-}
-
-pub(crate) fn hit_test(pos: Pos2, components: &[Component], wires: &[Wire]) -> Option<Selection> {
-    if let Some(selection) = hit_test_component(pos, components) {
-        return Some(selection);
-    }
-    if let Some(selection) = hit_test_wire(pos, wires) {
-        return Some(selection);
-    }
-    None
-}
-
-pub(crate) fn selection_summary(
-    selected: Option<Selection>,
-    components: &[Component],
-    wires: &[Wire],
-) -> String {
-    match selected {
-        Some(Selection::Component(id)) => components
-            .iter()
-            .find(|component| component.id == id)
-            .map(|component| format!("Selected: {}", component.label))
-            .unwrap_or_else(|| "Selected: missing component".to_string()),
-        Some(Selection::Wire(id)) => wires
-            .iter()
-            .find(|wire| wire.id == id)
-            .map(|wire| format!("Selected: wire {:.0}px", wire_length(wire)))
-            .unwrap_or_else(|| "Selected: missing wire".to_string()),
-        None => "Selected: none".to_string(),
-    }
-}
-
-pub(crate) fn hit_test_component(pos: Pos2, components: &[Component]) -> Option<Selection> {
-    for component in components.iter().rev() {
-        if component_bounds(component).contains(pos) {
-            return Some(Selection::Component(component.id));
-        }
-    }
-    None
-}
-
-pub(crate) fn hit_test_wire(pos: Pos2, wires: &[Wire]) -> Option<Selection> {
-    let threshold = 10.0;
-    for wire in wires.iter().rev() {
-        for segment in wire.points.windows(2) {
-            let a = segment[0];
-            let b = segment[1];
-            if distance_to_segment(pos, a, b) <= threshold {
-                return Some(Selection::Wire(wire.id));
-            }
-        }
-    }
-    None
-}
-
-pub(crate) fn hit_test_wire_control_point(pos: Pos2, wires: &[Wire]) -> Option<(u64, usize)> {
-    let threshold = 14.0;
-    for wire in wires.iter().rev() {
-        for (index, point) in wire.points.iter().enumerate() {
-            if pos.distance(*point) <= threshold {
-                return Some((wire.id, index));
-            }
-        }
-    }
-    None
 }
 
 pub(crate) fn insert_wire_control_point(pos: Pos2, wires: &mut [Wire]) -> Option<(u64, usize)> {

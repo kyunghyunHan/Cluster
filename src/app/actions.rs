@@ -1895,8 +1895,11 @@ impl crate::CircuitApp {
             && *revision == self.circuit_revision
             && *cached_ac_key == ac_key
         {
+            self.performance.simulation_cache_hit = true;
             return simulation.clone();
         }
+        self.performance.simulation_cache_hit = false;
+        let mna_started = std::time::Instant::now();
         let mut simulation = simulation_engine::analyze_circuit(&self.components, &self.wires);
         simulation.ac = mna::solve_ac(
             &self.components,
@@ -1905,9 +1908,12 @@ impl crate::CircuitApp {
         );
         simulation.transient =
             crate::engine::transient::solve_transient(&self.components, &self.wires);
+        self.performance.mna_ms = mna_started.elapsed().as_secs_f64() * 1_000.0;
         let netlist = self.current_netlist();
+        let erc_started = std::time::Instant::now();
         simulation.erc =
             crate::run_erc_with_netlist(&self.components, &self.wires, &simulation, &netlist);
+        self.performance.erc_ms = erc_started.elapsed().as_secs_f64() * 1_000.0;
         self.cached_simulation = Some((self.circuit_revision, ac_key, simulation.clone()));
         self.dirty_flags.validation_dirty = false;
         self.dirty_flags.simulation_dirty = false;
@@ -1918,9 +1924,13 @@ impl crate::CircuitApp {
         if let Some((revision, netlist)) = &self.cached_netlist
             && *revision == self.circuit_revision
         {
+            self.performance.netlist_cache_hit = true;
             return netlist.clone();
         }
+        self.performance.netlist_cache_hit = false;
+        let started = std::time::Instant::now();
         let netlist = build_circuit_netlist(&self.components, &self.wires);
+        self.performance.netlist_ms = started.elapsed().as_secs_f64() * 1_000.0;
         self.cached_netlist = Some((self.circuit_revision, netlist.clone()));
         self.dirty_flags.connectivity_dirty = false;
         netlist

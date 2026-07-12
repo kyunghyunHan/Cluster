@@ -26,10 +26,15 @@ use crate::ui::bottom_dock::{
 use crate::ui::breadboard::{
     BreadboardAction, BreadboardRoute, build_breadboard_guide, render_breadboard_view,
 };
-use crate::ui::canvas_overlay::draw_simulation_legend;
-use crate::ui::current_flow::{
+use crate::ui::canvas::current_flow::{
     CurrentFlowCache, CurrentFlowSettings, FlowRenderInput, render_current_flow,
 };
+use crate::ui::canvas::interaction::{SmartWireTone, assess_pin_pair};
+use crate::ui::canvas::{
+    CanvasView, draw_grid, draw_probe_card, hit_test, hit_test_component, hit_test_wire,
+    hit_test_wire_control_point, selection_summary,
+};
+use crate::ui::canvas_overlay::draw_simulation_legend;
 use crate::ui::left_palette::{
     PaletteAction, PaletteTemplate, render_parts_palette, selected_part,
 };
@@ -66,6 +71,18 @@ pub(crate) use widgets::*;
 pub(crate) struct UiState {
     pub(crate) show_help: bool,
     pub(crate) bottom_dock_tab: BottomDockTab,
+    pub(crate) bottom_dock_open: bool,
+    pub(crate) workspace: Workspace,
+    pub(crate) show_performance_overlay: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Workspace {
+    #[default]
+    Schematic,
+    Breadboard,
+    Pcb,
+    Code,
 }
 
 impl Default for UiState {
@@ -73,6 +90,9 @@ impl Default for UiState {
         Self {
             show_help: false,
             bottom_dock_tab: BottomDockTab::Erc,
+            bottom_dock_open: true,
+            workspace: Workspace::Schematic,
+            show_performance_overlay: false,
         }
     }
 }
@@ -102,6 +122,8 @@ pub(crate) struct SimulationUiState {
     pub(crate) show_oscilloscope: bool,
     pub(crate) ac_freq_hz: f32,
     pub(crate) current_flow: CurrentFlowSettings,
+    pub(crate) flow_started_at: Option<f64>,
+    pub(crate) last_simulation_enabled: bool,
 }
 
 impl Default for SimulationUiState {
@@ -112,6 +134,8 @@ impl Default for SimulationUiState {
             show_oscilloscope: false,
             ac_freq_hz: 1000.0,
             current_flow: CurrentFlowSettings::default(),
+            flow_started_at: None,
+            last_simulation_enabled: true,
         }
     }
 }
@@ -250,6 +274,21 @@ pub(crate) struct CircuitApp {
     pub(crate) context_menu: Option<(egui::Pos2, u64)>,
     // ── PNG screenshot pending ────────────────────────────────────────────
     pub(crate) screenshot_pending: bool,
+    pub(crate) performance: PerformanceStats,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PerformanceStats {
+    pub(crate) mna_ms: f64,
+    pub(crate) erc_ms: f64,
+    pub(crate) netlist_ms: f64,
+    pub(crate) simulation_cache_hit: bool,
+    pub(crate) netlist_cache_hit: bool,
+    pub(crate) flow_cache_hit: bool,
+    pub(crate) rendered_components: usize,
+    pub(crate) rendered_wire_segments: usize,
+    pub(crate) flow_particles: usize,
+    pub(crate) visible_flow_wires: usize,
 }
 
 impl CircuitApp {
@@ -316,6 +355,7 @@ impl CircuitApp {
             inline_edit: None,
             context_menu: None,
             screenshot_pending: false,
+            performance: PerformanceStats::default(),
         }
     }
 
@@ -439,6 +479,11 @@ impl eframe::App for CircuitApp {
             });
         }
 
+        let now = ctx.input(|input| input.time);
+        if self.simulate != self.simulation_ui.last_simulation_enabled {
+            self.simulation_ui.last_simulation_enabled = self.simulate;
+            self.simulation_ui.flow_started_at = self.simulate.then_some(now);
+        }
         let simulation = self.current_simulation();
         let inspector_netlist = self.current_netlist();
         let pcb_summary = self.pcb_dock_summary();
@@ -462,11 +507,51 @@ impl eframe::App for CircuitApp {
                     grid: &mut self.grid,
                     ac_freq_hz: &mut self.simulation_ui.ac_freq_hz,
                     current_flow: &mut self.simulation_ui.current_flow,
+                    show_performance_overlay: &mut self.ui_state.show_performance_overlay,
                 },
             );
             if let Some(action) = toolbar_action {
                 self.handle_top_toolbar_action(action, ctx);
             }
+            if self.simulate != self.simulation_ui.last_simulation_enabled {
+                self.simulation_ui.last_simulation_enabled = self.simulate;
+                self.simulation_ui.flow_started_at = self.simulate.then_some(now);
+            }
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Workspace")
+                        .size(10.5)
+                        .color(crate::ui::theme::TEXT_MUTED),
+                );
+                for (workspace, label) in [
+                    (Workspace::Schematic, "Schematic"),
+                    (Workspace::Breadboard, "Breadboard"),
+                    (Workspace::Pcb, "PCB"),
+                    (Workspace::Code, "Code"),
+                ] {
+                    if ui
+                        .selectable_label(self.ui_state.workspace == workspace, label)
+                        .clicked()
+                    {
+                        self.ui_state.workspace = workspace;
+                        match workspace {
+                            Workspace::Schematic => {}
+                            Workspace::Breadboard => self.breadboard_ui.open = true,
+                            Workspace::Pcb => {
+                                self.ui_state.bottom_dock_open = true;
+                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                            }
+                            Workspace::Code => {
+                                self.ui_state.bottom_dock_open = true;
+                                self.ui_state.bottom_dock_tab = BottomDockTab::Logs;
+                                self.status =
+                                    "Code workspace: export an Arduino starter sketch from Export."
+                                        .to_string();
+                            }
+                        }
+                    }
+                }
+            });
             if !self.status.is_empty() {
                 ui.label(
                     egui::RichText::new(&self.status)
@@ -1287,67 +1372,83 @@ impl eframe::App for CircuitApp {
             );
         });
 
-        egui::TopBottomPanel::bottom("bottom_dock")
-            .default_height(190.0)
-            .resizable(true)
-            .show(ctx, |ui| {
-                if let Some(action) = render_bottom_dock(
-                    ui,
-                    BottomDockModel {
-                        active_tab: self.ui_state.bottom_dock_tab,
-                        violations: &simulation.erc,
-                        has_components: !self.components.is_empty(),
-                        simulation: &simulation,
-                        netlist: &inspector_netlist,
-                        breadboard_enabled: self.breadboard_ui.open,
-                        pcb: &pcb_summary,
-                        status: &self.status,
-                    },
-                ) {
-                    match action {
-                        BottomDockAction::SetTab(tab) => self.ui_state.bottom_dock_tab = tab,
-                        BottomDockAction::Validation(validation_action) => {
-                            self.handle_validation_panel_action(validation_action);
+        if self.ui_state.bottom_dock_open {
+            egui::TopBottomPanel::bottom("bottom_dock")
+                .default_height(190.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Analysis").strong().size(11.0));
+                        if ui.small_button("Collapse").clicked() {
+                            self.ui_state.bottom_dock_open = false;
                         }
-                        BottomDockAction::OpenBreadboard => {
-                            self.breadboard_ui.open = true;
-                            self.ui_state.bottom_dock_tab = BottomDockTab::Breadboard;
-                        }
-                        BottomDockAction::UpdatePcb => {
-                            self.update_pcb_from_schematic();
-                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
-                        }
-                        BottomDockAction::AutoPlacePcb => {
-                            self.auto_place_pcb_footprints();
-                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
-                        }
-                        BottomDockAction::FitPcbBoard => {
-                            self.fit_pcb_board_to_contents();
-                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
-                        }
-                        BottomDockAction::RoutePcbRatsnest => {
-                            self.route_pcb_ratsnest();
-                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
-                        }
-                        BottomDockAction::SelectPcbDrc(index) => {
-                            self.select_pcb_drc_violation(index);
-                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
-                        }
-                        BottomDockAction::SavePcbProject => {
-                            self.save_project_folder();
-                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
-                        }
-                        BottomDockAction::LoadPcbProject => {
-                            self.load_project_folder();
-                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
-                        }
-                        BottomDockAction::ExportPcbFabrication => {
-                            self.export_pcb_fabrication_files();
-                            self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                    });
+                    if let Some(action) = render_bottom_dock(
+                        ui,
+                        BottomDockModel {
+                            active_tab: self.ui_state.bottom_dock_tab,
+                            violations: &simulation.erc,
+                            has_components: !self.components.is_empty(),
+                            simulation: &simulation,
+                            netlist: &inspector_netlist,
+                            breadboard_enabled: self.breadboard_ui.open,
+                            pcb: &pcb_summary,
+                            status: &self.status,
+                        },
+                    ) {
+                        match action {
+                            BottomDockAction::SetTab(tab) => self.ui_state.bottom_dock_tab = tab,
+                            BottomDockAction::Validation(validation_action) => {
+                                self.handle_validation_panel_action(validation_action);
+                            }
+                            BottomDockAction::OpenBreadboard => {
+                                self.breadboard_ui.open = true;
+                                self.ui_state.bottom_dock_tab = BottomDockTab::Breadboard;
+                            }
+                            BottomDockAction::UpdatePcb => {
+                                self.update_pcb_from_schematic();
+                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                            }
+                            BottomDockAction::AutoPlacePcb => {
+                                self.auto_place_pcb_footprints();
+                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                            }
+                            BottomDockAction::FitPcbBoard => {
+                                self.fit_pcb_board_to_contents();
+                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                            }
+                            BottomDockAction::RoutePcbRatsnest => {
+                                self.route_pcb_ratsnest();
+                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                            }
+                            BottomDockAction::SelectPcbDrc(index) => {
+                                self.select_pcb_drc_violation(index);
+                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                            }
+                            BottomDockAction::SavePcbProject => {
+                                self.save_project_folder();
+                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                            }
+                            BottomDockAction::LoadPcbProject => {
+                                self.load_project_folder();
+                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                            }
+                            BottomDockAction::ExportPcbFabrication => {
+                                self.export_pcb_fabrication_files();
+                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                            }
                         }
                     }
-                }
-            });
+                });
+        } else {
+            egui::TopBottomPanel::bottom("bottom_dock_collapsed")
+                .exact_height(26.0)
+                .show(ctx, |ui| {
+                    if ui.small_button("Show analysis").clicked() {
+                        self.ui_state.bottom_dock_open = true;
+                    }
+                });
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let available = ui.available_size();
@@ -1431,6 +1532,47 @@ impl eframe::App for CircuitApp {
             }
             if self.components.is_empty() && self.wires.is_empty() {
                 draw_empty_canvas_hint(&painter, rect);
+                let start_rect = Rect::from_center_size(rect.center(), Vec2::new(360.0, 190.0));
+                let mut start_action = None;
+                ui.scope_builder(egui::UiBuilder::new().max_rect(start_rect), |ui| {
+                    crate::ui::theme::panel_frame().show(ui, |ui| {
+                        ui.heading("Start a circuit");
+                        ui.label(
+                            egui::RichText::new(
+                                "Choose a proven example or begin with an empty schematic.",
+                            )
+                            .size(11.0)
+                            .color(crate::ui::theme::TEXT_SECONDARY),
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for (label, action) in [
+                                ("New blank", 0),
+                                ("ESP32 + LED", 1),
+                                ("ESP32 + OLED", 2),
+                                ("Arduino + LED", 3),
+                                ("Open circuit", 4),
+                                ("Recover autosave", 5),
+                            ] {
+                                if ui
+                                    .add_sized(Vec2::new(105.0, 26.0), egui::Button::new(label))
+                                    .clicked()
+                                {
+                                    start_action = Some(action);
+                                }
+                            }
+                        });
+                    });
+                });
+                match start_action {
+                    Some(0) => self.status = "Blank schematic ready.".to_string(),
+                    Some(1) => self.load_button_toggle_led_demo(),
+                    Some(2) => self.load_esp32_oled_demo(),
+                    Some(3) => self.load_arduino_led_demo(),
+                    Some(4) => self.load_open_switch_led_demo(),
+                    Some(5) => self.recover_autosave(),
+                    _ => {}
+                }
             }
 
             let dc_imax = simulation
@@ -1443,6 +1585,7 @@ impl eframe::App for CircuitApp {
                         .fold(0.0_f64, f64::max)
                 })
                 .unwrap_or(1.0);
+            self.performance.rendered_wire_segments = 0;
             for wire in &self.wires {
                 let visible = wire
                     .points
@@ -1456,6 +1599,7 @@ impl eframe::App for CircuitApp {
                 if !visible {
                     continue;
                 }
+                self.performance.rendered_wire_segments += wire.points.len().saturating_sub(1);
                 let energized = simulation.energized_wires.contains(&wire.id);
                 let net_highlighted = self.highlighted_net_wires.contains(&wire.id)
                     && !self.highlighted_net_wires.is_empty();
@@ -1490,7 +1634,7 @@ impl eframe::App for CircuitApp {
                 );
             }
 
-            self.current_flow_cache.rebuild_if_needed(
+            let flow_rebuilt = self.current_flow_cache.rebuild_if_needed(
                 self.circuit_revision,
                 &self.wires,
                 simulation
@@ -1498,8 +1642,9 @@ impl eframe::App for CircuitApp {
                     .as_ref()
                     .filter(|_| show_flow && !simulation.shorted),
             );
-            let flow_is_animating = show_flow
-                && render_current_flow(
+            self.performance.flow_cache_hit = !flow_rebuilt;
+            let flow_stats = if show_flow {
+                render_current_flow(
                     &self.current_flow_cache,
                     FlowRenderInput {
                         painter: &painter,
@@ -1512,9 +1657,22 @@ impl eframe::App for CircuitApp {
                             _ => None,
                         },
                         highlighted_wires: &self.highlighted_net_wires,
+                        startup_progress: self.simulation_ui.flow_started_at.map_or(
+                            1.0,
+                            |started| {
+                                ((now - started)
+                                    / (crate::ui::theme::SIMULATION_START_MS as f64 / 1000.0))
+                                    .clamp(0.0, 1.0) as f32
+                            },
+                        ),
                     },
-                );
-            if flow_is_animating {
+                )
+            } else {
+                crate::ui::canvas::current_flow::FlowRenderStats::default()
+            };
+            self.performance.flow_particles = flow_stats.particle_count;
+            self.performance.visible_flow_wires = flow_stats.visible_wire_count;
+            if flow_stats.needs_repaint {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(
                     1.0 / self.simulation_ui.current_flow.quality.fps() as f64,
                 ));
@@ -1524,6 +1682,7 @@ impl eframe::App for CircuitApp {
             // expensive on larger circuits, so it is cached by circuit revision.
             let connected_pins = self.current_connected_pins();
 
+            self.performance.rendered_components = 0;
             for component in &self.components {
                 let cid = component.id;
                 let size = component_size(component) * view.zoom;
@@ -1536,6 +1695,7 @@ impl eframe::App for CircuitApp {
                 {
                     continue;
                 }
+                self.performance.rendered_components += 1;
                 let dc_v = simulation
                     .dc
                     .as_ref()
@@ -1618,6 +1778,66 @@ impl eframe::App for CircuitApp {
             // ── Minimap (bottom-right corner) ────────────────────────────
             if !self.components.is_empty() {
                 draw_minimap(&painter, rect, &self.components, &self.wires, view);
+            }
+            if cfg!(debug_assertions) && self.ui_state.show_performance_overlay {
+                let fps = ctx.input(|input| 1.0 / input.stable_dt.max(1.0 / 240.0));
+                let lines = [
+                    format!("FPS {fps:.0}  ·  rev {}", self.circuit_revision),
+                    format!(
+                        "Components {}/{}  ·  wire segments {}/{}",
+                        self.performance.rendered_components,
+                        self.components.len(),
+                        self.performance.rendered_wire_segments,
+                        self.wires
+                            .iter()
+                            .map(|wire| wire.points.len().saturating_sub(1))
+                            .sum::<usize>()
+                    ),
+                    format!(
+                        "MNA {:.2} ms [{}]  ·  ERC {:.2} ms",
+                        self.performance.mna_ms,
+                        if self.performance.simulation_cache_hit {
+                            "hit"
+                        } else {
+                            "miss"
+                        },
+                        self.performance.erc_ms
+                    ),
+                    format!(
+                        "Netlist {:.2} ms [{}]  ·  flow cache {}",
+                        self.performance.netlist_ms,
+                        if self.performance.netlist_cache_hit {
+                            "hit"
+                        } else {
+                            "miss"
+                        },
+                        if self.performance.flow_cache_hit {
+                            "hit"
+                        } else {
+                            "miss"
+                        }
+                    ),
+                    format!(
+                        "Flow {} wire(s)  ·  {} particle(s)",
+                        self.performance.visible_flow_wires, self.performance.flow_particles
+                    ),
+                ];
+                let overlay =
+                    Rect::from_min_size(rect.min + Vec2::new(10.0, 10.0), Vec2::new(330.0, 82.0));
+                painter.rect_filled(
+                    overlay,
+                    3.0,
+                    Color32::from_rgba_unmultiplied(10, 14, 20, 225),
+                );
+                for (index, line) in lines.iter().enumerate() {
+                    painter.text(
+                        overlay.min + Vec2::new(8.0, 7.0 + index as f32 * 14.0),
+                        Align2::LEFT_TOP,
+                        line,
+                        egui::FontId::monospace(10.0),
+                        crate::ui::theme::TEXT_SECONDARY,
+                    );
+                }
             }
 
             // ── Hover / cursor helpers ───────────────────────────────────
@@ -1741,6 +1961,69 @@ impl eframe::App for CircuitApp {
                 }
 
                 if in_wire_mode && !self.draft_wire.is_empty() {
+                    let source_pin = self.draft_wire.first().and_then(|start| {
+                        self.components
+                            .iter()
+                            .flat_map(component_pin_defs)
+                            .min_by(|a, b| {
+                                a.pos.distance(*start).total_cmp(&b.pos.distance(*start))
+                            })
+                            .filter(|pin| pin.pos.distance(*start) <= 10.0)
+                    });
+                    if let Some(source_pin) = source_pin.as_ref() {
+                        for target in self.components.iter().flat_map(component_pin_defs) {
+                            if target.pos.distance(source_pin.pos) <= 1.0 {
+                                continue;
+                            }
+                            let (tone, _) = assess_pin_pair(source_pin, &target);
+                            let color = match tone {
+                                SmartWireTone::Compatible => crate::ui::theme::OK,
+                                SmartWireTone::Neutral => crate::ui::theme::TEXT_MUTED,
+                                SmartWireTone::Suspicious => crate::ui::theme::WARNING,
+                            };
+                            let screen = view.to_screen(target.pos);
+                            if rect.contains(screen) {
+                                painter.circle_stroke(
+                                    screen,
+                                    5.0,
+                                    Stroke::new(
+                                        if tone == SmartWireTone::Compatible {
+                                            1.8
+                                        } else {
+                                            1.0
+                                        },
+                                        color,
+                                    ),
+                                );
+                            }
+                        }
+                        if let Some(target_pin) = self
+                            .components
+                            .iter()
+                            .flat_map(component_pin_defs)
+                            .min_by(|a, b| {
+                                a.pos
+                                    .distance(world_pos)
+                                    .total_cmp(&b.pos.distance(world_pos))
+                            })
+                            .filter(|pin| pin.pos.distance(world_pos) <= 10.0)
+                        {
+                            let (tone, explanation) = assess_pin_pair(source_pin, &target_pin);
+                            let color = match tone {
+                                SmartWireTone::Compatible => crate::ui::theme::OK,
+                                SmartWireTone::Neutral => crate::ui::theme::TEXT_SECONDARY,
+                                SmartWireTone::Suspicious => crate::ui::theme::WARNING,
+                            };
+                            let pos = raw_hover + Vec2::new(14.0, 18.0);
+                            painter.text(
+                                pos,
+                                Align2::LEFT_TOP,
+                                explanation,
+                                egui::FontId::proportional(10.5),
+                                color,
+                            );
+                        }
+                    }
                     let preview =
                         preview_wire_points(&self.draft_wire, world_pos, self.orthogonal_wires);
                     let screen_preview: Vec<Pos2> =
@@ -1843,47 +2126,18 @@ impl eframe::App for CircuitApp {
                                     dc_line = parts.join("  ·  ");
                                 }
                             }
-                            let tip_lines: Vec<&str> = if dc_line.is_empty() {
-                                vec![&base]
+                            let tip_lines: Vec<String> = if dc_line.is_empty() {
+                                vec![base]
                             } else {
-                                vec![&base, &dc_line]
+                                vec![base, dc_line]
                             };
-                            let tip_w = tip_lines
-                                .iter()
-                                .map(|l| l.len() as f32 * 6.2 + 12.0)
-                                .fold(0.0_f32, f32::max);
-                            let tip_h = tip_lines.len() as f32 * 16.0 + 6.0;
-                            let tip_pos = raw_hover + egui::Vec2::new(14.0, -8.0);
-                            let bg = Rect::from_min_size(
-                                tip_pos - egui::Vec2::new(4.0, 4.0),
-                                egui::Vec2::new(tip_w, tip_h),
+                            draw_probe_card(
+                                &painter,
+                                rect,
+                                raw_hover,
+                                &tip_lines,
+                                crate::ui::theme::ACCENT,
                             );
-                            painter.rect_filled(
-                                bg,
-                                3.0,
-                                Color32::from_rgba_unmultiplied(15, 20, 28, 230),
-                            );
-                            painter.rect_stroke(
-                                bg,
-                                3.0,
-                                Stroke::new(1.0, Color32::from_rgb(55, 65, 80)),
-                                StrokeKind::Outside,
-                            );
-                            for (i, line) in tip_lines.iter().enumerate() {
-                                let lpos = tip_pos + egui::Vec2::new(0.0, i as f32 * 16.0);
-                                let col = if i == 0 {
-                                    Color32::from_rgb(210, 218, 226)
-                                } else {
-                                    Color32::from_rgb(90, 210, 255)
-                                };
-                                painter.text(
-                                    lpos,
-                                    Align2::LEFT_TOP,
-                                    line,
-                                    egui::FontId::proportional(11.0),
-                                    col,
-                                );
-                            }
                         }
                     }
                     // Wire net tooltip
@@ -1917,37 +2171,7 @@ impl eframe::App for CircuitApp {
                         } else {
                             Color32::from_rgb(140, 210, 255)
                         };
-                        let tip_pos = raw_hover + egui::Vec2::new(14.0, -8.0);
-                        let tip_w = tip_text.len() as f32 * 6.2 + 10.0;
-                        let bg = Rect::from_min_size(
-                            tip_pos - egui::Vec2::new(4.0, 4.0),
-                            egui::Vec2::new(tip_w, 20.0),
-                        );
-                        painter.rect_filled(
-                            bg,
-                            3.0,
-                            Color32::from_rgba_unmultiplied(15, 20, 28, 230),
-                        );
-                        painter.rect_stroke(
-                            bg,
-                            3.0,
-                            Stroke::new(
-                                1.0,
-                                if dc_v.is_some() {
-                                    Color32::from_rgb(50, 120, 200)
-                                } else {
-                                    Color32::from_rgb(55, 65, 78)
-                                },
-                            ),
-                            StrokeKind::Outside,
-                        );
-                        painter.text(
-                            tip_pos,
-                            Align2::LEFT_TOP,
-                            &tip_text,
-                            egui::FontId::proportional(11.0),
-                            tip_col,
-                        );
+                        draw_probe_card(&painter, rect, raw_hover, &[tip_text], tip_col);
                     }
                 }
             } else {

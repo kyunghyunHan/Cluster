@@ -19,6 +19,7 @@ pub(crate) struct TopToolbarModel<'a> {
     pub(crate) grid: &'a mut f32,
     pub(crate) ac_freq_hz: &'a mut f32,
     pub(crate) current_flow: &'a mut CurrentFlowSettings,
+    pub(crate) show_performance_overlay: &'a mut bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -171,6 +172,10 @@ pub(crate) fn render_top_toolbar(
                 Vec2::new(180.0, 18.0),
                 egui::Slider::new(model.grid, 10.0..=40.0).text("Grid"),
             );
+            if cfg!(debug_assertions) {
+                ui.separator();
+                ui.checkbox(model.show_performance_overlay, "Performance overlay");
+            }
         });
         toolbar_menu(ui, "Simulation", |ui| {
             ui.checkbox(model.simulate, "Run simulation");
