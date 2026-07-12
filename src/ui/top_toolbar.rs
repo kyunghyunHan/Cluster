@@ -10,6 +10,7 @@ pub(crate) struct TopToolbarModel<'a> {
     pub(crate) snap: &'a mut bool,
     pub(crate) orthogonal_wires: &'a mut bool,
     pub(crate) show_pins: &'a mut bool,
+    pub(crate) show_grid: &'a mut bool,
     pub(crate) simulate: &'a mut bool,
     pub(crate) show_breadboard_view: &'a mut bool,
     pub(crate) show_voltage_labels: &'a mut bool,
@@ -76,7 +77,13 @@ pub(crate) fn render_top_toolbar(
         if tool_button(ui, model.tool == Tool::Wire, "Wire").clicked() {
             action = Some(TopToolbarAction::WireTool);
         }
-        if tool_button(ui, *model.simulate, "Simulate").clicked() {
+        if tool_button(
+            ui,
+            *model.simulate,
+            if *model.simulate { "Stop" } else { "Run" },
+        )
+        .clicked()
+        {
             *model.simulate = !*model.simulate;
         }
         ui.separator();
@@ -153,6 +160,7 @@ pub(crate) fn render_top_toolbar(
         }
         ui.separator();
         toolbar_menu(ui, "View", |ui| {
+            ui.checkbox(model.show_grid, "Grid");
             ui.checkbox(model.snap, "Snap to grid");
             ui.checkbox(model.orthogonal_wires, "90° wires");
             ui.checkbox(model.show_pins, "Show pins");
@@ -171,6 +179,14 @@ pub(crate) fn render_top_toolbar(
             ui.add(
                 egui::Slider::new(&mut model.current_flow.speed_multiplier, 0.25..=3.0)
                     .text("Speed"),
+            );
+            ui.add(
+                egui::Slider::new(
+                    &mut model.current_flow.minimum_visible_current_a,
+                    1.0e-12..=1.0,
+                )
+                .logarithmic(true)
+                .text("Minimum current (A)"),
             );
             egui::ComboBox::from_label("Animation quality")
                 .selected_text(match model.current_flow.quality {
@@ -204,6 +220,19 @@ pub(crate) fn render_top_toolbar(
             );
         });
         toolbar_menu(ui, "Actions", |ui| {
+            for (label, next) in [
+                ("Rotate selection", TopToolbarAction::Rotate),
+                ("Duplicate selection", TopToolbarAction::Duplicate),
+                ("Delete selection", TopToolbarAction::Delete),
+                ("Find", TopToolbarAction::ToggleFind),
+                ("Help", TopToolbarAction::Help),
+            ] {
+                if menu_action(ui, label).clicked() {
+                    action = Some(next);
+                    ui.close();
+                }
+            }
+            ui.separator();
             for (label, next) in [
                 ("Save JSON", TopToolbarAction::SaveJson),
                 ("Load JSON", TopToolbarAction::LoadJson),

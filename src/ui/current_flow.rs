@@ -124,6 +124,24 @@ impl CurrentFlowCache {
     }
 }
 
+impl WireFlowGeometry {
+    /// A particle may traverse the whole polyline only when every drawable
+    /// segment has the same solved signed current. Mixed/unknown currents are
+    /// intentionally not collapsed into a misleading wire-wide direction.
+    pub(crate) fn uniform_signed_current(&self) -> Option<f64> {
+        let first = self.segments.first()?.signed_current_a?;
+        let tolerance = first.abs().max(1.0) * 1.0e-9;
+        self.segments
+            .iter()
+            .all(|segment| {
+                segment
+                    .signed_current_a
+                    .is_some_and(|current| (current - first).abs() <= tolerance)
+            })
+            .then_some(first)
+    }
+}
+
 pub(crate) struct FlowRenderInput<'a> {
     pub(crate) painter: &'a Painter,
     pub(crate) viewport: Rect,
@@ -150,7 +168,7 @@ pub(crate) fn render_current_flow(cache: &CurrentFlowCache, input: FlowRenderInp
         if !screen_bounds.intersects(input.viewport) {
             continue;
         }
-        let current = wire.segments.first().and_then(|s| s.signed_current_a);
+        let current = wire.uniform_signed_current();
         let Some(current) = current else { continue };
         if current.abs() < input.settings.minimum_visible_current_a || !current.is_finite() {
             continue;
@@ -243,5 +261,46 @@ mod tests {
         dc.wire_current_known.insert(7);
         cache.rebuild_if_needed(1, &[wire], Some(&dc));
         assert!(cache.wires.is_empty());
+    }
+
+    #[test]
+    fn mixed_segment_currents_do_not_become_one_wire_direction() {
+        let wire = WireFlowGeometry {
+            wire_id: 1,
+            segments: vec![
+                FlowSegment {
+                    start: Pos2::ZERO,
+                    end: Pos2::new(10.0, 0.0),
+                    start_distance: 0.0,
+                    length: 10.0,
+                    signed_current_a: Some(0.01),
+                },
+                FlowSegment {
+                    start: Pos2::new(10.0, 0.0),
+                    end: Pos2::new(20.0, 0.0),
+                    start_distance: 10.0,
+                    length: 10.0,
+                    signed_current_a: Some(0.005),
+                },
+            ],
+            total_length: 20.0,
+            world_bounds: Rect::from_min_max(Pos2::ZERO, Pos2::new(20.0, 0.0)),
+        };
+        assert_eq!(wire.uniform_signed_current(), None);
+    }
+
+    #[test]
+    fn cache_does_not_rebuild_for_animation_only_frames() {
+        let mut cache = CurrentFlowCache::default();
+        let wire = Wire::new(3, vec![Pos2::ZERO, Pos2::new(20.0, 0.0)]);
+        let mut dc = DcResult::default();
+        dc.wire_current.insert(3, 0.01);
+        dc.wire_current_known.insert(3);
+        dc.wire_segment_currents.insert(3_001, 0.01);
+        cache.rebuild_if_needed(9, std::slice::from_ref(&wire), Some(&dc));
+        let original_length = cache.wires[0].total_length;
+        let changed_wire = Wire::new(3, vec![Pos2::ZERO, Pos2::new(200.0, 0.0)]);
+        cache.rebuild_if_needed(9, &[changed_wire], Some(&dc));
+        assert_eq!(cache.wires[0].total_length, original_length);
     }
 }

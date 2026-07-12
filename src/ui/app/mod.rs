@@ -195,6 +195,7 @@ pub(crate) struct CircuitApp {
     pub(crate) snap: bool,
     pub(crate) orthogonal_wires: bool,
     pub(crate) show_pins: bool,
+    pub(crate) show_grid: bool,
     pub(crate) simulate: bool,
     pub(crate) status: String,
     pub(crate) next_id: u64,
@@ -270,6 +271,7 @@ impl CircuitApp {
             snap: true,
             orthogonal_wires: true,
             show_pins: true,
+            show_grid: true,
             simulate: true,
             status: String::new(),
             next_id: 1,
@@ -451,6 +453,7 @@ impl eframe::App for CircuitApp {
                     snap: &mut self.snap,
                     orthogonal_wires: &mut self.orthogonal_wires,
                     show_pins: &mut self.show_pins,
+                    show_grid: &mut self.show_grid,
                     simulate: &mut self.simulate,
                     show_breadboard_view: &mut self.breadboard_ui.open,
                     show_voltage_labels: &mut self.simulation_ui.show_voltage_labels,
@@ -848,6 +851,7 @@ impl eframe::App for CircuitApp {
                                 StatusTone::Neutral,
                             );
                             ui.add_space(8.0);
+                            if self.inspector_ui.active_tab == InspectorTab::Properties {
                             if edit_row(ui, "Label", &mut component.label)
                                 || edit_row(ui, "Value", &mut component.value)
                             {
@@ -945,6 +949,8 @@ impl eframe::App for CircuitApp {
                                 "Position",
                                 format!("{:.0}, {:.0}", component.pos.x, component.pos.y),
                             );
+                            }
+                            if self.inspector_ui.active_tab == InspectorTab::Model {
                             ui.add_space(8.0);
                             section_title(ui, "Electrical Model");
                             metric_row(ui, "Model", metadata.model_name);
@@ -979,6 +985,8 @@ impl eframe::App for CircuitApp {
                             if metadata.needs_driver {
                                 metric_row(ui, "Drive", "External driver required");
                             }
+                            }
+                            if self.inspector_ui.active_tab == InspectorTab::Simulation {
                             // ── DC operating-point results ─────────────────
                             if let Some(dc) = &simulation.dc {
                                 let cid = component.id;
@@ -1098,6 +1106,7 @@ impl eframe::App for CircuitApp {
                                     metric_row(ui, &pin.pin_name, value);
                                 }
                             }
+                            }
                             if let Some(warning) = simulation.component_warnings.get(&component.id)
                             {
                                 ui.add_space(6.0);
@@ -1126,8 +1135,10 @@ impl eframe::App for CircuitApp {
                         if let Some(wire) = self.wires.iter().find(|w| w.id == id) {
                             status_pill(ui, "Wire / Net", StatusTone::Neutral);
                             ui.add_space(8.0);
-                            metric_row(ui, "Points", wire.points.len().to_string());
-                            metric_row(ui, "Length", format!("{:.0}px", wire_length(wire)));
+                            if self.inspector_ui.active_tab == InspectorTab::Properties {
+                                metric_row(ui, "Points", wire.points.len().to_string());
+                                metric_row(ui, "Length", format!("{:.0}px", wire_length(wire)));
+                            }
                             if let Some(net_id) = inspector_netlist.wire_nets.get(&wire.id) {
                                 let net_name = inspector_netlist
                                     .nets
@@ -1136,34 +1147,21 @@ impl eframe::App for CircuitApp {
                                     .map(|net| net.name.as_str())
                                     .unwrap_or("UNKNOWN");
                                 metric_row(ui, "Net", net_name);
-                                let connected = inspector_netlist
-                                    .pins
-                                    .iter()
-                                    .filter(|pin| pin.net_id == *net_id)
-                                    .map(|pin| format!("{}.{}", pin.component_label, pin.pin_name))
-                                    .collect::<Vec<_>>();
-                                metric_row(
-                                    ui,
-                                    "Connected pins",
-                                    if connected.is_empty() {
-                                        "none".to_string()
-                                    } else {
-                                        connected.join(", ")
-                                    },
-                                );
+                                if self.inspector_ui.active_tab == InspectorTab::Properties {
+                                    let connected = inspector_netlist
+                                        .pins
+                                        .iter()
+                                        .filter(|pin| pin.net_id == *net_id)
+                                        .map(|pin| format!("{}.{}", pin.component_label, pin.pin_name))
+                                        .collect::<Vec<_>>();
+                                    metric_row(ui, "Connected pins", if connected.is_empty() { "none".to_string() } else { connected.join(", ") });
+                                }
                             }
-                            metric_row(
-                                ui,
-                                "Status",
-                                if inspector_netlist.floating_wires.contains(&wire.id) {
-                                    "Floating"
-                                } else if inspector_netlist.isolated_wires.contains(&wire.id) {
-                                    "Open / one-pin connection"
-                                } else {
-                                    "Connected"
-                                },
-                            );
-                            if let Some(dc) = &simulation.dc {
+                            if self.inspector_ui.active_tab == InspectorTab::Properties {
+                                metric_row(ui, "Status", if inspector_netlist.floating_wires.contains(&wire.id) { "Floating" } else if inspector_netlist.isolated_wires.contains(&wire.id) { "Open / one-pin connection" } else { "Connected" });
+                            }
+                            if self.inspector_ui.active_tab == InspectorTab::Simulation
+                                && let Some(dc) = &simulation.dc {
                                 if let Some(&wv) = dc.wire_voltage.get(&wire.id) {
                                     ui.add_space(8.0);
                                     section_title(ui, "DC Wire");
@@ -1206,6 +1204,21 @@ impl eframe::App for CircuitApp {
                                     metric_row(ui, "Direction", "Unavailable");
                                     metric_row(ui, "Animation", "Skipped for safety");
                                 }
+                                if let (Some(voltage), Some(current)) = (
+                                    dc.wire_voltage.get(&wire.id),
+                                    dc.wire_current.get(&wire.id).filter(|_| dc.wire_current_known.contains(&wire.id)),
+                                ) {
+                                    dc_metric_row(ui, "Power estimate", &mna::format_power((voltage * current).abs()));
+                                }
+                            } else if self.inspector_ui.active_tab == InspectorTab::Simulation {
+                                metric_row(ui, "Voltage", "Unavailable");
+                                metric_row(ui, "Segment current", "Unavailable");
+                                metric_row(ui, "Animation", if self.simulate { "No valid DC result" } else { "Simulation off" });
+                            }
+                            if self.inspector_ui.active_tab == InspectorTab::Model {
+                                metric_row(ui, "Element", "Ideal zero-resistance conductor");
+                                metric_row(ui, "DC model", "Equipotential net segment");
+                                ui.label(egui::RichText::new("Current direction is reported only when the solver can prove one signed current for every segment.").size(10.5).color(crate::ui::theme::TEXT_SECONDARY));
                             }
                         }
                     }
@@ -1285,6 +1298,7 @@ impl eframe::App for CircuitApp {
                         violations: &simulation.erc,
                         has_components: !self.components.is_empty(),
                         simulation: &simulation,
+                        netlist: &inspector_netlist,
                         breadboard_enabled: self.breadboard_ui.open,
                         pcb: &pcb_summary,
                         status: &self.status,
@@ -1410,7 +1424,11 @@ impl eframe::App for CircuitApp {
             };
 
             // ── Draw ─────────────────────────────────────────────────────
-            draw_grid(&painter, rect, self.grid, view);
+            if self.show_grid {
+                draw_grid(&painter, rect, self.grid, view);
+            } else {
+                painter.rect_filled(rect, 0.0, crate::ui::theme::CLUSTER_THEME.canvas_background);
+            }
             if self.components.is_empty() && self.wires.is_empty() {
                 draw_empty_canvas_hint(&painter, rect);
             }

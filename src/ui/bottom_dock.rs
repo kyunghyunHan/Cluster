@@ -1,6 +1,7 @@
 use crate::engine::simulation::Simulation;
 use crate::engine::transient::TransientKind;
 use crate::engine::validation::{ErcSeverity, ErcViolation};
+use crate::model::CircuitNetlist;
 use crate::ui::theme;
 use crate::ui::validation_panel::{ValidationPanelAction, render_validation_panel};
 use eframe::egui;
@@ -99,6 +100,7 @@ pub(crate) struct BottomDockModel<'a> {
     pub(crate) violations: &'a [ErcViolation],
     pub(crate) has_components: bool,
     pub(crate) simulation: &'a Simulation,
+    pub(crate) netlist: &'a CircuitNetlist,
     pub(crate) breadboard_enabled: bool,
     pub(crate) pcb: &'a PcbDockSummary,
     pub(crate) status: &'a str,
@@ -189,13 +191,53 @@ pub(crate) fn render_bottom_dock(
             }
             BottomDockTab::Simulation => render_simulation_tab(ui, model.simulation),
             BottomDockTab::Netlist => {
-                ui.label(
-                    egui::RichText::new(
-                        "Export → Netlist TXT creates the deterministic netlist document.",
-                    )
-                    .size(11.0)
-                    .color(theme::TEXT_SECONDARY),
-                );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} nets · {} connected pins",
+                            model.netlist.nets.len(),
+                            model.netlist.pins.len()
+                        ))
+                        .size(11.0)
+                        .color(theme::TEXT_SECONDARY),
+                    );
+                    ui.label(
+                        egui::RichText::new("Export → Netlist TXT for the full document")
+                            .size(10.5)
+                            .color(theme::TEXT_MUTED),
+                    );
+                });
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for net in &model.netlist.nets {
+                        let pins = model
+                            .netlist
+                            .pins
+                            .iter()
+                            .filter(|pin| pin.net_id == net.id)
+                            .map(|pin| format!("{}.{}", pin.component_label, pin.pin_name))
+                            .collect::<Vec<_>>();
+                        ui.horizontal(|ui| {
+                            ui.add_sized(
+                                Vec2::new(120.0, 18.0),
+                                egui::Label::new(
+                                    egui::RichText::new(&net.name)
+                                        .monospace()
+                                        .size(10.5)
+                                        .color(theme::ACCENT),
+                                ),
+                            );
+                            ui.label(
+                                egui::RichText::new(if pins.is_empty() {
+                                    "—".to_string()
+                                } else {
+                                    pins.join(", ")
+                                })
+                                .size(10.5)
+                                .color(theme::TEXT_SECONDARY),
+                            );
+                        });
+                    }
+                });
             }
             BottomDockTab::Breadboard => {
                 ui.horizontal(|ui| {
