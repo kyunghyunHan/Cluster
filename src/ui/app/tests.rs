@@ -921,7 +921,7 @@ fn esp32_oled_demo_energizes_oled_via_3v3() {
         "OLED should be energized when powered via ESP32 3V3 with I2C wired"
     );
     assert!(
-        sim.component_warnings.get(&oled_id).is_none(),
+        !sim.component_warnings.contains_key(&oled_id),
         "OLED should have no warnings: {:?}",
         sim.component_warnings.get(&oled_id)
     );
@@ -1352,7 +1352,7 @@ fn beginner_example_esp32_sensor_energizes_sensor() {
         "{:?}",
         sim.details
     );
-    assert!(sim.component_warnings.get(&sensor_id).is_none());
+    assert!(!sim.component_warnings.contains_key(&sensor_id));
 }
 
 #[test]

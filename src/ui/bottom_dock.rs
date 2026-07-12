@@ -17,6 +17,7 @@ pub(crate) enum PageTabsAction {
 pub(crate) enum BottomDockTab {
     Erc,
     Simulation,
+    Netlist,
     Breadboard,
     Pcb,
     Logs,
@@ -162,11 +163,15 @@ pub(crate) fn render_bottom_dock(
     theme::panel_frame().show(ui, |ui| {
         ui.horizontal(|ui| {
             for (tab, label) in [
-                (BottomDockTab::Erc, erc_tab_label(model.violations)),
+                (
+                    BottomDockTab::Erc,
+                    erc_tab_label(model.violations).replace("ERC", "Problems"),
+                ),
                 (BottomDockTab::Simulation, "Simulation".to_string()),
+                (BottomDockTab::Netlist, "Netlist".to_string()),
                 (BottomDockTab::Breadboard, "Breadboard".to_string()),
                 (BottomDockTab::Pcb, pcb_tab_label(model.pcb)),
-                (BottomDockTab::Logs, "Logs".to_string()),
+                (BottomDockTab::Logs, "Output".to_string()),
             ] {
                 if theme::tool_button(ui, &label, model.active_tab == tab).clicked() {
                     action = Some(BottomDockAction::SetTab(tab));
@@ -183,6 +188,15 @@ pub(crate) fn render_bottom_dock(
                 }
             }
             BottomDockTab::Simulation => render_simulation_tab(ui, model.simulation),
+            BottomDockTab::Netlist => {
+                ui.label(
+                    egui::RichText::new(
+                        "Export → Netlist TXT creates the deterministic netlist document.",
+                    )
+                    .size(11.0)
+                    .color(theme::TEXT_SECONDARY),
+                );
+            }
             BottomDockTab::Breadboard => {
                 ui.horizontal(|ui| {
                     ui.label(

@@ -3,6 +3,7 @@ pub(crate) mod bottom_dock;
 pub(crate) mod breadboard;
 pub(crate) mod canvas;
 pub(crate) mod canvas_overlay;
+pub(crate) mod current_flow;
 pub(crate) mod inspector;
 pub(crate) mod left_palette;
 pub(crate) mod palette;

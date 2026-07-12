@@ -795,7 +795,7 @@ mod tests {
 
         let dc = solve_dc_detailed(&[bat, cap], &wires).unwrap();
 
-        assert!(dc.branch_current.get(&2).is_none());
+        assert!(!dc.branch_current.contains_key(&2));
         assert!(dc.branch_current[&1].abs() < 1.0e-12);
     }
 

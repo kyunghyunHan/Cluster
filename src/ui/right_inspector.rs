@@ -1,7 +1,15 @@
 use eframe::egui;
 use egui::Color32;
 
-pub(crate) fn render_inspector_header(ui: &mut egui::Ui) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum InspectorTab {
+    #[default]
+    Properties,
+    Simulation,
+    Model,
+}
+
+pub(crate) fn render_inspector_header(ui: &mut egui::Ui, active: &mut InspectorTab) {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Inspector")
@@ -16,6 +24,17 @@ pub(crate) fn render_inspector_header(ui: &mut egui::Ui) {
                     .color(Color32::from_rgb(135, 146, 158)),
             );
         });
+    });
+    ui.horizontal(|ui| {
+        for (tab, label) in [
+            (InspectorTab::Properties, "Properties"),
+            (InspectorTab::Simulation, "Simulation"),
+            (InspectorTab::Model, "Model"),
+        ] {
+            if ui.selectable_label(*active == tab, label).clicked() {
+                *active = tab;
+            }
+        }
     });
     ui.separator();
 }

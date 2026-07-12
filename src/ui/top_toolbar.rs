@@ -1,4 +1,5 @@
 use crate::app::{AlignDir, Tool};
+use crate::ui::current_flow::{CurrentFlowSettings, FlowQuality};
 use eframe::egui;
 use egui::{Color32, Stroke, Vec2};
 
@@ -16,6 +17,7 @@ pub(crate) struct TopToolbarModel<'a> {
     pub(crate) show_oscilloscope: &'a mut bool,
     pub(crate) grid: &'a mut f32,
     pub(crate) ac_freq_hz: &'a mut f32,
+    pub(crate) current_flow: &'a mut CurrentFlowSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -81,9 +83,6 @@ pub(crate) fn render_top_toolbar(
         for (label, next) in [
             ("Undo", TopToolbarAction::Undo),
             ("Redo", TopToolbarAction::Redo),
-            ("Rotate", TopToolbarAction::Rotate),
-            ("Duplicate", TopToolbarAction::Duplicate),
-            ("Delete", TopToolbarAction::Delete),
         ] {
             if compact_button(ui, label).clicked() {
                 action = Some(next);
@@ -92,9 +91,6 @@ pub(crate) fn render_top_toolbar(
         ui.separator();
         if compact_button(ui, "Save").clicked() {
             action = Some(TopToolbarAction::SaveJson);
-        }
-        if compact_button(ui, "Load").clicked() {
-            action = Some(TopToolbarAction::LoadJson);
         }
         toolbar_menu(ui, "Export", |ui| {
             for (label, next) in [
@@ -111,9 +107,6 @@ pub(crate) fn render_top_toolbar(
                 }
             }
         });
-        if compact_button(ui, "Help").clicked() {
-            action = Some(TopToolbarAction::Help);
-        }
         ui.separator();
         toolbar_menu(ui, "Align", |ui| {
             for (label, dir) in [
@@ -163,15 +156,46 @@ pub(crate) fn render_top_toolbar(
             ui.checkbox(model.snap, "Snap to grid");
             ui.checkbox(model.orthogonal_wires, "90° wires");
             ui.checkbox(model.show_pins, "Show pins");
-            ui.checkbox(model.simulate, "Live simulation");
             ui.checkbox(model.show_breadboard_view, "Breadboard View");
             ui.checkbox(model.show_voltage_labels, "Voltage labels on wires");
             ui.checkbox(model.show_dc_overlay, "V/I badges on components");
-            ui.checkbox(model.show_oscilloscope, "DC/AC Analysis panel");
             ui.add_sized(
                 Vec2::new(180.0, 18.0),
                 egui::Slider::new(model.grid, 10.0..=40.0).text("Grid"),
             );
+        });
+        toolbar_menu(ui, "Simulation", |ui| {
+            ui.checkbox(model.simulate, "Run simulation");
+            ui.checkbox(&mut model.current_flow.enabled, "Current animation");
+            ui.checkbox(&mut model.current_flow.show_tail, "Particle tail");
+            ui.add(
+                egui::Slider::new(&mut model.current_flow.speed_multiplier, 0.25..=3.0)
+                    .text("Speed"),
+            );
+            egui::ComboBox::from_label("Animation quality")
+                .selected_text(match model.current_flow.quality {
+                    FlowQuality::Low => "Low · 15 FPS",
+                    FlowQuality::Normal => "Normal · 30 FPS",
+                    FlowQuality::High => "High · 60 FPS",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut model.current_flow.quality,
+                        FlowQuality::Low,
+                        "Low · 15 FPS",
+                    );
+                    ui.selectable_value(
+                        &mut model.current_flow.quality,
+                        FlowQuality::Normal,
+                        "Normal · 30 FPS",
+                    );
+                    ui.selectable_value(
+                        &mut model.current_flow.quality,
+                        FlowQuality::High,
+                        "High · 60 FPS",
+                    );
+                });
+            ui.checkbox(model.show_oscilloscope, "Oscilloscope / analysis");
             ui.add_sized(
                 Vec2::new(180.0, 18.0),
                 egui::Slider::new(model.ac_freq_hz, 1.0..=1_000_000.0)

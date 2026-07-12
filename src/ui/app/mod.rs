@@ -27,10 +27,13 @@ use crate::ui::breadboard::{
     BreadboardAction, BreadboardRoute, build_breadboard_guide, render_breadboard_view,
 };
 use crate::ui::canvas_overlay::draw_simulation_legend;
+use crate::ui::current_flow::{
+    CurrentFlowCache, CurrentFlowSettings, FlowRenderInput, render_current_flow,
+};
 use crate::ui::left_palette::{
     PaletteAction, PaletteTemplate, render_parts_palette, selected_part,
 };
-use crate::ui::right_inspector::render_inspector_header;
+use crate::ui::right_inspector::{InspectorTab, render_inspector_header};
 use crate::ui::status_bar::{StatusBarModel, render_status_bar};
 use crate::ui::top_toolbar::{TopToolbarAction, TopToolbarModel, render_top_toolbar};
 use crate::ui::validation_panel::{ValidationPanelAction, render_validation_panel};
@@ -98,6 +101,7 @@ pub(crate) struct SimulationUiState {
     pub(crate) show_dc_overlay: bool,
     pub(crate) show_oscilloscope: bool,
     pub(crate) ac_freq_hz: f32,
+    pub(crate) current_flow: CurrentFlowSettings,
 }
 
 impl Default for SimulationUiState {
@@ -107,12 +111,15 @@ impl Default for SimulationUiState {
             show_dc_overlay: true,
             show_oscilloscope: false,
             ac_freq_hz: 1000.0,
+            current_flow: CurrentFlowSettings::default(),
         }
     }
 }
 
 #[derive(Default)]
-pub(crate) struct InspectorState;
+pub(crate) struct InspectorState {
+    pub(crate) active_tab: InspectorTab,
+}
 
 #[derive(Default)]
 pub(crate) struct BreadboardUiState {
@@ -223,6 +230,7 @@ pub(crate) struct CircuitApp {
     pub(crate) cached_netlist: Option<(u64, CircuitNetlist)>,
     pub(crate) cached_simulation: Option<(u64, u32, Simulation)>,
     pub(crate) cached_connected_pins: Option<(u64, Vec<(i32, i32)>)>,
+    pub(crate) current_flow_cache: CurrentFlowCache,
     pub(crate) last_autorecover_revision: u64,
     // ── Multi-page ──────────────────────────────────────────────────────
     /// All pages: (name, components, wires, next_id, counters)
@@ -271,7 +279,7 @@ impl CircuitApp {
             canvas: CanvasState::default(),
             palette_ui: PaletteState::default(),
             simulation_ui: SimulationUiState::default(),
-            inspector_ui: InspectorState,
+            inspector_ui: InspectorState::default(),
             breadboard_ui: BreadboardUiState::default(),
             pcb_ui: PcbUiState::default(),
             zoom: 1.0,
@@ -288,6 +296,7 @@ impl CircuitApp {
             cached_netlist: None,
             cached_simulation: None,
             cached_connected_pins: None,
+            current_flow_cache: CurrentFlowCache::default(),
             last_autorecover_revision: 0,
             pages: vec![(
                 "Page 1".to_string(),
@@ -449,6 +458,7 @@ impl eframe::App for CircuitApp {
                     show_oscilloscope: &mut self.simulation_ui.show_oscilloscope,
                     grid: &mut self.grid,
                     ac_freq_hz: &mut self.simulation_ui.ac_freq_hz,
+                    current_flow: &mut self.simulation_ui.current_flow,
                 },
             );
             if let Some(action) = toolbar_action {
@@ -825,7 +835,7 @@ impl eframe::App for CircuitApp {
                     ui.separator();
                     ui.add_space(4.0);
                 }
-                render_inspector_header(ui);
+                render_inspector_header(ui, &mut self.inspector_ui.active_tab);
                 match self.selected {
                     Some(Selection::Component(id)) => {
                         let mut inspector_changed = false;
@@ -1173,8 +1183,28 @@ impl eframe::App for CircuitApp {
                                         &mna::format_current(current.abs()),
                                     );
                                     metric_row(ui, "Direction", direction);
+                                    metric_row(
+                                        ui,
+                                        "Animation",
+                                        if !self.simulate {
+                                            "Simulation off"
+                                        } else if !self.simulation_ui.current_flow.enabled {
+                                            "Disabled"
+                                        } else if current.abs()
+                                            < self
+                                                .simulation_ui
+                                                .current_flow
+                                                .minimum_visible_current_a
+                                        {
+                                            "Below display threshold"
+                                        } else {
+                                            "Active"
+                                        },
+                                    );
                                 } else if dc.wire_current.contains_key(&wire.id) {
-                                    metric_row(ui, "Current", "varies at junction / unavailable");
+                                    metric_row(ui, "Segment current", "Current varies by segment");
+                                    metric_row(ui, "Direction", "Unavailable");
+                                    metric_row(ui, "Animation", "Skipped for safety");
                                 }
                             }
                         }
@@ -1319,25 +1349,8 @@ impl eframe::App for CircuitApp {
                 ctx.request_repaint();
             }
 
-            // Flow arrows are only for valid load paths. A short is a fault, not
-            // useful "current flow", so it gets red wire highlighting instead.
-            let flow_speed = simulation
-                .dc
-                .as_ref()
-                .map(|dc| {
-                    let max_i = dc
-                        .branch_current
-                        .values()
-                        .map(|v| v.abs())
-                        .fold(0.0_f64, f64::max);
-                    (max_i as f32 * 8000.0).clamp(60.0, 220.0)
-                })
-                .unwrap_or(110.0);
-            let flow_phase = ctx.input(|i| i.time) as f32 * flow_speed;
-            let show_flow = flow_overlay_enabled(&simulation, self.simulate);
-            if show_flow {
-                ctx.request_repaint();
-            }
+            let show_flow = flow_overlay_enabled(&simulation, self.simulate)
+                && self.simulation_ui.current_flow.enabled;
 
             // ── View transform ──────────────────────────────────────────
             let view = CanvasView {
@@ -1413,6 +1426,18 @@ impl eframe::App for CircuitApp {
                 })
                 .unwrap_or(1.0);
             for wire in &self.wires {
+                let visible = wire
+                    .points
+                    .iter()
+                    .any(|point| rect.expand(24.0).contains(view.to_screen(*point)))
+                    || wire.points.windows(2).any(|segment| {
+                        Rect::from_two_pos(view.to_screen(segment[0]), view.to_screen(segment[1]))
+                            .expand(4.0)
+                            .intersects(rect)
+                    });
+                if !visible {
+                    continue;
+                }
                 let energized = simulation.energized_wires.contains(&wire.id);
                 let net_highlighted = self.highlighted_net_wires.contains(&wire.id)
                     && !self.highlighted_net_wires.is_empty();
@@ -1434,8 +1459,8 @@ impl eframe::App for CircuitApp {
                     self.selected == Some(Selection::Wire(wire.id)),
                     energized,
                     simulation.shorted && energized,
-                    show_flow && dc_i.is_some_and(|current| current.abs() > 1e-9),
-                    flow_phase,
+                    false,
+                    0.0,
                     net_highlighted,
                     dc_v,
                     dc_i,
@@ -1447,12 +1472,52 @@ impl eframe::App for CircuitApp {
                 );
             }
 
+            self.current_flow_cache.rebuild_if_needed(
+                self.circuit_revision,
+                &self.wires,
+                simulation
+                    .dc
+                    .as_ref()
+                    .filter(|_| show_flow && !simulation.shorted),
+            );
+            let flow_is_animating = show_flow
+                && render_current_flow(
+                    &self.current_flow_cache,
+                    FlowRenderInput {
+                        painter: &painter,
+                        viewport: rect,
+                        view,
+                        time_seconds: ctx.input(|i| i.time),
+                        settings: &self.simulation_ui.current_flow,
+                        selected_wire: match self.selected {
+                            Some(Selection::Wire(id)) => Some(id),
+                            _ => None,
+                        },
+                        highlighted_wires: &self.highlighted_net_wires,
+                    },
+                );
+            if flow_is_animating {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    1.0 / self.simulation_ui.current_flow.quality.fps() as f64,
+                ));
+            }
+
             // Compute connected pins for unconnected-pin rendering. This can be
             // expensive on larger circuits, so it is cached by circuit revision.
             let connected_pins = self.current_connected_pins();
 
             for component in &self.components {
                 let cid = component.id;
+                let size = component_size(component) * view.zoom;
+                if !Rect::from_center_size(
+                    view.to_screen(component.pos),
+                    size.max(Vec2::splat(12.0)),
+                )
+                .expand(24.0)
+                .intersects(rect)
+                {
+                    continue;
+                }
                 let dc_v = simulation
                     .dc
                     .as_ref()
@@ -1465,13 +1530,13 @@ impl eframe::App for CircuitApp {
                     &painter,
                     component,
                     self.selected == Some(Selection::Component(cid)),
-                    self.show_pins,
+                    self.show_pins && self.zoom >= 0.38,
                     simulation.energized_components.contains(&cid),
                     &connected_pins,
                     view,
                     dc_v,
                     dc_i,
-                    self.simulation_ui.show_dc_overlay && self.simulate,
+                    self.simulation_ui.show_dc_overlay && self.simulate && self.zoom >= 0.48,
                 );
             }
 
