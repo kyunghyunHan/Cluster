@@ -13,7 +13,7 @@ use crate::ui::bottom_dock::{
     PcbPreviewFootprint, PcbPreviewRatsnest, PcbPreviewTrack,
 };
 use crate::ui::breadboard::BreadboardRoute;
-use egui::{Pos2, Rect, Vec2};
+use egui::{Pos2, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -1588,11 +1588,12 @@ impl crate::CircuitApp {
 
     pub(crate) fn save_circuit_json(&mut self) {
         self.save_current_page();
-        match self.write_circuit_json(crate::SAVE_PATH) {
+        let path = crate::ui::app::default_save_path();
+        match self.write_circuit_json(&path) {
             Ok(()) => {
                 self.history_state.dirty = false;
                 self.last_autorecover_revision = self.circuit_revision;
-                self.status = format!("Saved {}.", crate::SAVE_PATH);
+                self.status = format!("Saved {}.", path.display());
             }
             Err(err) => {
                 self.status = format!("Save failed: {err}");
@@ -1821,17 +1822,24 @@ impl crate::CircuitApp {
     // ── Persistence ──────────────────────────────────────────────────────────
 
     pub(crate) fn load_circuit_json(&mut self) {
-        self.load_circuit_json_from(crate::SAVE_PATH, false);
+        self.load_circuit_json_from(&crate::ui::app::default_save_path(), false);
     }
 
     pub(crate) fn recover_autosave(&mut self) {
-        self.load_circuit_json_from(crate::AUTORECOVER_PATH, true);
+        self.load_circuit_json_from(&crate::ui::app::autorecover_path(self.document_id), true);
     }
 
-    pub(crate) fn write_circuit_json(&self, path: &str) -> Result<(), String> {
+    pub(crate) fn write_circuit_json(&self, path: &std::path::Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("Create {}: {error}", parent.display()))?;
+        }
         let saved = SavedCircuit::from_app(self);
         let json = serde_json::to_string_pretty(&saved).map_err(|e| e.to_string())?;
-        write_with_backup(path, &json)
+        let path_text = path
+            .to_str()
+            .ok_or_else(|| format!("Path is not valid UTF-8: {}", path.display()))?;
+        write_with_backup(path_text, &json)
     }
 
     pub(crate) fn backup_dirty_work(&mut self, reason: &str) {
@@ -1839,7 +1847,7 @@ impl crate::CircuitApp {
             return;
         }
         self.save_current_page();
-        match self.write_circuit_json(crate::AUTORECOVER_PATH) {
+        match self.write_circuit_json(&crate::ui::app::autorecover_path(self.document_id)) {
             Ok(()) => {
                 self.status = format!("Auto-saved recovery before {reason}.");
             }
@@ -1849,8 +1857,8 @@ impl crate::CircuitApp {
         }
     }
 
-    pub(crate) fn load_circuit_json_from(&mut self, path: &str, recovery: bool) {
-        if path != crate::AUTORECOVER_PATH {
+    pub(crate) fn load_circuit_json_from(&mut self, path: &std::path::Path, recovery: bool) {
+        if !recovery {
             self.backup_dirty_work("load");
         }
         match std::fs::read_to_string(path)
@@ -1872,14 +1880,18 @@ impl crate::CircuitApp {
                     self.last_autorecover_revision = self.circuit_revision;
                 }
                 self.status = if load_notes.is_empty() {
-                    format!("Loaded {path}.")
+                    format!("Loaded {}.", path.display())
                 } else {
-                    format!("Loaded {path} with {} repair(s).", load_notes.len())
+                    format!(
+                        "Loaded {} with {} repair(s).",
+                        path.display(),
+                        load_notes.len()
+                    )
                 };
                 self.pending_fit = true;
             }
             Err(err) => {
-                self.status = format!("Load {path} failed: {err}");
+                self.status = format!("Load {} failed: {err}", path.display());
             }
         }
     }
@@ -1888,6 +1900,7 @@ impl crate::CircuitApp {
 
     pub(crate) fn current_simulation(&mut self) -> crate::engine::simulation::Simulation {
         if !self.simulate {
+            self.simulation_run_state = crate::ui::app::SimulationRunState::Stopped;
             return crate::engine::simulation::Simulation::default();
         }
         let ac_key = self.simulation_ui.ac_freq_hz.to_bits();
@@ -1896,9 +1909,21 @@ impl crate::CircuitApp {
             && *cached_ac_key == ac_key
         {
             self.performance.simulation_cache_hit = true;
+            self.simulation_run_state = match simulation.status {
+                crate::engine::simulation::SimulationStatus::Ok => {
+                    crate::ui::app::SimulationRunState::Valid
+                }
+                crate::engine::simulation::SimulationStatus::Warning => {
+                    crate::ui::app::SimulationRunState::Warning
+                }
+                crate::engine::simulation::SimulationStatus::Failed => {
+                    crate::ui::app::SimulationRunState::Failed
+                }
+            };
             return simulation.clone();
         }
         self.performance.simulation_cache_hit = false;
+        self.simulation_run_state = crate::ui::app::SimulationRunState::Solving;
         let mna_started = std::time::Instant::now();
         let mut simulation = simulation_engine::analyze_circuit(&self.components, &self.wires);
         simulation.ac = mna::solve_ac(
@@ -1915,8 +1940,20 @@ impl crate::CircuitApp {
             crate::run_erc_with_netlist(&self.components, &self.wires, &simulation, &netlist);
         self.performance.erc_ms = erc_started.elapsed().as_secs_f64() * 1_000.0;
         self.cached_simulation = Some((self.circuit_revision, ac_key, simulation.clone()));
+        self.simulation_revision = self.simulation_revision.saturating_add(1);
         self.dirty_flags.validation_dirty = false;
         self.dirty_flags.simulation_dirty = false;
+        self.simulation_run_state = match simulation.status {
+            crate::engine::simulation::SimulationStatus::Ok => {
+                crate::ui::app::SimulationRunState::Valid
+            }
+            crate::engine::simulation::SimulationStatus::Warning => {
+                crate::ui::app::SimulationRunState::Warning
+            }
+            crate::engine::simulation::SimulationStatus::Failed => {
+                crate::ui::app::SimulationRunState::Failed
+            }
+        };
         simulation
     }
 
@@ -1955,13 +1992,16 @@ impl crate::CircuitApp {
             return;
         }
         self.save_current_page();
-        if let Err(err) = self.write_circuit_json(crate::AUTORECOVER_PATH) {
+        if let Err(err) =
+            self.write_circuit_json(&crate::ui::app::autorecover_path(self.document_id))
+        {
             self.status = format!("Auto backup failed: {err}");
             return;
         }
         self.last_autorecover_revision = self.circuit_revision;
     }
 
+    #[allow(clippy::type_complexity)] // Compatibility boundary for schema-v4 pages.
     pub(crate) fn effective_pages(
         &self,
     ) -> Vec<(String, Vec<Component>, Vec<Wire>, u64, Counters)> {

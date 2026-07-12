@@ -40,6 +40,11 @@ impl crate::CircuitApp {
         self.history_state.dirty = true;
         self.dirty_flags.mark_document_changed();
         self.invalidate_analysis_cache();
+        self.simulation_run_state = if self.simulate {
+            crate::ui::app::SimulationRunState::Dirty
+        } else {
+            crate::ui::app::SimulationRunState::Stopped
+        };
     }
 
     pub(crate) fn invalidate_analysis_cache(&mut self) {

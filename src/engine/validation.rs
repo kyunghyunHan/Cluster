@@ -35,6 +35,7 @@ pub(crate) struct ErcRuleDetails {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Stable rule identifiers outlive individual UI integrations.
 pub(crate) enum ErcRule {
     General,
     DuplicateReference,
@@ -343,6 +344,7 @@ impl ErcViolation {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn fix_suggestion(&self) -> Option<&'static str> {
         self.fix_hint()
     }
@@ -406,6 +408,7 @@ pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolat
 ///
 /// Pass the same `CircuitNetlist` used for simulation and the `DcResult`
 /// from the MNA solver.  Returns additional violations beyond the static rules.
+#[allow(dead_code)]
 pub(crate) fn validate_dc_rules(
     netlist: &CircuitNetlist,
     dc: &crate::engine::mna::DcResult,
@@ -652,16 +655,14 @@ fn check_5v_on_3v3(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
         let pins: Vec<&NetlistPin> = netlist.pins.iter().filter(|p| p.net_id == net.id).collect();
         let has_5v = pins.iter().any(|p| pin_is_5v_source(p));
         let target_3v3 = pins.iter().find(|p| pin_name_is_3v3(&p.pin_name));
-        if has_5v {
-            if let Some(target) = target_3v3 {
-                v.push(ErcViolation {
-                    rule: ErcRule::Rail5vTo3v3,
-                    severity: ErcSeverity::Error,
-                    component_id: Some(target.component_id),
-                    wire_id: None,
-                    message: format!("{} connects 5V to a 3.3V rail/pin.", net.name),
-                });
-            }
+        if has_5v && let Some(target) = target_3v3 {
+            v.push(ErcViolation {
+                rule: ErcRule::Rail5vTo3v3,
+                severity: ErcSeverity::Error,
+                component_id: Some(target.component_id),
+                wire_id: None,
+                message: format!("{} connects 5V to a 3.3V rail/pin.", net.name),
+            });
         }
     }
 }
@@ -762,9 +763,8 @@ fn check_power_rail_conflicts(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation
             .iter()
             .any(|pin| pin.pin_name.eq_ignore_ascii_case("5V") || pin_is_5v_source(pin));
         let rail_3v3 = pins.iter().find(|pin| pin_name_is_3v3(&pin.pin_name));
-        if has_5v {
-            if let Some(rail) = rail_3v3 {
-                v.push(ErcViolation {
+        if has_5v && let Some(rail) = rail_3v3 {
+            v.push(ErcViolation {
                     rule: ErcRule::PowerRailConflict,
                     severity: ErcSeverity::Error,
                     component_id: Some(rail.component_id),
@@ -774,7 +774,6 @@ fn check_power_rail_conflicts(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation
                         net.name
                     ),
                 });
-            }
         }
     }
 }
@@ -1374,7 +1373,7 @@ fn check_i2c_address_conflict(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation
         }
     }
 
-    for (_net_id, devices) in &net_i2c_devices {
+    for devices in net_i2c_devices.values() {
         // Deduplicate by component_id
         let mut unique: Vec<(u64, &str, ComponentKind)> = Vec::new();
         for &(id, label, kind) in devices {

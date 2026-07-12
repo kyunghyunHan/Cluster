@@ -5,6 +5,7 @@
 //! ngspice backend (see `engine::ngspice`).
 
 /// Errors that can occur during a DC operating-point solve.
+#[allow(dead_code)] // Stable taxonomy also covers external/future solver backends.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SimulationError {
     NoGround,

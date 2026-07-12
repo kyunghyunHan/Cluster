@@ -15,16 +15,11 @@ pub(crate) use circuit::{
 };
 pub(crate) use component::{Component, ComponentKind, SimulationSupport, electrical_metadata};
 pub(crate) use custom_part::{
-    CUSTOM_PARTS_DIR, CustomPartDef, custom_part, custom_part_count, custom_part_list,
-    load_custom_parts_dir, sample_part_json,
+    CUSTOM_PARTS_DIR, custom_part, custom_part_list, load_custom_parts_dir, sample_part_json,
 };
-pub(crate) use graph::{
-    Branch, BranchKind, Junction, NodeId, PinConnection as GraphPinConnection, SchematicGraph,
-    SchematicNet as GraphNet, SchematicNode, WireSegment, build_schematic_graph,
-};
+pub(crate) use graph::build_schematic_graph;
 pub(crate) use net::{
-    CircuitNetlist, JunctionDot, Net, NetLabelScope, NetlistAnnotations, NoConnectMarker,
-    WireNetSegment,
+    CircuitNetlist, Net, NetLabelScope, NetlistAnnotations, NoConnectMarker, WireNetSegment,
 };
 pub(crate) use pin::{CircuitPin, ElectricalType, NetlistPin, PinRef, PinRole};
 // Only the items needed by code outside the model module are re-exported.
@@ -34,6 +29,5 @@ pub(crate) use pin_defs::{
     component_pin_defs, component_pins, component_size, module_pin_y, rotate_point,
 };
 pub(crate) use wire::{
-    ComponentId, JunctionId, NetId, PinId, SavedWireEndpoint, Wire, WireEndpoint, WireSegmentId,
-    distance_to_segment, point_touches_wire_segment,
+    Wire, WireEndpoint, WireSegmentId, distance_to_segment, point_touches_wire_segment,
 };

@@ -227,10 +227,6 @@ pub(crate) fn custom_part_list() -> Vec<(String, String)> {
     list
 }
 
-pub(crate) fn custom_part_count() -> usize {
-    CUSTOM_PARTS.read().expect("custom part registry").len()
-}
-
 /// Load every `*.json` part file in `dir`, replacing previously loaded parts
 /// that share the same id. Returns the number of parts loaded plus one
 /// human-readable note per skipped file. A missing directory loads zero parts

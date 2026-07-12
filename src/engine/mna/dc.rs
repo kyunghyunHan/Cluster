@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet};
 use egui::Pos2;
 
 use crate::{
-    CircuitPin, Component, ComponentKind, PinRole, Wire, component_pin_defs, parse_metric_value,
-    point_touches_wire_segment, wire_contact_points,
+    CircuitPin, Component, ComponentKind, PinRole, Wire, WireSegmentId, component_pin_defs,
+    parse_metric_value, point_touches_wire_segment, wire_contact_points,
 };
 
 use super::errors::{ComponentPowerRole, SimulationError};
@@ -25,6 +25,7 @@ use super::models::{BjtEntry, DiodeEntry, IsEntry, MosEntry, NetMap, ResEntry, V
 
 // ── Public result type ────────────────────────────────────────────────────────
 
+#[allow(dead_code)] // Graph aliases are retained for result-format compatibility.
 #[derive(Default, Clone, Debug)]
 pub struct DcResult {
     /// net_root → voltage in Volts (GND net = 0.0 V)
@@ -52,7 +53,7 @@ pub struct DcResult {
     /// Wires whose single displayed current is unambiguous (no mid-wire branch).
     pub wire_current_known: HashSet<u64>,
     /// WireSegmentId → conventional current through that solved segment (A).
-    pub wire_segment_currents: HashMap<u64, f64>,
+    pub wire_segment_currents: HashMap<WireSegmentId, f64>,
     /// component_id → power role
     pub component_power_role: HashMap<u64, ComponentPowerRole>,
     /// Maximum absolute KCL residual across solved non-ground nodes (A)
@@ -70,6 +71,7 @@ pub struct DcResult {
 /// Attempt a DC operating-point solve.
 /// Returns `None` when the circuit has no GND, is open, or the matrix is
 /// singular (floating sub-network, etc.).
+#[cfg(test)]
 pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
     solve_dc_detailed(components, wires).ok()
 }
@@ -137,7 +139,7 @@ pub fn solve_dc_detailed(
                 }
             }
         }
-        for (_, nodes) in &label_to_nodes {
+        for nodes in label_to_nodes.values() {
             for w in nodes.windows(2) {
                 nm.join(w[0], w[1]);
             }
@@ -203,7 +205,7 @@ pub fn solve_dc_detailed(
 
     for comp in components {
         let pins = component_pin_defs(comp);
-        let p0 = pins.get(0).and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
+        let p0 = pins.first().and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
         let p1 = pins.get(1).and_then(|p| mna_node(p.pos, &mut nm, &mna_of));
 
         match comp.kind {
@@ -957,10 +959,7 @@ pub fn solve_dc_detailed(
             && let Some(&current) = wire_current.get(&wire.id)
         {
             for (segment_index, _) in wire.points.windows(2).enumerate() {
-                let segment_id = wire
-                    .id
-                    .saturating_mul(1_000)
-                    .saturating_add(segment_index as u64 + 1);
+                let segment_id = WireSegmentId::new(wire.id, segment_index);
                 wire_segment_currents.insert(segment_id, current);
             }
         }

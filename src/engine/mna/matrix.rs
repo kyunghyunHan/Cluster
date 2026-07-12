@@ -87,6 +87,7 @@ impl Mna {
 
     /// Stamp a voltage-controlled current source (VCCS / transconductance).
     /// Output current = `gm` × (V_ctrl_p − V_ctrl_n), flows INTO `pos`.
+    #[allow(dead_code)] // Reserved for controlled-source models.
     pub(super) fn stamp_vccs(
         &mut self,
         pos: usize,
@@ -114,6 +115,7 @@ impl Mna {
     }
 
     /// Solve A·x = z with Gaussian elimination + partial pivoting.
+    #[allow(clippy::needless_range_loop)] // Gaussian elimination requires indexed columns.
     pub(super) fn solve(self) -> Result<SolveSolution, SimulationError> {
         let sz = self.n + self.m;
         if sz == 0 {

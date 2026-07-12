@@ -1,4 +1,4 @@
-use crate::app::{AlignDir, Selection, Tool};
+use crate::app::{Selection, Tool};
 
 // Re-export utilities moved to sub-modules.
 // These keep `crate::X` paths working in engine/, export/, and in the local
@@ -10,24 +10,21 @@ pub(crate) use crate::model::{
 };
 
 use crate::engine::mna;
+#[cfg(test)]
 use crate::engine::netlist::build_circuit_netlist;
-use crate::engine::simulation as simulation_engine;
 use crate::engine::simulation::{Conductance, Simulation, SimulationStatus};
 use crate::engine::validation::{
     ErcRule, ErcSeverity, ErcViolation, pin_is_controller_scl, pin_is_controller_sda,
     pin_is_i2c_named, pin_is_microcontroller_gpio, validate_beginner_rules,
 };
 use crate::model::*;
-use crate::storage::save::write_with_backup;
 use crate::ui::bottom_dock::{
-    BottomDockAction, BottomDockModel, BottomDockTab, PageTabsAction, PcbDockSummary,
-    render_bottom_dock, render_page_tabs,
+    BottomDockAction, BottomDockModel, BottomDockTab, PageTabsAction, render_bottom_dock,
+    render_page_tabs,
 };
-use crate::ui::breadboard::{
-    BreadboardAction, BreadboardRoute, build_breadboard_guide, render_breadboard_view,
-};
+use crate::ui::breadboard::{BreadboardAction, build_breadboard_guide, render_breadboard_view};
 use crate::ui::canvas::current_flow::{
-    CurrentFlowCache, CurrentFlowSettings, FlowRenderInput, render_current_flow,
+    CurrentFlowCache, CurrentFlowSettings, FlowCacheKey, FlowRenderInput, render_current_flow,
 };
 use crate::ui::canvas::interaction::{SmartWireTone, assess_pin_pair};
 use crate::ui::canvas::{
@@ -41,14 +38,34 @@ use crate::ui::left_palette::{
 use crate::ui::right_inspector::{InspectorTab, render_inspector_header};
 use crate::ui::status_bar::{StatusBarModel, render_status_bar};
 use crate::ui::top_toolbar::{TopToolbarAction, TopToolbarModel, render_top_toolbar};
-use crate::ui::validation_panel::{ValidationPanelAction, render_validation_panel};
+use crate::ui::validation_panel::ValidationPanelAction;
 use eframe::egui;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs;
 
-pub(crate) const SAVE_PATH: &str = "cluster_circuit.json";
-pub(crate) const AUTORECOVER_PATH: &str = "cluster_autorecover.json";
+pub(crate) fn application_data_dir() -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from);
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(|home| std::path::PathBuf::from(home).join("Library/Application Support"));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/share"))
+        });
+    base.unwrap_or_else(std::env::temp_dir).join("Cluster")
+}
+
+pub(crate) fn default_save_path() -> std::path::PathBuf {
+    application_data_dir().join("cluster_circuit.json")
+}
+pub(crate) fn autorecover_path(document_id: u64) -> std::path::PathBuf {
+    application_data_dir()
+        .join("recovery")
+        .join(format!("document-{document_id}.json"))
+}
 
 // Tool, AlignDir, Selection are defined in app/state.rs and imported above.
 
@@ -83,6 +100,29 @@ pub(crate) enum Workspace {
     Breadboard,
     Pcb,
     Code,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SimulationRunState {
+    Stopped,
+    Dirty,
+    Solving,
+    Valid,
+    Warning,
+    Failed,
+}
+
+impl SimulationRunState {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Stopped => "Stopped",
+            Self::Dirty => "Stale",
+            Self::Solving => "Solving",
+            Self::Valid => "Valid",
+            Self::Warning => "Warning",
+            Self::Failed => "Failed",
+        }
+    }
 }
 
 impl Default for UiState {
@@ -196,12 +236,6 @@ impl DirtyFlags {
         self.simulation_dirty = true;
         self.pcb_sync_dirty = true;
     }
-
-    pub(crate) fn clear_analysis(&mut self) {
-        self.connectivity_dirty = false;
-        self.validation_dirty = false;
-        self.simulation_dirty = false;
-    }
 }
 
 pub(crate) struct CircuitApp {
@@ -221,6 +255,7 @@ pub(crate) struct CircuitApp {
     pub(crate) show_pins: bool,
     pub(crate) show_grid: bool,
     pub(crate) simulate: bool,
+    pub(crate) simulation_run_state: SimulationRunState,
     pub(crate) status: String,
     pub(crate) next_id: u64,
     pub(crate) counters: Counters,
@@ -254,11 +289,15 @@ pub(crate) struct CircuitApp {
     pub(crate) dirty_flags: DirtyFlags,
     pub(crate) cached_netlist: Option<(u64, CircuitNetlist)>,
     pub(crate) cached_simulation: Option<(u64, u32, Simulation)>,
+    pub(crate) simulation_revision: u64,
     pub(crate) cached_connected_pins: Option<(u64, Vec<(i32, i32)>)>,
     pub(crate) current_flow_cache: CurrentFlowCache,
     pub(crate) last_autorecover_revision: u64,
+    pub(crate) document_id: u64,
     // ── Multi-page ──────────────────────────────────────────────────────
     /// All pages: (name, components, wires, next_id, counters)
+    #[allow(clippy::type_complexity)]
+    // Kept compatible with schema-v4 snapshots during migration.
     pub(crate) pages: Vec<(String, Vec<Component>, Vec<Wire>, u64, Counters)>,
     pub(crate) current_page: usize,
     // ── Find dialog ─────────────────────────────────────────────────────
@@ -312,6 +351,7 @@ impl CircuitApp {
             show_pins: true,
             show_grid: true,
             simulate: true,
+            simulation_run_state: SimulationRunState::Dirty,
             status: String::new(),
             next_id: 1,
             counters: Counters::default(),
@@ -336,9 +376,13 @@ impl CircuitApp {
             dirty_flags: DirtyFlags::default(),
             cached_netlist: None,
             cached_simulation: None,
+            simulation_revision: 0,
             cached_connected_pins: None,
             current_flow_cache: CurrentFlowCache::default(),
             last_autorecover_revision: 0,
+            document_id: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(1, |duration| duration.as_nanos() as u64),
             pages: vec![(
                 "Page 1".to_string(),
                 Vec::new(),
@@ -485,6 +529,11 @@ impl eframe::App for CircuitApp {
             self.simulation_ui.flow_started_at = self.simulate.then_some(now);
         }
         let simulation = self.current_simulation();
+        let toolbar_simulation_summary = format!(
+            "{} · {}",
+            self.simulation_run_state.label(),
+            simulation.summary
+        );
         let inspector_netlist = self.current_netlist();
         let pcb_summary = self.pcb_dock_summary();
 
@@ -494,7 +543,7 @@ impl eframe::App for CircuitApp {
                 TopToolbarModel {
                     tool: self.tool,
                     zoom: self.zoom,
-                    simulation_summary: &simulation.summary,
+                    simulation_summary: &toolbar_simulation_summary,
                     snap: &mut self.snap,
                     orthogonal_wires: &mut self.orthogonal_wires,
                     show_pins: &mut self.show_pins,
@@ -747,15 +796,14 @@ impl eframe::App for CircuitApp {
                                                 &mna::format_voltage(max_voltage),
                                             );
                                         }
-                                        if net_v.len() > 1 {
-                                            if let Some(&min_voltage) = net_v.last() {
+                                        if net_v.len() > 1
+                                            && let Some(&min_voltage) = net_v.last() {
                                                 dc_metric_row(
                                                     ui,
                                                     "Min node V",
                                                     &mna::format_voltage(min_voltage),
                                                 );
                                             }
-                                        }
                                     }
                                     dc_metric_row(
                                         ui,
@@ -799,9 +847,9 @@ impl eframe::App for CircuitApp {
                         );
 
                         // ── Power Budget Panel ───────────────────────────────────
-                        if self.simulate {
-                            if let Some(dc) = &simulation.dc {
-                                if !dc.component_power.is_empty() {
+                        if self.simulate
+                            && let Some(dc) = &simulation.dc
+                                && !dc.component_power.is_empty() {
                                     palette_section(ui, "Power Budget", SectionMode::Collapsed, |ui| {
                                         let dissipated_power: f64 = dc.component_power
                                             .iter()
@@ -888,8 +936,6 @@ impl eframe::App for CircuitApp {
                                         }
                                     });
                                 }
-                            }
-                        }
 
                         palette_section(ui, "Shortcuts", SectionMode::Collapsed, |ui| {
                             metric_row(ui, "W", "wire tool");
@@ -1501,13 +1547,12 @@ impl eframe::App for CircuitApp {
 
             // Middle-mouse, Alt+drag, or Space+drag to pan
             let space_held = ctx.input(|i| i.key_down(egui::Key::Space));
-            if space_held {
-                if ctx
+            if space_held
+                && ctx
                     .input(|i| i.pointer.hover_pos())
                     .is_some_and(|p| rect.contains(p))
-                {
-                    ctx.set_cursor_icon(egui::CursorIcon::Grab);
-                }
+            {
+                ctx.set_cursor_icon(egui::CursorIcon::Grab);
             }
             let panning = ctx.input(|i| i.pointer.middle_down())
                 || (response.dragged() && ctx.input(|i| i.modifiers.alt))
@@ -1635,7 +1680,10 @@ impl eframe::App for CircuitApp {
             }
 
             let flow_rebuilt = self.current_flow_cache.rebuild_if_needed(
-                self.circuit_revision,
+                FlowCacheKey {
+                    geometry_revision: self.circuit_revision,
+                    simulation_revision: self.simulation_revision,
+                },
                 &self.wires,
                 simulation
                     .dc
@@ -1761,10 +1809,11 @@ impl eframe::App for CircuitApp {
             draw_junctions(&painter, &self.wires, view);
 
             // ── Node voltage circles at wire junctions ─────────────────
-            if self.simulation_ui.show_dc_overlay && self.simulate {
-                if let Some(dc) = &simulation.dc {
-                    draw_node_voltage_indicators(&painter, &self.wires, dc, view, dc.vmax);
-                }
+            if self.simulation_ui.show_dc_overlay
+                && self.simulate
+                && let Some(dc) = &simulation.dc
+            {
+                draw_node_voltage_indicators(&painter, &self.wires, dc, view, dc.vmax);
             }
 
             // ── Simulation summary overlay (top-right of canvas) ───────
@@ -2058,87 +2107,77 @@ impl eframe::App for CircuitApp {
                 if in_select_mode {
                     if let Some(Selection::Component(hov_id)) =
                         hit_test_component(world_hover, &self.components)
+                        && let Some(comp) = self.components.iter().find(|c| c.id == hov_id)
                     {
-                        if let Some(comp) = self.components.iter().find(|c| c.id == hov_id) {
-                            // Glow ring around hovered component
-                            let bounds = component_bounds(comp);
-                            let screen_center = view.to_screen(bounds.center());
-                            let glow_r =
-                                (bounds.width().max(bounds.height()) * 0.55 * view.zoom).max(18.0);
-                            for i in 0..3 {
-                                let alpha = 22 - i * 7;
-                                painter.circle_stroke(
-                                    screen_center,
-                                    glow_r + i as f32 * 4.0,
-                                    Stroke::new(
-                                        2.5 - i as f32 * 0.5,
-                                        Color32::from_rgba_unmultiplied(80, 200, 255, alpha),
-                                    ),
-                                );
-                            }
-
-                            // Build tooltip: base info + DC sim measurements
-                            let base = if comp.kind == ComponentKind::PushButton && self.simulate {
-                                let state = if comp.value.to_lowercase().contains("open") {
-                                    "OPEN"
-                                } else {
-                                    "CLOSED"
-                                };
-                                format!("{} [{}]  Click to toggle", comp.label, state)
-                            } else if comp.kind == ComponentKind::Switch
-                                || comp.kind == ComponentKind::SlideSwitch
-                            {
-                                let state = if comp.value.to_lowercase().contains("open") {
-                                    "OPEN"
-                                } else {
-                                    "CLOSED"
-                                };
-                                format!("{} [{}]  Click to toggle", comp.label, state)
-                            } else if let Some(vl) = canvas_value_label(comp) {
-                                format!(
-                                    "{}  {}  {}",
-                                    comp.label,
-                                    component_kind_label(comp.kind),
-                                    vl
-                                )
-                            } else {
-                                format!("{}  {}", comp.label, component_kind_label(comp.kind))
-                            };
-                            let mut dc_line = String::new();
-                            if let Some(dc) = &simulation.dc {
-                                let mut parts: Vec<String> = Vec::new();
-                                if let Some(&v) = dc.component_voltage.get(&hov_id) {
-                                    if v.abs() > 1e-9 {
-                                        parts.push(mna::format_voltage(v));
-                                    }
-                                }
-                                if let Some(&i) = dc.branch_current.get(&hov_id) {
-                                    if i.abs() > 1e-12 {
-                                        parts.push(mna::format_current(i));
-                                    }
-                                }
-                                if let Some(&p) = dc.component_power.get(&hov_id) {
-                                    if p.abs() > 1e-12 {
-                                        parts.push(mna::format_si(p, "W"));
-                                    }
-                                }
-                                if !parts.is_empty() {
-                                    dc_line = parts.join("  ·  ");
-                                }
-                            }
-                            let tip_lines: Vec<String> = if dc_line.is_empty() {
-                                vec![base]
-                            } else {
-                                vec![base, dc_line]
-                            };
-                            draw_probe_card(
-                                &painter,
-                                rect,
-                                raw_hover,
-                                &tip_lines,
-                                crate::ui::theme::ACCENT,
+                        // Glow ring around hovered component
+                        let bounds = component_bounds(comp);
+                        let screen_center = view.to_screen(bounds.center());
+                        let glow_r =
+                            (bounds.width().max(bounds.height()) * 0.55 * view.zoom).max(18.0);
+                        for i in 0..3 {
+                            let alpha = 22 - i * 7;
+                            painter.circle_stroke(
+                                screen_center,
+                                glow_r + i as f32 * 4.0,
+                                Stroke::new(
+                                    2.5 - i as f32 * 0.5,
+                                    Color32::from_rgba_unmultiplied(80, 200, 255, alpha),
+                                ),
                             );
                         }
+
+                        // Build tooltip: base info + DC sim measurements
+                        let base = if component_is_switch(comp.kind) {
+                            let state = if comp.value.to_lowercase().contains("open") {
+                                "OPEN"
+                            } else {
+                                "CLOSED"
+                            };
+                            format!("{} [{}]  Click to toggle", comp.label, state)
+                        } else if let Some(vl) = canvas_value_label(comp) {
+                            format!(
+                                "{}  {}  {}",
+                                comp.label,
+                                component_kind_label(comp.kind),
+                                vl
+                            )
+                        } else {
+                            format!("{}  {}", comp.label, component_kind_label(comp.kind))
+                        };
+                        let mut dc_line = String::new();
+                        if let Some(dc) = &simulation.dc {
+                            let mut parts: Vec<String> = Vec::new();
+                            if let Some(&v) = dc.component_voltage.get(&hov_id)
+                                && v.abs() > 1e-9
+                            {
+                                parts.push(mna::format_voltage(v));
+                            }
+                            if let Some(&i) = dc.branch_current.get(&hov_id)
+                                && i.abs() > 1e-12
+                            {
+                                parts.push(mna::format_current(i));
+                            }
+                            if let Some(&p) = dc.component_power.get(&hov_id)
+                                && p.abs() > 1e-12
+                            {
+                                parts.push(mna::format_si(p, "W"));
+                            }
+                            if !parts.is_empty() {
+                                dc_line = parts.join("  ·  ");
+                            }
+                        }
+                        let tip_lines: Vec<String> = if dc_line.is_empty() {
+                            vec![base]
+                        } else {
+                            vec![base, dc_line]
+                        };
+                        draw_probe_card(
+                            &painter,
+                            rect,
+                            raw_hover,
+                            &tip_lines,
+                            crate::ui::theme::ACCENT,
+                        );
                     }
                     // Wire net tooltip
                     if let Some(wid) = self.hovered_net_wire {
@@ -2197,52 +2236,50 @@ impl eframe::App for CircuitApp {
                             if let Selection::Component(cid) = sel {
                                 let comp_kind =
                                     self.components.iter().find(|c| c.id == cid).map(|c| c.kind);
-                                if let Some(kind) = comp_kind {
-                                    if component_is_switch(kind) {
-                                        if kind == ComponentKind::PushButton {
-                                            // Toggle on each click (open ↔ closed)
-                                            self.record_history();
-                                            if let Some(comp) =
-                                                self.components.iter_mut().find(|c| c.id == cid)
-                                            {
-                                                let open =
-                                                    comp.value.to_lowercase().contains("open");
-                                                comp.value = if open {
-                                                    "closed".to_string()
-                                                } else {
-                                                    "open".to_string()
-                                                };
-                                                let state = if open {
-                                                    "▶ CLOSED (ON)"
-                                                } else {
-                                                    "■ OPEN (OFF)"
-                                                };
-                                                self.status = format!("{} {}", comp.label, state);
-                                            }
-                                            self.invalidate_analysis_cache();
-                                            ctx.request_repaint();
-                                        } else {
-                                            // Toggle switch / slide switch: full edit with history
-                                            self.record_history();
-                                            if let Some(comp) =
-                                                self.components.iter_mut().find(|c| c.id == cid)
-                                            {
-                                                let open =
-                                                    comp.value.to_lowercase().contains("open");
-                                                comp.value = if open {
-                                                    "closed".to_string()
-                                                } else {
-                                                    "open".to_string()
-                                                };
-                                                let state =
-                                                    if open { "▶ CLOSED" } else { "■ OPEN" };
-                                                self.status = format!("{} {state}", comp.label);
-                                            }
-                                            self.invalidate_analysis_cache();
-                                            ctx.request_repaint();
+                                if let Some(kind) = comp_kind
+                                    && component_is_switch(kind)
+                                {
+                                    if kind == ComponentKind::PushButton {
+                                        // Toggle on each click (open ↔ closed)
+                                        self.record_history();
+                                        if let Some(comp) =
+                                            self.components.iter_mut().find(|c| c.id == cid)
+                                        {
+                                            let open = comp.value.to_lowercase().contains("open");
+                                            comp.value = if open {
+                                                "closed".to_string()
+                                            } else {
+                                                "open".to_string()
+                                            };
+                                            let state = if open {
+                                                "▶ CLOSED (ON)"
+                                            } else {
+                                                "■ OPEN (OFF)"
+                                            };
+                                            self.status = format!("{} {}", comp.label, state);
                                         }
-                                        self.selected = Some(Selection::Component(cid));
+                                        self.invalidate_analysis_cache();
+                                        ctx.request_repaint();
+                                    } else {
+                                        // Toggle switch / slide switch: full edit with history
+                                        self.record_history();
+                                        if let Some(comp) =
+                                            self.components.iter_mut().find(|c| c.id == cid)
+                                        {
+                                            let open = comp.value.to_lowercase().contains("open");
+                                            comp.value = if open {
+                                                "closed".to_string()
+                                            } else {
+                                                "open".to_string()
+                                            };
+                                            let state =
+                                                if open { "▶ CLOSED" } else { "■ OPEN" };
+                                            self.status = format!("{} {state}", comp.label);
+                                        }
+                                        self.invalidate_analysis_cache();
+                                        ctx.request_repaint();
                                     }
+                                    self.selected = Some(Selection::Component(cid));
                                 }
                             }
                             // Ctrl+click toggles multi-select; plain click sets primary selection
@@ -2421,17 +2458,16 @@ impl eframe::App for CircuitApp {
             }
 
             // Double-click component in Select mode → open inline value editor
-            if response.double_clicked() && self.tool == Tool::Select && self.inline_edit.is_none()
+            if response.double_clicked()
+                && self.tool == Tool::Select
+                && self.inline_edit.is_none()
+                && let Some(raw_pos) = pointer_in_rect
             {
-                if let Some(raw_pos) = pointer_in_rect {
-                    let world = view.to_world(raw_pos);
-                    if let Some(Selection::Component(cid)) =
-                        hit_test_component(world, &self.components)
-                    {
-                        if let Some(comp) = self.components.iter().find(|c| c.id == cid) {
-                            self.inline_edit = Some((cid, comp.value.clone()));
-                        }
-                    }
+                let world = view.to_world(raw_pos);
+                if let Some(Selection::Component(cid)) = hit_test_component(world, &self.components)
+                    && let Some(comp) = self.components.iter().find(|c| c.id == cid)
+                {
+                    self.inline_edit = Some((cid, comp.value.clone()));
                 }
             }
 
@@ -2671,19 +2707,17 @@ impl eframe::App for CircuitApp {
             let primary_down = ctx.input(|i| i.pointer.primary_down());
             if !primary_down {
                 self.drag = None;
-                if let Some(start) = self.rect_select_start.take() {
-                    if let Some(end) = self.canvas.cursor_world_pos {
-                        if start.distance(end) > 4.0 {
-                            let sel = Rect::from_two_pos(start, end);
-                            for comp in &self.components {
-                                if sel.contains(comp.pos) {
-                                    self.multi_selected.insert(comp.id);
-                                }
-                            }
-                            self.status =
-                                format!("{} component(s) selected.", self.multi_selected.len());
+                if let Some(start) = self.rect_select_start.take()
+                    && let Some(end) = self.canvas.cursor_world_pos
+                    && start.distance(end) > 4.0
+                {
+                    let sel = Rect::from_two_pos(start, end);
+                    for comp in &self.components {
+                        if sel.contains(comp.pos) {
+                            self.multi_selected.insert(comp.id);
                         }
                     }
+                    self.status = format!("{} component(s) selected.", self.multi_selected.len());
                 }
             }
         });
@@ -2767,7 +2801,7 @@ impl eframe::App for CircuitApp {
                 let pin_positions: HashSet<(i32, i32)> = self
                     .clipboard
                     .iter()
-                    .flat_map(|c| component_pin_defs(c))
+                    .flat_map(component_pin_defs)
                     .map(|p| (p.pos.x.round() as i32, p.pos.y.round() as i32))
                     .collect();
                 self.clipboard_wires = self

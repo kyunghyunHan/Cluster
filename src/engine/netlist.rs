@@ -359,17 +359,6 @@ fn electrical_type_for_role(role: PinRole) -> ElectricalType {
     }
 }
 
-fn wire_contact_points(components: &[Component], wires: &[Wire]) -> Vec<Pos2> {
-    let mut points = Vec::new();
-    for wire in wires {
-        points.extend(wire.points.iter().copied());
-    }
-    for component in components {
-        points.extend(component_pin_defs(component).into_iter().map(|pin| pin.pos));
-    }
-    points
-}
-
 fn wire_endpoint_contact_points(wires: &[Wire]) -> Vec<Pos2> {
     let mut points = Vec::new();
     for wire in wires {

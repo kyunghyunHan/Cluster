@@ -17,6 +17,7 @@ use super::display::parse_si_value;
 
 use super::models::NetMap;
 
+#[allow(dead_code)] // Graph-oriented AC fields are part of the solver result contract.
 #[derive(Default, Clone, Debug)]
 pub struct AcResult {
     /// net_root → complex voltage (re, im) in Volts
@@ -35,6 +36,7 @@ pub struct AcResult {
 /// Returns `None` when the circuit has no GND or the matrix is singular.
 /// Capacitors and inductors are modelled as complex admittances; resistors as
 /// real admittances. Voltage sources are treated as ideal (zero impedance).
+#[allow(clippy::needless_range_loop)] // Gaussian elimination requires indexed columns.
 pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Option<AcResult> {
     if freq_hz <= 0.0 {
         return None;
@@ -82,7 +84,7 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
                 }
             }
         }
-        for (_, nodes) in &label_nodes {
+        for nodes in label_nodes.values() {
             for w in nodes.windows(2) {
                 nm.join(w[0], w[1]);
             }
@@ -102,10 +104,10 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
             }
             ComponentKind::VSource | ComponentKind::Battery | ComponentKind::ISource => {
                 for pin in component_pin_defs(comp) {
-                    if pin.role == PinRole::Ground {
-                        if let Some(r) = nm.root_of(pin.pos) {
-                            gnd_roots.insert(r);
-                        }
+                    if pin.role == PinRole::Ground
+                        && let Some(r) = nm.root_of(pin.pos)
+                    {
+                        gnd_roots.insert(r);
                     }
                 }
             }
@@ -216,7 +218,7 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
     for comp in components {
         let pins = component_pin_defs(comp);
         let p0 = pins
-            .get(0)
+            .first()
             .and_then(|p| mna_node_ac(p.pos, &mut nm, &mna_of));
         let p1 = pins
             .get(1)
@@ -358,13 +360,13 @@ pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Optio
         let mut sum_im = 0.0;
         let mut cnt = 0usize;
         for &pt in &wire.points {
-            if let Some(root) = nm.root_of(pt) {
-                if let Some(&mna_idx) = mna_of.get(&root) {
-                    let (re, im) = vnode_c(mna_idx);
-                    sum_re += re;
-                    sum_im += im;
-                    cnt += 1;
-                }
+            if let Some(root) = nm.root_of(pt)
+                && let Some(&mna_idx) = mna_of.get(&root)
+            {
+                let (re, im) = vnode_c(mna_idx);
+                sum_re += re;
+                sum_im += im;
+                cnt += 1;
             }
         }
         if cnt > 0 {

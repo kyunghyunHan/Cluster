@@ -34,6 +34,7 @@ impl NetMap {
         Some(self.uf.find(idx))
     }
 
+    #[allow(dead_code)] // Reserved for graph-oriented solver entry points.
     pub(super) fn root_of_idx(&mut self, idx: usize) -> usize {
         self.uf.find(idx)
     }

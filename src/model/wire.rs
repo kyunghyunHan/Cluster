@@ -2,11 +2,21 @@ use crate::model::PinRef;
 use egui::Pos2;
 use serde::{Deserialize, Serialize};
 
-pub(crate) type ComponentId = u64;
-pub(crate) type PinId = String;
 pub(crate) type JunctionId = u64;
-pub(crate) type WireSegmentId = u64;
-pub(crate) type NetId = usize;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct WireSegmentId {
+    pub(crate) wire_id: u64,
+    pub(crate) segment_index: usize,
+}
+
+impl WireSegmentId {
+    pub(crate) const fn new(wire_id: u64, segment_index: usize) -> Self {
+        Self {
+            wire_id,
+            segment_index,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Wire {
@@ -47,26 +57,6 @@ impl Wire {
             points,
             start,
             end,
-        }
-    }
-
-    pub(crate) fn endpoint_at(&self, point_index: usize) -> Option<&WireEndpoint> {
-        if point_index == 0 {
-            Some(&self.start)
-        } else if point_index + 1 == self.points.len() {
-            Some(&self.end)
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn endpoint_at_mut(&mut self, point_index: usize) -> Option<&mut WireEndpoint> {
-        if point_index == 0 {
-            Some(&mut self.start)
-        } else if point_index + 1 == self.points.len() {
-            Some(&mut self.end)
-        } else {
-            None
         }
     }
 }

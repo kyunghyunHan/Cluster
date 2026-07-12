@@ -3,6 +3,7 @@ use egui::Pos2;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)] // Page scope is serialized for forward-compatible labels.
 pub(crate) enum NetLabelScope {
     /// Same-name labels connect only when they are already geometrically wired.
     Local,

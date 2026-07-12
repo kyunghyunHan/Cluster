@@ -23,6 +23,7 @@ use crate::model::{CircuitNetlist, Component, ComponentKind, Wire};
 
 /// Outcome of an ngspice operating-point run mapped to schematic elements.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // Optional backend result; UI integration is feature work.
 pub(crate) struct NgspiceResult {
     /// Net name → solved voltage (V).
     pub(crate) node_voltages: HashMap<String, f64>,
@@ -36,6 +37,7 @@ pub(crate) struct NgspiceResult {
 
 /// A component that was excluded from the ngspice netlist.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct NgspiceUnsupported {
     pub(crate) component_id: u64,
     pub(crate) reference: String,
@@ -44,6 +46,7 @@ pub(crate) struct NgspiceUnsupported {
 
 /// Errors that can occur when running ngspice.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) enum NgspiceError {
     /// The `ngspice` binary was not found on PATH.
     NotInstalled,
@@ -82,6 +85,7 @@ impl From<std::io::Error> for NgspiceError {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// Returns `true` if an `ngspice` binary is reachable on PATH.
+#[allow(dead_code)]
 pub(crate) fn is_ngspice_available() -> bool {
     std::process::Command::new("ngspice")
         .arg("--version")
@@ -95,6 +99,7 @@ pub(crate) fn is_ngspice_available() -> bool {
 ///
 /// Components with no SPICE model equivalent are listed in the returned
 /// `Vec<NgspiceUnsupported>` and omitted from the netlist.
+#[allow(dead_code)]
 pub(crate) fn export_ngspice_netlist(
     components: &[Component],
     _wires: &[Wire],
@@ -333,6 +338,7 @@ pub(crate) fn export_ngspice_netlist(
 ///
 /// Returns `Ok(NgspiceResult)` on success.  The temporary file is cleaned up
 /// after the run.
+#[allow(dead_code)]
 pub(crate) fn run_ngspice(netlist_text: &str) -> Result<NgspiceResult, NgspiceError> {
     if !is_ngspice_available() {
         return Err(NgspiceError::NotInstalled);

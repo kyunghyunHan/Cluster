@@ -500,16 +500,16 @@ pub(crate) fn generate_arduino_code(netlist: &CircuitNetlist) -> String {
             .iter()
             .any(|p| p.component_kind == ComponentKind::PushButton);
         let has_led_on_net = pins.iter().any(|p| p.component_kind == ComponentKind::Led);
-        if let Some(gpio_pin) = pins.iter().find(|p| pin_is_microcontroller_gpio(p)) {
-            if let Some(gpio_num) = digits_from_pin_name(&gpio_pin.pin_name) {
-                if has_button_on_net && button_gpio.is_none() {
-                    button_gpio = Some(gpio_num.clone());
-                }
-                if (has_led_on_net || net_drives_led_through_series_part(netlist, net.id))
-                    && led_gpio.is_none()
-                {
-                    led_gpio = Some(gpio_num);
-                }
+        if let Some(gpio_pin) = pins.iter().find(|p| pin_is_microcontroller_gpio(p))
+            && let Some(gpio_num) = digits_from_pin_name(&gpio_pin.pin_name)
+        {
+            if has_button_on_net && button_gpio.is_none() {
+                button_gpio = Some(gpio_num.clone());
+            }
+            if (has_led_on_net || net_drives_led_through_series_part(netlist, net.id))
+                && led_gpio.is_none()
+            {
+                led_gpio = Some(gpio_num);
             }
         }
     }
@@ -547,40 +547,41 @@ pub(crate) fn generate_arduino_code(netlist: &CircuitNetlist) -> String {
     }
 
     // Button-toggle pattern: extra state variable
-    if has_button && has_led {
-        if let (Some(btn), Some(led)) = (&button_gpio, &led_gpio) {
-            code.push_str(&format!("\nconst int BUTTON_PIN = {btn};\n"));
-            code.push_str(&format!("const int LED_PIN    = {led};\n"));
-            code.push_str("const unsigned long DEBOUNCE_MS = 50;\n");
-            code.push_str("\nbool ledState = false;\n");
-            code.push_str("int lastReading = HIGH;\n");
-            code.push_str("int stableState = HIGH;\n");
-            code.push_str("unsigned long lastDebounceTime = 0;\n");
+    if has_button
+        && has_led
+        && let (Some(btn), Some(led)) = (&button_gpio, &led_gpio)
+    {
+        code.push_str(&format!("\nconst int BUTTON_PIN = {btn};\n"));
+        code.push_str(&format!("const int LED_PIN    = {led};\n"));
+        code.push_str("const unsigned long DEBOUNCE_MS = 50;\n");
+        code.push_str("\nbool ledState = false;\n");
+        code.push_str("int lastReading = HIGH;\n");
+        code.push_str("int stableState = HIGH;\n");
+        code.push_str("unsigned long lastDebounceTime = 0;\n");
 
-            code.push_str("\nvoid setup() {\n  Serial.begin(115200);\n");
-            code.push_str("  pinMode(BUTTON_PIN, INPUT_PULLUP);  // active-low button\n");
-            code.push_str("  pinMode(LED_PIN, OUTPUT);\n");
-            code.push_str("  digitalWrite(LED_PIN, LOW);\n");
-            code.push_str("}\n\nvoid loop() {\n");
-            code.push_str("  int reading = digitalRead(BUTTON_PIN);\n");
-            code.push_str("  if (reading != lastReading) {\n");
-            code.push_str("    lastDebounceTime = millis();\n");
-            code.push_str("    lastReading = reading;\n");
-            code.push_str("  }\n\n");
-            code.push_str(
-                "  if ((millis() - lastDebounceTime) > DEBOUNCE_MS && reading != stableState) {\n",
-            );
-            code.push_str("    stableState = reading;\n");
-            code.push_str("    if (stableState == LOW) {  // pressed with INPUT_PULLUP\n");
-            code.push_str("      ledState = !ledState;\n");
-            code.push_str("      digitalWrite(LED_PIN, ledState ? HIGH : LOW);\n");
-            code.push_str("      Serial.println(ledState ? \"LED ON\" : \"LED OFF\");\n");
-            code.push_str("    }\n");
-            code.push_str("  }\n");
-            code.push_str("  delay(1);\n");
-            code.push_str("}\n");
-            return code;
-        }
+        code.push_str("\nvoid setup() {\n  Serial.begin(115200);\n");
+        code.push_str("  pinMode(BUTTON_PIN, INPUT_PULLUP);  // active-low button\n");
+        code.push_str("  pinMode(LED_PIN, OUTPUT);\n");
+        code.push_str("  digitalWrite(LED_PIN, LOW);\n");
+        code.push_str("}\n\nvoid loop() {\n");
+        code.push_str("  int reading = digitalRead(BUTTON_PIN);\n");
+        code.push_str("  if (reading != lastReading) {\n");
+        code.push_str("    lastDebounceTime = millis();\n");
+        code.push_str("    lastReading = reading;\n");
+        code.push_str("  }\n\n");
+        code.push_str(
+            "  if ((millis() - lastDebounceTime) > DEBOUNCE_MS && reading != stableState) {\n",
+        );
+        code.push_str("    stableState = reading;\n");
+        code.push_str("    if (stableState == LOW) {  // pressed with INPUT_PULLUP\n");
+        code.push_str("      ledState = !ledState;\n");
+        code.push_str("      digitalWrite(LED_PIN, ledState ? HIGH : LOW);\n");
+        code.push_str("      Serial.println(ledState ? \"LED ON\" : \"LED OFF\");\n");
+        code.push_str("    }\n");
+        code.push_str("  }\n");
+        code.push_str("  delay(1);\n");
+        code.push_str("}\n");
+        return code;
     }
 
     // OLED setup
@@ -883,6 +884,7 @@ pub(crate) fn circuit_to_svg(components: &[Component], wires: &[Wire]) -> String
     svg
 }
 
+#[allow(clippy::type_complexity)] // Accepts the legacy schema-v4 page representation.
 pub(crate) fn circuit_to_bom_csv(
     pages: &[(String, Vec<Component>, Vec<Wire>, u64, Counters)],
 ) -> String {

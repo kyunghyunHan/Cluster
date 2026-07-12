@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(clippy::too_many_arguments)] // Hot-path painter avoids per-frame option allocation.
 pub(crate) fn draw_component(
     painter: &egui::Painter,
     component: &Component,
@@ -366,18 +367,16 @@ pub(crate) fn draw_component(
         }
         ComponentKind::Voltmeter => {
             draw_meter(painter, rect, component.rotation, stroke, "V", energized);
-            if show_dc_overlay {
-                if let Some(v) = dc_voltage {
-                    let center = view.to_screen(component.pos);
-                    let r = (rect.width().min(rect.height()) * 0.44 + 12.0) * view.zoom;
-                    painter.text(
-                        center + Vec2::new(0.0, r),
-                        Align2::CENTER_TOP,
-                        mna::format_voltage(v),
-                        egui::FontId::proportional(10.5),
-                        Color32::from_rgb(100, 240, 170),
-                    );
-                }
+            if show_dc_overlay && let Some(v) = dc_voltage {
+                let center = view.to_screen(component.pos);
+                let r = (rect.width().min(rect.height()) * 0.44 + 12.0) * view.zoom;
+                painter.text(
+                    center + Vec2::new(0.0, r),
+                    Align2::CENTER_TOP,
+                    mna::format_voltage(v),
+                    egui::FontId::proportional(10.5),
+                    Color32::from_rgb(100, 240, 170),
+                );
             }
         }
         ComponentKind::TextNote => {
@@ -408,18 +407,16 @@ pub(crate) fn draw_component(
         }
         ComponentKind::Ammeter => {
             draw_meter(painter, rect, component.rotation, stroke, "A", energized);
-            if show_dc_overlay {
-                if let Some(i) = dc_current {
-                    let center = view.to_screen(component.pos);
-                    let r = (rect.width().min(rect.height()) * 0.44 + 12.0) * view.zoom;
-                    painter.text(
-                        center + Vec2::new(0.0, r),
-                        Align2::CENTER_TOP,
-                        mna::format_current(i),
-                        egui::FontId::proportional(10.5),
-                        Color32::from_rgb(100, 210, 255),
-                    );
-                }
+            if show_dc_overlay && let Some(i) = dc_current {
+                let center = view.to_screen(component.pos);
+                let r = (rect.width().min(rect.height()) * 0.44 + 12.0) * view.zoom;
+                painter.text(
+                    center + Vec2::new(0.0, r),
+                    Align2::CENTER_TOP,
+                    mna::format_current(i),
+                    egui::FontId::proportional(10.5),
+                    Color32::from_rgb(100, 210, 255),
+                );
             }
         }
         ComponentKind::Dht11 => draw_sensor_module(
@@ -541,15 +538,15 @@ pub(crate) fn draw_component(
     // ── DC Simulation overlay badge ──────────────────────────────────────
     if show_dc_overlay {
         let mut lines: Vec<String> = Vec::new();
-        if let Some(v) = dc_voltage {
-            if v.abs() > 1e-9 {
-                lines.push(mna::format_voltage(v));
-            }
+        if let Some(v) = dc_voltage
+            && v.abs() > 1e-9
+        {
+            lines.push(mna::format_voltage(v));
         }
-        if let Some(i) = dc_current {
-            if i.abs() > 1e-12 {
-                lines.push(mna::format_current(i));
-            }
+        if let Some(i) = dc_current
+            && i.abs() > 1e-12
+        {
+            lines.push(mna::format_current(i));
         }
         if !lines.is_empty() {
             let text = lines.join(" / ");
@@ -597,6 +594,7 @@ pub(crate) fn draw_component(
 ///
 /// Voltage colour is always shown when `dc_voltage` is `Some`.  Current
 /// arrows and thickness scaling are suppressed when `dc_current` is `None`.
+#[allow(clippy::too_many_arguments)] // Hot-path painter receives precomputed render state.
 pub(crate) fn draw_wire(
     painter: &egui::Painter,
     wire: &Wire,
@@ -667,40 +665,38 @@ pub(crate) fn draw_wire(
     }
 
     // Voltage/current label overlay
-    if show_voltage_labels {
-        if let Some(mid) = midpoint_of_polyline(&screen_points) {
-            let mut labels = Vec::new();
-            if let Some(v) = dc_voltage {
-                labels.push(mna::format_voltage(v));
-            }
-            if let Some(current) = dc_current.filter(|current| current.abs() > 1e-12) {
-                labels.push(mna::format_current(current.abs()));
-            }
-            if !labels.is_empty() {
-                let label = labels.join(" / ");
-                let col = dc_voltage
-                    .map(|voltage| mna::voltage_color(voltage, dc_vmax))
-                    .unwrap_or(Color32::from_rgb(100, 210, 255));
-                // background pill
-                let font = egui::FontId::proportional(10.0);
-                let galley = painter.layout_no_wrap(label, font.clone(), col);
-                let text_rect = Rect::from_center_size(
-                    mid + Vec2::new(0.0, -12.0),
-                    galley.size() + Vec2::new(6.0, 3.0),
-                );
-                painter.rect_filled(
-                    text_rect,
-                    3.0,
-                    Color32::from_rgba_unmultiplied(20, 22, 28, 200),
-                );
-                painter.text(
-                    mid + Vec2::new(0.0, -12.0),
-                    Align2::CENTER_CENTER,
-                    galley.text(),
-                    font,
-                    col,
-                );
-            }
+    if show_voltage_labels && let Some(mid) = midpoint_of_polyline(&screen_points) {
+        let mut labels = Vec::new();
+        if let Some(v) = dc_voltage {
+            labels.push(mna::format_voltage(v));
+        }
+        if let Some(current) = dc_current.filter(|current| current.abs() > 1e-12) {
+            labels.push(mna::format_current(current.abs()));
+        }
+        if !labels.is_empty() {
+            let label = labels.join(" / ");
+            let col = dc_voltage
+                .map(|voltage| mna::voltage_color(voltage, dc_vmax))
+                .unwrap_or(Color32::from_rgb(100, 210, 255));
+            // background pill
+            let font = egui::FontId::proportional(10.0);
+            let galley = painter.layout_no_wrap(label, font.clone(), col);
+            let text_rect = Rect::from_center_size(
+                mid + Vec2::new(0.0, -12.0),
+                galley.size() + Vec2::new(6.0, 3.0),
+            );
+            painter.rect_filled(
+                text_rect,
+                3.0,
+                Color32::from_rgba_unmultiplied(20, 22, 28, 200),
+            );
+            painter.text(
+                mid + Vec2::new(0.0, -12.0),
+                Align2::CENTER_CENTER,
+                galley.text(),
+                font,
+                col,
+            );
         }
     }
 
@@ -1784,6 +1780,7 @@ pub(crate) fn draw_ic_box(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::needless_range_loop)] // Pairwise crossing detection uses stable indices.
 pub(crate) fn draw_junctions(painter: &egui::Painter, wires: &[Wire], view: CanvasView) {
     let mut junction_keys: HashSet<(i32, i32)> = HashSet::new();
     let mut junctions: Vec<Pos2> = Vec::new();
@@ -3020,6 +3017,7 @@ pub(crate) fn draw_lamp(painter: &egui::Painter, rect: Rect, rotation: i32, stro
     painter.line_segment([rotated[4], rotated[5]], stroke);
 }
 
+#[allow(clippy::too_many_arguments)] // Explicit module geometry keeps call sites readable.
 pub(crate) fn draw_module(
     painter: &egui::Painter,
     component: &Component,

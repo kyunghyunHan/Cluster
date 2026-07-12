@@ -186,15 +186,15 @@ fn parse_frequency_hz(value: &str) -> Option<f64> {
 fn parse_duty(value: &str) -> Option<f64> {
     let lower = value.to_ascii_lowercase();
     for token in lower.split(|c: char| c.is_ascii_whitespace() || c == ',' || c == ';') {
-        if let Some(percent) = token.strip_suffix('%') {
-            if let Ok(v) = percent.parse::<f64>() {
-                return Some(v / 100.0);
-            }
+        if let Some(percent) = token.strip_suffix('%')
+            && let Ok(v) = percent.parse::<f64>()
+        {
+            return Some(v / 100.0);
         }
-        if let Some(duty) = token.strip_prefix("duty=") {
-            if let Ok(v) = duty.trim_end_matches('%').parse::<f64>() {
-                return Some(if duty.ends_with('%') { v / 100.0 } else { v });
-            }
+        if let Some(duty) = token.strip_prefix("duty=")
+            && let Ok(v) = duty.trim_end_matches('%').parse::<f64>()
+        {
+            return Some(if duty.ends_with('%') { v / 100.0 } else { v });
         }
     }
     None

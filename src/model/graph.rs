@@ -32,6 +32,7 @@ pub(crate) struct SchematicNode {
 /// * `explicit = true` — the user placed a junction dot at a wire crossing.
 /// * `explicit = false` — a T-junction was auto-detected (wire endpoint on
 ///   another wire's interior); this is NOT a crossing without a junction.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct Junction {
     pub(crate) node_id: NodeId,
@@ -70,6 +71,7 @@ pub(crate) struct PinConnection {
 /// A fully resolved electrical net: a set of nodes, pin connections, and wire
 /// segments that are all electrically equivalent.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct SchematicNet {
     pub(crate) id: u64,
     pub(crate) name: String,
@@ -81,6 +83,7 @@ pub(crate) struct SchematicNet {
 
 /// What element forms a simulation branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum BranchKind {
     /// A two-terminal component (resistor, LED, battery, …).
     Component(u64),
@@ -94,6 +97,7 @@ pub(crate) enum BranchKind {
 /// a multi-branch net junction do **not** form branches; only component
 /// elements and series wires are modelled as branches.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct Branch {
     pub(crate) id: u64,
     pub(crate) kind: BranchKind,
@@ -103,6 +107,7 @@ pub(crate) struct Branch {
 
 /// The complete explicit connectivity graph derived from a schematic page.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub(crate) struct SchematicGraph {
     pub(crate) nodes: Vec<SchematicNode>,
     pub(crate) junctions: Vec<Junction>,
@@ -112,6 +117,7 @@ pub(crate) struct SchematicGraph {
     pub(crate) branches: Vec<Branch>,
 }
 
+#[allow(dead_code)]
 impl SchematicGraph {
     pub(crate) fn node_by_id(&self, id: NodeId) -> Option<&SchematicNode> {
         self.nodes.iter().find(|n| n.id == id)
@@ -259,7 +265,7 @@ pub(crate) fn build_schematic_graph(
     explicit_junctions: &[Pos2],
 ) -> SchematicGraph {
     use crate::model::ComponentKind;
-    use crate::model::{WireEndpoint, component_pin_defs, point_touches_wire_segment};
+    use crate::model::{WireEndpoint, component_pin_defs};
 
     const SNAP: f32 = 1.0;
 
@@ -317,14 +323,14 @@ pub(crate) fn build_schematic_graph(
     let mut junctions: Vec<Junction> = Vec::new();
 
     for &pos in explicit_junctions {
-        if let Some(nid) = find_node_id_in(&nodes, pos) {
-            if !junctions.iter().any(|j: &Junction| j.node_id == nid) {
-                junctions.push(Junction {
-                    node_id: nid,
-                    position: pos,
-                    explicit: true,
-                });
-            }
+        if let Some(nid) = find_node_id_in(&nodes, pos)
+            && !junctions.iter().any(|j: &Junction| j.node_id == nid)
+        {
+            junctions.push(Junction {
+                node_id: nid,
+                position: pos,
+                explicit: true,
+            });
         }
     }
 
@@ -532,16 +538,16 @@ pub(crate) fn build_schematic_graph(
         }
         let from_node = pins.first().and_then(|p| find_node_id_in(&nodes, p.pos));
         let to_node = pins.get(1).and_then(|p| find_node_id_in(&nodes, p.pos));
-        if let (Some(a), Some(b)) = (from_node, to_node) {
-            if a != b {
-                branches.push(Branch {
-                    id: branch_counter,
-                    kind: BranchKind::Component(comp.id),
-                    from_node: a,
-                    to_node: b,
-                });
-                branch_counter += 1;
-            }
+        if let (Some(a), Some(b)) = (from_node, to_node)
+            && a != b
+        {
+            branches.push(Branch {
+                id: branch_counter,
+                kind: BranchKind::Component(comp.id),
+                from_node: a,
+                to_node: b,
+            });
+            branch_counter += 1;
         }
     }
 

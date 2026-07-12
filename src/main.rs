@@ -1,20 +1,3 @@
-#![allow(
-    dead_code,
-    unused_imports,
-    clippy::collapsible_else_if,
-    clippy::collapsible_if,
-    clippy::for_kv_map,
-    clippy::get_first,
-    clippy::if_same_then_else,
-    clippy::iter_cloned_collect,
-    clippy::needless_borrow,
-    clippy::needless_range_loop,
-    clippy::redundant_closure,
-    clippy::too_many_arguments,
-    clippy::type_complexity,
-    clippy::wrong_self_convention
-)]
-
 mod app;
 mod editor;
 mod engine;
@@ -28,16 +11,13 @@ mod ui;
 
 pub(crate) use engine::parse_metric_value;
 pub(crate) use model::*;
-pub(crate) use model::{
-    component_pin_defs, component_pins, component_size, distance_to_segment,
-    point_touches_wire_segment, rotate_point,
-};
+pub(crate) use model::{component_pin_defs, point_touches_wire_segment};
 pub(crate) use ui::app::{
-    AUTORECOVER_PATH, CircuitApp, CircuitNodes, SAVE_PATH, UnionFind, analyze_circuit,
-    circuit_bounds, circuit_to_bom_csv, circuit_to_netlist_text, circuit_to_spice_netlist,
-    circuit_to_svg, component_kind_label, connected_pin_positions, generate_arduino_code,
-    move_attached_wire_endpoints, push_unique_point, run_erc_with_netlist, simplify_wire,
-    tidy_wire_points, wire_contact_points, wire_path_pin_crossings,
+    CircuitApp, CircuitNodes, UnionFind, analyze_circuit, circuit_bounds, circuit_to_bom_csv,
+    circuit_to_netlist_text, circuit_to_spice_netlist, circuit_to_svg, component_kind_label,
+    connected_pin_positions, generate_arduino_code, move_attached_wire_endpoints,
+    push_unique_point, run_erc_with_netlist, simplify_wire, tidy_wire_points, wire_contact_points,
+    wire_path_pin_crossings,
 };
 
 fn main() -> eframe::Result<()> {
@@ -67,7 +47,7 @@ fn main() -> eframe::Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Cluster Circuits")
             .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([1180.0, 760.0]),
+            .with_min_inner_size([900.0, 620.0]),
         run_and_return: false,
         ..Default::default()
     };

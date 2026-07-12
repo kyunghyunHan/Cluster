@@ -1,6 +1,7 @@
 use eframe::egui;
 use egui::{Color32, Stroke, Vec2};
 
+#[allow(dead_code)] // Tokens are consumed incrementally as painters migrate.
 pub(crate) struct ClusterTheme {
     pub(crate) app_background: Color32,
     pub(crate) canvas_background: Color32,
@@ -59,11 +60,9 @@ pub(crate) const CLUSTER_THEME: ClusterTheme = ClusterTheme {
     selection_fill: Color32::from_rgba_premultiplied(70, 150, 220, 35),
 };
 
-pub(crate) const BG_APP: Color32 = CLUSTER_THEME.app_background;
 pub(crate) const BG_PANEL: Color32 = CLUSTER_THEME.panel_background;
 pub(crate) const BG_PANEL_DARK: Color32 = CLUSTER_THEME.panel_surface_2;
 pub(crate) const BG_BUTTON: Color32 = CLUSTER_THEME.raised_panel;
-pub(crate) const BG_BUTTON_HOVER: Color32 = Color32::from_rgb(36, 43, 51);
 pub(crate) const BG_ACTIVE: Color32 = Color32::from_rgb(38, 70, 82);
 pub(crate) const STROKE_PANEL: Color32 = CLUSTER_THEME.border;
 pub(crate) const STROKE_MUTED: Color32 = Color32::from_rgb(48, 56, 64);
@@ -71,7 +70,6 @@ pub(crate) const TEXT_PRIMARY: Color32 = CLUSTER_THEME.primary_text;
 pub(crate) const TEXT_SECONDARY: Color32 = CLUSTER_THEME.secondary_text;
 pub(crate) const TEXT_MUTED: Color32 = Color32::from_rgb(120, 130, 140);
 pub(crate) const ACCENT: Color32 = CLUSTER_THEME.accent;
-pub(crate) const LIVE: Color32 = Color32::from_rgb(255, 198, 92);
 pub(crate) const CURRENT_GLOW: Color32 = CLUSTER_THEME.energized_wire;
 pub(crate) const CURRENT_PARTICLE: Color32 = CLUSTER_THEME.current_particle;
 pub(crate) const GRID_MINOR: Color32 = Color32::from_rgb(36, 46, 58);
@@ -82,13 +80,7 @@ pub(crate) const ERROR: Color32 = CLUSTER_THEME.error;
 
 pub(crate) const PANEL_RADIUS: u8 = 4;
 pub(crate) const CARD_RADIUS: u8 = 5;
-pub(crate) const ROW_HEIGHT: f32 = 24.0;
 pub(crate) const TOOL_HEIGHT: f32 = 28.0;
-pub(crate) const TOOLBAR_HEIGHT: f32 = 32.0;
-pub(crate) const PANEL_MARGIN: i8 = 6;
-pub(crate) const SECTION_SPACING: f32 = 8.0;
-pub(crate) const ICON_SIZE: f32 = 14.0;
-pub(crate) const FAST_ANIMATION_MS: u64 = 120;
 pub(crate) const SIMULATION_START_MS: u64 = 700;
 
 pub(crate) fn panel_frame() -> egui::Frame {

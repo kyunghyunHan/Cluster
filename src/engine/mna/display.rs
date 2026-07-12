@@ -70,12 +70,12 @@ fn strip_unit(s: &str) -> &str {
             return s[..s.len() - unit.len()].trim_end();
         }
     }
-    if let Some(last) = s.chars().last() {
-        if matches!(last.to_ascii_uppercase(), 'V' | 'A' | 'W' | 'F' | 'H') {
-            let cut = s[..s.len() - last.len_utf8()].trim_end();
-            if !cut.is_empty() && !cut.ends_with(['e', 'E']) {
-                return cut;
-            }
+    if let Some(last) = s.chars().last()
+        && matches!(last.to_ascii_uppercase(), 'V' | 'A' | 'W' | 'F' | 'H')
+    {
+        let cut = s[..s.len() - last.len_utf8()].trim_end();
+        if !cut.is_empty() && !cut.ends_with(['e', 'E']) {
+            return cut;
         }
     }
     s

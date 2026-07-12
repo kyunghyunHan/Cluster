@@ -1025,6 +1025,7 @@ fn svg_ic_box(out: &mut String, cx: f32, cy: f32, s: &str, color: &str, label: &
 }
 
 /// Large module box (ESP32, Arduino, etc.).
+#[allow(clippy::too_many_arguments)] // SVG primitive keeps explicit geometry parameters.
 fn svg_module_box(
     out: &mut String,
     cx: f32,

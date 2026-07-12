@@ -717,6 +717,7 @@ pub(crate) fn prune_uncontrolled_digital_output_paths(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Mutates coordinated connectivity result sets.
 pub(crate) fn mark_powered_digital_output_paths(
     components: &[Component],
     wires: &[Wire],
@@ -1239,30 +1240,30 @@ pub(crate) fn apply_engineering_checks(
             max_source_current = max_source_current.max(current);
         }
 
-        if let Some(limit) = component_current_limit(component) {
-            if current > limit {
-                component_warnings.entry(component.id).or_insert_with(|| {
-                    format!(
-                        "Overcurrent risk: {} through {}, limit about {}.",
-                        mna::format_current(current),
-                        component.label,
-                        mna::format_current(limit)
-                    )
-                });
-            }
+        if let Some(limit) = component_current_limit(component)
+            && current > limit
+        {
+            component_warnings.entry(component.id).or_insert_with(|| {
+                format!(
+                    "Overcurrent risk: {} through {}, limit about {}.",
+                    mna::format_current(current),
+                    component.label,
+                    mna::format_current(limit)
+                )
+            });
         }
 
-        if let Some(limit) = component_power_limit(component) {
-            if power > limit {
-                component_warnings.entry(component.id).or_insert_with(|| {
-                    format!(
-                        "Overpower risk: {} in {}, limit about {}.",
-                        mna::format_power(power),
-                        component.label,
-                        mna::format_power(limit)
-                    )
-                });
-            }
+        if let Some(limit) = component_power_limit(component)
+            && power > limit
+        {
+            component_warnings.entry(component.id).or_insert_with(|| {
+                format!(
+                    "Overpower risk: {} in {}, limit about {}.",
+                    mna::format_power(power),
+                    component.label,
+                    mna::format_power(limit)
+                )
+            });
         }
 
         if component.kind == ComponentKind::Led {
@@ -1428,12 +1429,10 @@ pub(crate) fn canvas_value_label(component: &Component) -> Option<String> {
                     } else {
                         format!("{:.1}kΩ", k)
                     }
+                } else if ohms == ohms.floor() {
+                    format!("{}Ω", ohms as u32)
                 } else {
-                    if ohms == ohms.floor() {
-                        format!("{}Ω", ohms as u32)
-                    } else {
-                        format!("{:.1}Ω", ohms)
-                    }
+                    format!("{:.1}Ω", ohms)
                 }
             } else {
                 raw.to_string()
@@ -1754,7 +1753,7 @@ pub(crate) fn run_erc_with_netlist(
         }
     }
 
-    for warning in validate_beginner_rules(&netlist) {
+    for warning in validate_beginner_rules(netlist) {
         v.push(warning);
     }
 

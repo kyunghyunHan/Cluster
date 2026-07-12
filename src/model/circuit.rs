@@ -48,6 +48,7 @@ pub(crate) struct CircuitSnapshot {
     pub(crate) wires: Vec<Wire>,
     pub(crate) next_id: u64,
     pub(crate) counters: Counters,
+    #[allow(clippy::type_complexity)] // Migrated to SchematicPage in the next storage schema.
     pub(crate) pages: Vec<(String, Vec<Component>, Vec<Wire>, u64, Counters)>,
     pub(crate) current_page: usize,
 }

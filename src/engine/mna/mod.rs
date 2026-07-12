@@ -25,7 +25,9 @@ pub(crate) mod models;
 // ── Public re-exports (preserve the original flat API) ────────────────────────
 
 pub use ac::{AcResult, solve_ac};
-pub use dc::{DcResult, solve_dc, solve_dc_detailed};
+#[cfg(test)]
+use dc::solve_dc;
+pub use dc::{DcResult, solve_dc_detailed};
 pub use display::{
     format_current, format_power, format_si, format_voltage, parse_si_value, voltage_color,
 };
@@ -1029,11 +1031,6 @@ mod regression {
             part_id: None,
         }
     }
-    fn wire(id: u64, a: Pos2, b: Pos2) -> Wire {
-        let corner = Pos2::new(b.x, a.y);
-        Wire::new(id, vec![a, corner, b])
-    }
-
     // ── Crossing wires are NOT electrically connected ─────────────────────
     // Two wires crossing at a point that is NOT an endpoint of either wire
     // must not share a net.
@@ -1241,7 +1238,7 @@ mod regression {
             .find(|p| p.label == "-")
             .map(|p| p.pos)
             .unwrap();
-        let c_a = c_pins.get(0).map(|p| p.pos).unwrap();
+        let c_a = c_pins.first().map(|p| p.pos).unwrap();
         let c_b = c_pins.get(1).map(|p| p.pos).unwrap();
         let wires = vec![
             Wire::new(1, vec![src_pos, c_a]),

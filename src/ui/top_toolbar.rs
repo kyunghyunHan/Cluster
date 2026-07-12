@@ -1,7 +1,8 @@
 use crate::app::{AlignDir, Tool};
 use crate::ui::current_flow::{CurrentFlowSettings, FlowQuality};
+use crate::ui::theme;
 use eframe::egui;
-use egui::{Color32, Stroke, Vec2};
+use egui::{Stroke, Vec2};
 
 pub(crate) struct TopToolbarModel<'a> {
     pub(crate) tool: Tool,
@@ -64,12 +65,12 @@ pub(crate) fn render_top_toolbar(
             egui::RichText::new("Cluster")
                 .size(18.0)
                 .strong()
-                .color(Color32::from_rgb(245, 248, 252)),
+                .color(theme::TEXT_PRIMARY),
         );
         ui.label(
             egui::RichText::new("workbench")
                 .size(12.0)
-                .color(Color32::from_rgb(160, 170, 180)),
+                .color(theme::TEXT_SECONDARY),
         );
         ui.separator();
         if tool_button(ui, model.tool == Tool::Select, "Select").clicked() {
@@ -151,7 +152,7 @@ pub(crate) fn render_top_toolbar(
             egui::RichText::new(format!("{:.0}%", model.zoom * 100.0))
                 .size(11.0)
                 .monospace()
-                .color(Color32::from_rgb(180, 190, 200)),
+                .color(theme::TEXT_SECONDARY),
         );
         if compact_button(ui, "+").clicked() {
             action = Some(TopToolbarAction::ZoomIn);
@@ -291,40 +292,40 @@ pub(crate) fn render_top_toolbar(
 fn tool_button(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
     let (fill, stroke, text) = if selected {
         (
-            Color32::from_rgb(42, 78, 92),
-            Stroke::new(1.0, Color32::from_rgb(100, 178, 255)),
-            Color32::from_rgb(240, 248, 255),
+            theme::BG_ACTIVE,
+            Stroke::new(1.0, theme::ACCENT),
+            theme::TEXT_PRIMARY,
         )
     } else {
         (
-            Color32::from_rgb(28, 33, 39),
-            Stroke::new(1.0, Color32::from_rgb(48, 56, 64)),
-            Color32::from_rgb(214, 222, 230),
+            theme::BG_BUTTON,
+            Stroke::new(1.0, theme::STROKE_MUTED),
+            theme::TEXT_PRIMARY,
         )
     };
     ui.add(
         egui::Button::new(egui::RichText::new(label).color(text))
             .fill(fill)
             .stroke(stroke)
-            .min_size(Vec2::new(72.0, 28.0)),
+            .min_size(Vec2::new(52.0, 26.0)),
     )
 }
 
 fn compact_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
-        egui::Button::new(egui::RichText::new(label).color(Color32::from_rgb(215, 222, 230)))
-            .fill(Color32::from_rgb(31, 36, 43))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(56, 64, 74)))
-            .min_size(Vec2::new(74.0, 26.0)),
+        egui::Button::new(egui::RichText::new(label).color(theme::TEXT_PRIMARY))
+            .fill(theme::BG_BUTTON)
+            .stroke(Stroke::new(1.0, theme::STROKE_MUTED))
+            .min_size(Vec2::new(46.0, 24.0)),
     )
 }
 
 fn menu_action(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add_sized(
         Vec2::new(180.0, 27.0),
-        egui::Button::new(egui::RichText::new(label).color(Color32::from_rgb(216, 224, 232)))
-            .fill(Color32::from_rgb(28, 33, 39))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(48, 56, 64))),
+        egui::Button::new(egui::RichText::new(label).color(theme::TEXT_PRIMARY))
+            .fill(theme::BG_BUTTON)
+            .stroke(Stroke::new(1.0, theme::STROKE_MUTED)),
     )
 }
 
@@ -332,15 +333,15 @@ fn toolbar_menu(ui: &mut egui::Ui, label: &str, add_contents: impl FnOnce(&mut e
     ui.menu_button(
         egui::RichText::new(label)
             .size(11.0)
-            .color(Color32::from_rgb(215, 222, 230)),
+            .color(theme::TEXT_PRIMARY),
         add_contents,
     );
 }
 
 fn status_pill(ui: &mut egui::Ui, text: &str) {
     egui::Frame::NONE
-        .fill(Color32::from_rgb(54, 42, 22))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(132, 92, 34)))
+        .fill(theme::BG_PANEL_DARK)
+        .stroke(Stroke::new(1.0, theme::WARNING))
         .corner_radius(egui::CornerRadius::same(5))
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
@@ -348,7 +349,7 @@ fn status_pill(ui: &mut egui::Ui, text: &str) {
                 egui::RichText::new(text)
                     .size(11.0)
                     .strong()
-                    .color(Color32::from_rgb(255, 198, 92)),
+                    .color(theme::WARNING),
             );
         });
 }

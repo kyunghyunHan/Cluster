@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 #[test]
 fn spice_export_names_connected_nets_and_ground() {

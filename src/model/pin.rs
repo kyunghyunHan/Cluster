@@ -47,6 +47,7 @@ impl ElectricalType {
     }
 
     /// Short label for display in inspector / ERC panels.
+    #[allow(dead_code)] // Kept for compact external/diagnostic presentations.
     pub(crate) fn short_label(self) -> &'static str {
         match self {
             ElectricalType::Passive => "Passive",

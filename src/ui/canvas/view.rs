@@ -1,4 +1,4 @@
-use egui::{Pos2, Rect, Vec2};
+use egui::{Pos2, Vec2};
 
 /// Immutable world/screen transform for one canvas frame.
 #[derive(Clone, Copy)]
@@ -19,10 +19,6 @@ impl CanvasView {
 
     pub(crate) fn scale_f(self, value: f32) -> f32 {
         (value * self.zoom).clamp(value * 0.4, value * 2.0)
-    }
-
-    pub(crate) fn world_viewport(self, screen: Rect) -> Rect {
-        Rect::from_two_pos(self.to_world(screen.min), self.to_world(screen.max))
     }
 }
 
