@@ -1,4 +1,5 @@
 mod app;
+mod commands;
 mod editor;
 mod engine;
 mod examples;
@@ -14,10 +15,9 @@ pub(crate) use model::*;
 pub(crate) use model::{component_pin_defs, point_touches_wire_segment};
 pub(crate) use ui::app::{
     CircuitApp, CircuitNodes, UnionFind, analyze_circuit, circuit_bounds, circuit_to_bom_csv,
-    circuit_to_netlist_text, circuit_to_spice_netlist, circuit_to_svg, component_kind_label,
-    connected_pin_positions, generate_arduino_code, move_attached_wire_endpoints,
-    push_unique_point, run_erc_with_netlist, simplify_wire, tidy_wire_points, wire_contact_points,
-    wire_path_pin_crossings,
+    circuit_to_netlist_text, circuit_to_svg, component_kind_label, generate_arduino_code,
+    move_attached_wire_endpoints, push_unique_point, run_erc_with_netlist, simplify_wire,
+    tidy_wire_points, wire_path_pin_crossings,
 };
 
 fn main() -> eframe::Result<()> {

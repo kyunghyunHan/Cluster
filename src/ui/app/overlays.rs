@@ -493,27 +493,6 @@ pub(crate) fn draw_empty_canvas_hint(painter: &egui::Painter, canvas: Rect) {
     );
 }
 
-/// Returns grid-rounded positions of all component pins that have a snapped
-/// wire endpoint/control point on the pin. A wire merely passing nearby is not
-/// a connection.
-pub(crate) fn connected_pin_positions(components: &[Component], wires: &[Wire]) -> Vec<(i32, i32)> {
-    let mut connected = Vec::new();
-    for component in components {
-        for pin in component_pin_defs(component) {
-            let key = (pin.pos.x.round() as i32, pin.pos.y.round() as i32);
-            let is_conn = wires.iter().any(|w| {
-                w.points
-                    .windows(2)
-                    .any(|segment| point_touches_wire_segment(pin.pos, segment[0], segment[1]))
-            });
-            if is_conn {
-                connected.push(key);
-            }
-        }
-    }
-    connected
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 //  ERC — Electrical Rules Check
 // ─────────────────────────────────────────────────────────────────────────────

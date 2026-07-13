@@ -1,3 +1,4 @@
+use super::graph::NetId;
 use super::pin::{NetlistPin, PinRef};
 use egui::Pos2;
 use std::collections::HashMap;
@@ -23,7 +24,7 @@ pub(crate) struct JunctionDot {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Net {
-    pub(crate) id: usize,
+    pub(crate) id: NetId,
     pub(crate) name: String,
     pub(crate) connected_pins: Vec<PinRef>,
 }
@@ -46,7 +47,7 @@ pub(crate) struct CircuitNetlist {
 pub(crate) struct WireNetSegment {
     pub(crate) id: u64,
     pub(crate) source_wire_id: u64,
-    pub(crate) net_id: usize,
+    pub(crate) net_id: NetId,
     pub(crate) points: Vec<Pos2>,
 }
 

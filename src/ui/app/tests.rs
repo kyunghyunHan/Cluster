@@ -277,6 +277,58 @@ fn saved_circuit_round_trips_components_and_wires() {
     assert_eq!(snapshot.wires.len(), app.wires.len());
     assert!(snapshot.next_id > app.components.len() as u64);
     assert!(load_notes.is_empty());
+
+    let before = crate::engine::netlist::build_canonical_connectivity(&app.components, &app.wires);
+    let after =
+        crate::engine::netlist::build_canonical_connectivity(&snapshot.components, &snapshot.wires);
+    assert_eq!(before.pin_nets, after.pin_nets);
+    assert_eq!(before.junction_nets, after.junction_nets);
+    assert_eq!(before.wire_segment_nets, after.wire_segment_nets);
+    assert_eq!(before.netlist.wire_nets, after.netlist.wire_nets);
+    assert_eq!(before.diagnostics, after.diagnostics);
+}
+
+#[test]
+fn legacy_wire_endpoint_migration_preserves_canonical_connectivity() {
+    let mut app = CircuitApp::new();
+    app.load_led_demo();
+    let before = crate::engine::netlist::build_canonical_connectivity(&app.components, &app.wires);
+
+    let mut saved = SavedCircuit::from_app(&app);
+    for wire in &mut saved.wires {
+        wire.start = None;
+        wire.end = None;
+    }
+    let (snapshot, notes) = saved.into_snapshot().unwrap();
+    let after =
+        crate::engine::netlist::build_canonical_connectivity(&snapshot.components, &snapshot.wires);
+
+    assert_eq!(
+        before.pin_nets, after.pin_nets,
+        "migration notes: {notes:?}"
+    );
+    assert_eq!(before.wire_segment_nets, after.wire_segment_nets);
+    assert_eq!(before.netlist.wire_nets, after.netlist.wire_nets);
+}
+
+#[test]
+fn canonical_projection_is_shared_by_erc_codegen_and_pcb_sync() {
+    let mut app = CircuitApp::new();
+    app.load_esp32_oled_demo();
+    let connectivity = app.current_connectivity();
+    let expected_pin_nets = connectivity.pin_nets.clone();
+
+    let _erc = crate::engine::validation::validate_beginner_rules(&connectivity.netlist);
+    let code = generate_arduino_code(&connectivity.netlist);
+    let cad =
+        crate::model::cad::CadProjectData::from_schematic(&app.components, &connectivity.netlist);
+
+    assert!(code.contains("Wire.begin"));
+    for cad_net in &cad.nets {
+        for pin in &cad_net.connected_pins {
+            assert_eq!(expected_pin_nets.get(pin), Some(&cad_net.net_id));
+        }
+    }
 }
 
 #[test]

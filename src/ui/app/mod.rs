@@ -287,7 +287,7 @@ pub(crate) struct CircuitApp {
     pub(crate) snap_target: Option<Pos2>,
     pub(crate) circuit_revision: u64,
     pub(crate) dirty_flags: DirtyFlags,
-    pub(crate) cached_netlist: Option<(u64, CircuitNetlist)>,
+    pub(crate) cached_connectivity: Option<(u64, CanonicalConnectivity)>,
     pub(crate) cached_simulation: Option<(u64, u32, Simulation)>,
     pub(crate) simulation_revision: u64,
     pub(crate) cached_connected_pins: Option<(u64, Vec<(i32, i32)>)>,
@@ -374,7 +374,7 @@ impl CircuitApp {
             snap_target: None,
             circuit_revision: 1,
             dirty_flags: DirtyFlags::default(),
-            cached_netlist: None,
+            cached_connectivity: None,
             cached_simulation: None,
             simulation_revision: 0,
             cached_connected_pins: None,
@@ -974,7 +974,10 @@ impl eframe::App for CircuitApp {
                     Some(Selection::Component(id)) => {
                         let mut inspector_changed = false;
                         let mut inspector_status: Option<String> = None;
-                        if let Some(component) = self.components.iter_mut().find(|c| c.id == id) {
+                        let mut edited_properties = None;
+                        if let Some(mut component) =
+                            self.components.iter().find(|c| c.id == id).cloned()
+                        {
                             let metadata = electrical_metadata(component.kind);
                             status_pill(
                                 ui,
@@ -1062,7 +1065,7 @@ impl eframe::App for CircuitApp {
                             }
                             if component_is_switch(component.kind) {
                                 let mut closed =
-                                    component_conductance(component) != Conductance::Open;
+                                    component_conductance(&component) != Conductance::Open;
                                 if ui.checkbox(&mut closed, "Closed").changed() {
                                     component.value = if closed {
                                         "closed".to_string()
@@ -1254,9 +1257,20 @@ impl eframe::App for CircuitApp {
                                         );
                                     });
                             }
+                            if inspector_changed {
+                                edited_properties = Some((component.label, component.value));
+                            }
                         }
-                        if inspector_changed {
-                            self.mark_dirty();
+                        if let Some((label, value)) = edited_properties {
+                            self.execute_editor_command(
+                                crate::commands::EditorCommand::Properties(
+                                    crate::commands::properties::PropertiesCommand::SetComponentProperties {
+                                        component_id: id,
+                                        label,
+                                        value,
+                                    },
+                                ),
+                            );
                         }
                         if let Some(status) = inspector_status {
                             self.status = status;
@@ -2239,46 +2253,14 @@ impl eframe::App for CircuitApp {
                                 if let Some(kind) = comp_kind
                                     && component_is_switch(kind)
                                 {
-                                    if kind == ComponentKind::PushButton {
-                                        // Toggle on each click (open ↔ closed)
-                                        self.record_history();
-                                        if let Some(comp) =
-                                            self.components.iter_mut().find(|c| c.id == cid)
-                                        {
-                                            let open = comp.value.to_lowercase().contains("open");
-                                            comp.value = if open {
-                                                "closed".to_string()
-                                            } else {
-                                                "open".to_string()
-                                            };
-                                            let state = if open {
-                                                "▶ CLOSED (ON)"
-                                            } else {
-                                                "■ OPEN (OFF)"
-                                            };
-                                            self.status = format!("{} {}", comp.label, state);
-                                        }
-                                        self.invalidate_analysis_cache();
-                                        ctx.request_repaint();
-                                    } else {
-                                        // Toggle switch / slide switch: full edit with history
-                                        self.record_history();
-                                        if let Some(comp) =
-                                            self.components.iter_mut().find(|c| c.id == cid)
-                                        {
-                                            let open = comp.value.to_lowercase().contains("open");
-                                            comp.value = if open {
-                                                "closed".to_string()
-                                            } else {
-                                                "open".to_string()
-                                            };
-                                            let state =
-                                                if open { "▶ CLOSED" } else { "■ OPEN" };
-                                            self.status = format!("{} {state}", comp.label);
-                                        }
-                                        self.invalidate_analysis_cache();
-                                        ctx.request_repaint();
-                                    }
+                                    self.execute_editor_command(
+                                        crate::commands::EditorCommand::Properties(
+                                            crate::commands::properties::PropertiesCommand::ToggleSwitch {
+                                                component_id: cid,
+                                            },
+                                        ),
+                                    );
+                                    ctx.request_repaint();
                                     self.selected = Some(Selection::Component(cid));
                                 }
                             }
@@ -2521,12 +2503,13 @@ impl eframe::App for CircuitApp {
                         .find(|c| c.id == edit_id)
                         .map(|c| c.label.clone())
                         .unwrap_or_default();
-                    self.record_history();
-                    if let Some(comp) = self.components.iter_mut().find(|c| c.id == edit_id) {
-                        comp.value = new_val;
-                    }
+                    self.execute_editor_command(crate::commands::EditorCommand::Properties(
+                        crate::commands::properties::PropertiesCommand::SetComponentValue {
+                            component_id: edit_id,
+                            value: new_val,
+                        },
+                    ));
                     self.status = format!("{} value updated.", label);
-                    self.invalidate_analysis_cache();
                     self.inline_edit = None;
                 } else if cancel {
                     self.inline_edit = None;
@@ -2620,32 +2603,16 @@ impl eframe::App for CircuitApp {
                                 {
                                     delta += adjust;
                                 }
-                                for comp in self.components.iter_mut() {
-                                    if ids.contains(&comp.id) {
-                                        comp.pos += delta;
-                                        data_changed = true;
-                                    }
-                                }
-                                let new_pins = self
-                                    .components
-                                    .iter()
-                                    .filter(|component| ids.contains(&component.id))
-                                    .flat_map(component_pins)
-                                    .collect::<Vec<_>>();
-                                move_attached_wire_endpoints(&mut self.wires, &old_pins, &new_pins);
-                                for wire in self.wires.iter_mut() {
-                                    if wire.points.len() > 2 {
-                                        let first = wire.points[0];
-                                        let Some(&last) = wire.points.last() else {
-                                            continue;
-                                        };
-                                        if old_pins.iter().any(|p| first.distance(*p) <= 20.0)
-                                            || old_pins.iter().any(|p| last.distance(*p) <= 20.0)
-                                        {
-                                            tidy_wire_points(wire);
-                                        }
-                                    }
-                                }
+                                data_changed = self
+                                    .execute_continuous_editor_command(
+                                        crate::commands::EditorCommand::Component(
+                                            crate::commands::component::ComponentCommand::Move {
+                                                component_ids: ids,
+                                                delta,
+                                            },
+                                        ),
+                                    )
+                                    .document_changed;
                             }
                         } else if let Some(index) = self.components.iter().position(|c| c.id == id)
                         {
@@ -2663,25 +2630,17 @@ impl eframe::App for CircuitApp {
                                     new_pos += adjust;
                                 }
                             }
-                            if self.components[index].pos.distance(new_pos) > 0.1 {
-                                self.components[index].pos = new_pos;
-                                data_changed = true;
-                            }
-                            let new_pins = component_pins(&self.components[index]);
-                            move_attached_wire_endpoints(&mut self.wires, &old_pins, &new_pins);
-                            for wire in self.wires.iter_mut() {
-                                if wire.points.len() > 2 {
-                                    let first = wire.points[0];
-                                    let Some(&last) = wire.points.last() else {
-                                        continue;
-                                    };
-                                    if old_pins.iter().any(|p| first.distance(*p) <= 20.0)
-                                        || old_pins.iter().any(|p| last.distance(*p) <= 20.0)
-                                    {
-                                        tidy_wire_points(wire);
-                                    }
-                                }
-                            }
+                            let delta = new_pos - self.components[index].pos;
+                            data_changed = self
+                                .execute_continuous_editor_command(
+                                    crate::commands::EditorCommand::Component(
+                                        crate::commands::component::ComponentCommand::Move {
+                                            component_ids: HashSet::from([id]),
+                                            delta,
+                                        },
+                                    ),
+                                )
+                                .document_changed;
                         }
                     }
                     DragState::WirePoint {
@@ -2695,13 +2654,20 @@ impl eframe::App for CircuitApp {
                         {
                             snapped = connection;
                         }
-                        move_wire_control_point(&mut self.wires, wire_id, point_index, snapped);
-                        data_changed = true;
+                        data_changed = self
+                            .execute_continuous_editor_command(
+                                crate::commands::EditorCommand::Wiring(
+                                    crate::commands::wiring::WiringCommand::MoveControlPoint {
+                                        wire_id,
+                                        point_index,
+                                        position: snapped,
+                                    },
+                                ),
+                            )
+                            .document_changed;
                     }
                 }
-                if data_changed {
-                    self.mark_dirty();
-                }
+                let _ = data_changed;
             }
 
             let primary_down = ctx.input(|i| i.pointer.primary_down());
@@ -2834,45 +2800,14 @@ impl eframe::App for CircuitApp {
             if self.clipboard.is_empty() {
                 self.status = "Clipboard empty. Ctrl+C to copy first.".to_string();
             } else {
-                self.record_history();
                 let offset = Vec2::new(self.grid * 3.0, self.grid * 3.0);
-                // Map old IDs → new IDs for wire reconnection
-                let mut id_map: HashMap<u64, u64> = HashMap::new();
-                let mut new_ids = Vec::new();
-                let srcs = self.clipboard.clone();
-                for src in &srcs {
-                    let new_id = self.next_id();
-                    id_map.insert(src.id, new_id);
-                    let new_label = if src.kind == ComponentKind::Custom {
-                        self.next_custom_label(src.part_id.as_deref())
-                    } else {
-                        self.next_label(src.kind)
-                    };
-                    self.components.push(Component {
-                        id: new_id,
-                        kind: src.kind,
-                        pos: src.pos + offset,
-                        rotation: src.rotation,
-                        label: new_label,
-                        value: src.value.clone(),
-                        part_id: src.part_id.clone(),
-                    });
-                    new_ids.push(new_id);
-                }
-                // Paste internal wires with offset
-                for w in &self.clipboard_wires.clone() {
-                    let new_wire_id = self.next_id();
-                    let pts: Vec<Pos2> = w.points.iter().map(|&p| p + offset).collect();
-                    self.wires.push(Wire::new(new_wire_id, pts));
-                }
-                self.multi_selected = new_ids.iter().copied().collect();
-                self.selected = None;
-                self.mark_dirty();
-                self.status = format!(
-                    "Pasted {} component(s) + {} wire(s).",
-                    new_ids.len(),
-                    self.clipboard_wires.len()
-                );
+                self.execute_editor_command(crate::commands::EditorCommand::Component(
+                    crate::commands::component::ComponentCommand::Paste {
+                        components: self.clipboard.clone(),
+                        wires: self.clipboard_wires.clone(),
+                        offset,
+                    },
+                ));
             }
         }
 
@@ -2908,20 +2843,16 @@ impl eframe::App for CircuitApp {
 
         // T — tidy selected wire; Ctrl+T — tidy all wires
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::T)) {
-            self.record_history();
-            for wire in &mut self.wires {
-                tidy_wire_points(wire);
-            }
-            self.status = format!("Tidied {} wire(s).", self.wires.len());
+            self.execute_editor_command(crate::commands::EditorCommand::Wiring(
+                crate::commands::wiring::WiringCommand::Tidy { wire_id: None },
+            ));
         } else if ctx.input(|i| i.key_pressed(egui::Key::T))
             && let Some(Selection::Wire(id)) = self.selected
             && self.wires.iter().any(|w| w.id == id)
         {
-            self.record_history();
-            if let Some(wire) = self.wires.iter_mut().find(|w| w.id == id) {
-                tidy_wire_points(wire);
-            }
-            self.status = "Wire straightened.".to_string();
+            self.execute_editor_command(crate::commands::EditorCommand::Wiring(
+                crate::commands::wiring::WiringCommand::Tidy { wire_id: Some(id) },
+            ));
         }
 
         // Ctrl+A — Select all components

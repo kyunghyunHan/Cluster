@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet};
 use egui::Pos2;
 
 use crate::{
-    CircuitPin, Component, ComponentKind, PinRole, Wire, WireSegmentId, component_pin_defs,
-    parse_metric_value, point_touches_wire_segment, wire_contact_points,
+    CanonicalConnectivity, CircuitPin, Component, ComponentKind, PinRole, Wire, WireSegmentId,
+    component_pin_defs, parse_metric_value, point_touches_wire_segment,
 };
 
 use super::errors::{ComponentPowerRole, SimulationError};
@@ -76,23 +76,24 @@ pub fn solve_dc(components: &[Component], wires: &[Wire]) -> Option<DcResult> {
     solve_dc_detailed(components, wires).ok()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn solve_dc_detailed(
     components: &[Component],
     wires: &[Wire],
 ) -> Result<DcResult, SimulationError> {
-    // ── 1. Build net map ──────────────────────────────────────────────────
-    let mut nm = NetMap::new();
+    let connectivity = crate::engine::netlist::build_canonical_connectivity(components, wires);
+    solve_dc_detailed_with_connectivity(components, wires, &connectivity)
+}
 
-    for wire in wires {
-        let indices: Vec<usize> = wire.points.iter().map(|&p| nm.reg(p)).collect();
-        for w in indices.windows(2) {
-            nm.join(w[0], w[1]);
-        }
-    }
+pub fn solve_dc_detailed_with_connectivity(
+    components: &[Component],
+    wires: &[Wire],
+    connectivity: &CanonicalConnectivity,
+) -> Result<DcResult, SimulationError> {
+    // ── 1. Build net map ──────────────────────────────────────────────────
+    let mut nm = NetMap::from_connectivity(components, wires, connectivity);
+
     for comp in components {
-        for pin in component_pin_defs(comp) {
-            nm.reg(pin.pos);
-        }
         let pins = component_pin_defs(comp);
         let shorted = match comp.kind {
             ComponentKind::Inductor => true,
@@ -110,42 +111,6 @@ pub fn solve_dc_detailed(
             nm.join(ia, ib);
         }
     }
-    for contact in wire_contact_points(components, wires) {
-        let contact_node = nm.reg(contact);
-        for wire in wires {
-            for segment in wire.points.windows(2) {
-                if point_touches_wire_segment(contact, segment[0], segment[1]) {
-                    let a = nm.reg(segment[0]);
-                    let b = nm.reg(segment[1]);
-                    nm.join(contact_node, a);
-                    nm.join(contact_node, b);
-                }
-            }
-        }
-    }
-
-    // ── 1b. Merge nets connected by NetLabel ──────────────────────────────
-    {
-        let mut label_to_nodes: HashMap<String, Vec<usize>> = HashMap::new();
-        for comp in components {
-            if comp.kind == ComponentKind::NetLabel {
-                let label = comp.value.trim().to_ascii_lowercase();
-                if label.is_empty() {
-                    continue;
-                }
-                for pin in component_pin_defs(comp) {
-                    let idx = nm.reg(pin.pos);
-                    label_to_nodes.entry(label.clone()).or_default().push(idx);
-                }
-            }
-        }
-        for nodes in label_to_nodes.values() {
-            for w in nodes.windows(2) {
-                nm.join(w[0], w[1]);
-            }
-        }
-    }
-
     // ── 2. Identify GND roots ─────────────────────────────────────────────
     let mut gnd_roots: HashSet<usize> = HashSet::new();
     for comp in components {

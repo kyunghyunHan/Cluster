@@ -1,6 +1,15 @@
 use super::*;
 
 pub(crate) fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
+    let connectivity = crate::engine::netlist::build_canonical_connectivity(components, wires);
+    analyze_circuit_with_connectivity(components, wires, &connectivity)
+}
+
+pub(crate) fn analyze_circuit_with_connectivity(
+    components: &[Component],
+    wires: &[Wire],
+    connectivity: &CanonicalConnectivity,
+) -> Simulation {
     let mut nodes = CircuitNodes::default();
     let mut graph: Vec<HashSet<usize>> = Vec::new();
     let mut wire_graph: Vec<HashSet<usize>> = Vec::new();
@@ -10,23 +19,38 @@ pub(crate) fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simul
     let mut powered_module_edges = Vec::new();
     let mut wire_edges = Vec::new();
     let mut component_warnings: HashMap<u64, String> = HashMap::new();
+    let mut canonical_members: HashMap<NetId, Vec<usize>> = HashMap::new();
 
     for wire in wires {
         for segment in wire.points.windows(2) {
             let a = nodes.node_for(segment[0]);
             let b = nodes.node_for(segment[1]);
-            connect(&mut graph, a, b);
-            connect(&mut wire_graph, a, b);
             wire_edges.push((wire.id, a, b));
+        }
+        if let Some(&net_id) = connectivity.netlist.wire_nets.get(&wire.id) {
+            canonical_members
+                .entry(net_id)
+                .or_default()
+                .extend(wire.points.iter().map(|&point| nodes.node_for(point)));
         }
     }
     for component in components {
         for pin in component_pin_defs(component) {
-            nodes.node_for(pin.pos);
+            let node = nodes.node_for(pin.pos);
+            if let Some(net_id) = connectivity.net_for_pin(&PinRef {
+                component_id: component.id,
+                pin_name: pin.label.to_string(),
+            }) {
+                canonical_members.entry(net_id).or_default().push(node);
+            }
         }
     }
-    connect_wire_contacts(&mut nodes, &mut graph, wires, components);
-    connect_wire_contacts(&mut nodes, &mut wire_graph, wires, components);
+    for members in canonical_members.values() {
+        for pair in members.windows(2) {
+            connect(&mut graph, pair[0], pair[1]);
+            connect(&mut wire_graph, pair[0], pair[1]);
+        }
+    }
 
     // Pass 1: sources/returns only. Component conductance is added after
     // wire-only reachability exists, so polarity checks can reject bad paths.
@@ -278,10 +302,11 @@ pub(crate) fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simul
 
     if positive_nodes.is_empty() || return_nodes.is_empty() {
         details.push("Add a source/battery and GND return to run live simulation.".to_string());
-        let (dc, dc_error) = match mna::solve_dc_detailed(components, wires) {
-            Ok(dc) => (Some(dc), None),
-            Err(error) => (None, Some(error)),
-        };
+        let (dc, dc_error) =
+            match mna::solve_dc_detailed_with_connectivity(components, wires, connectivity) {
+                Ok(dc) => (Some(dc), None),
+                Err(error) => (None, Some(error)),
+            };
         return Simulation {
             status: SimulationStatus::Warning,
             summary: "No source or return".to_string(),
@@ -301,10 +326,11 @@ pub(crate) fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simul
     let loop_nodes: HashSet<usize> = from_positive.intersection(&from_return).copied().collect();
     if loop_nodes.is_empty() {
         details.push("No closed path between source + and return/GND.".to_string());
-        let (dc, dc_error) = match mna::solve_dc_detailed(components, wires) {
-            Ok(dc) => (Some(dc), None),
-            Err(error) => (None, Some(error)),
-        };
+        let (dc, dc_error) =
+            match mna::solve_dc_detailed_with_connectivity(components, wires, connectivity) {
+                Ok(dc) => (Some(dc), None),
+                Err(error) => (None, Some(error)),
+            };
         return Simulation {
             status: SimulationStatus::Warning,
             summary: "Open circuit".to_string(),
@@ -457,16 +483,17 @@ pub(crate) fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simul
         details.push(format!("{} energized load(s).", energized_loads.len()));
     }
 
-    let (dc, dc_error) = match mna::solve_dc_detailed(components, wires) {
-        Ok(dc) => (Some(dc), None),
-        Err(error) => {
-            details.push(format!(
-                "DC solver: {error}. {}",
-                error.beginner_explanation()
-            ));
-            (None, Some(error))
-        }
-    };
+    let (dc, dc_error) =
+        match mna::solve_dc_detailed_with_connectivity(components, wires, connectivity) {
+            Ok(dc) => (Some(dc), None),
+            Err(error) => {
+                details.push(format!(
+                    "DC solver: {error}. {}",
+                    error.beginner_explanation()
+                ));
+                (None, Some(error))
+            }
+        };
     if let Some(dc) = &dc {
         if dc.max_kcl_residual > 1e-8 {
             details.push(format!(

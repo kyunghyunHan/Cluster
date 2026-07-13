@@ -131,6 +131,7 @@ Notes:
 현재 시뮬레이션은 SPICE급 아날로그 해석이 아니라 연결성 기반 live-path 판정이다.
 
 현재 지원:
+- canonical connectivity graph가 geometry normalization, typed endpoint/junction/label resolution, global merge, union-find, deterministic net generation, diagnostics를 한 번 수행하고 ERC/DC/AC/transient/current-flow/Breadboard/PCB/SPICE/codegen이 같은 projection을 공유한다.
 - 전원/배터리/전류원과 return/GND 사이에 닫힌 도통 경로가 있으면 `Current flowing`
 - 저항/인덕터/다이오드/LED/램프/닫힌 스위치는 도통 부품으로 처리
 - 커패시터/OP AMP는 기본 DC 도통 경로에서는 open으로 처리

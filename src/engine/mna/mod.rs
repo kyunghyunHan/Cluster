@@ -24,10 +24,12 @@ pub(crate) mod models;
 
 // ── Public re-exports (preserve the original flat API) ────────────────────────
 
-pub use ac::{AcResult, solve_ac};
+#[allow(unused_imports)] // Compatibility entry point remains available to tests and callers.
+pub use ac::{AcResult, solve_ac, solve_ac_with_connectivity};
 #[cfg(test)]
 use dc::solve_dc;
-pub use dc::{DcResult, solve_dc_detailed};
+#[allow(unused_imports)] // Compatibility entry point remains available to tests and callers.
+pub use dc::{DcResult, solve_dc_detailed, solve_dc_detailed_with_connectivity};
 pub use display::{
     format_current, format_power, format_si, format_voltage, parse_si_value, voltage_color,
 };

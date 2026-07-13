@@ -17,7 +17,7 @@ pub(crate) use component::{Component, ComponentKind, SimulationSupport, electric
 pub(crate) use custom_part::{
     CUSTOM_PARTS_DIR, custom_part, custom_part_list, load_custom_parts_dir, sample_part_json,
 };
-pub(crate) use graph::build_schematic_graph;
+pub(crate) use graph::{CanonicalConnectivity, ConnectivityDiagnostic, ConnectivityPoint, NetId};
 pub(crate) use net::{
     CircuitNetlist, Net, NetLabelScope, NetlistAnnotations, NoConnectMarker, WireNetSegment,
 };

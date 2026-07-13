@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use egui::Pos2;
 
 use crate::{
-    Component, ComponentKind, PinRole, Wire, component_pin_defs, parse_metric_value,
-    point_touches_wire_segment, wire_contact_points,
+    CanonicalConnectivity, Component, ComponentKind, PinRole, Wire, component_pin_defs,
+    parse_metric_value,
 };
 
 use super::display::parse_si_value;
@@ -37,59 +37,26 @@ pub struct AcResult {
 /// Capacitors and inductors are modelled as complex admittances; resistors as
 /// real admittances. Voltage sources are treated as ideal (zero impedance).
 #[allow(clippy::needless_range_loop)] // Gaussian elimination requires indexed columns.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn solve_ac(components: &[Component], wires: &[Wire], freq_hz: f64) -> Option<AcResult> {
+    let connectivity = crate::engine::netlist::build_canonical_connectivity(components, wires);
+    solve_ac_with_connectivity(components, wires, freq_hz, &connectivity)
+}
+
+#[allow(clippy::needless_range_loop)] // Gaussian elimination requires indexed columns.
+pub fn solve_ac_with_connectivity(
+    components: &[Component],
+    wires: &[Wire],
+    freq_hz: f64,
+    connectivity: &CanonicalConnectivity,
+) -> Option<AcResult> {
     if freq_hz <= 0.0 {
         return None;
     }
     let omega = 2.0 * std::f64::consts::PI * freq_hz;
 
     // ── Build net map (same as DC) ────────────────────────────────────────
-    let mut nm = NetMap::new();
-    for wire in wires {
-        let indices: Vec<usize> = wire.points.iter().map(|&p| nm.reg(p)).collect();
-        for w in indices.windows(2) {
-            nm.join(w[0], w[1]);
-        }
-    }
-    for comp in components {
-        for pin in component_pin_defs(comp) {
-            nm.reg(pin.pos);
-        }
-    }
-    for contact in wire_contact_points(components, wires) {
-        let ci = nm.reg(contact);
-        for wire in wires {
-            for seg in wire.points.windows(2) {
-                if point_touches_wire_segment(contact, seg[0], seg[1]) {
-                    let a = nm.reg(seg[0]);
-                    let b = nm.reg(seg[1]);
-                    nm.join(ci, a);
-                    nm.join(ci, b);
-                }
-            }
-        }
-    }
-    // NetLabel merging
-    {
-        let mut label_nodes: HashMap<String, Vec<usize>> = HashMap::new();
-        for comp in components {
-            if comp.kind == ComponentKind::NetLabel {
-                let lbl = comp.value.trim().to_ascii_lowercase();
-                if lbl.is_empty() {
-                    continue;
-                }
-                for pin in component_pin_defs(comp) {
-                    let idx = nm.reg(pin.pos);
-                    label_nodes.entry(lbl.clone()).or_default().push(idx);
-                }
-            }
-        }
-        for nodes in label_nodes.values() {
-            for w in nodes.windows(2) {
-                nm.join(w[0], w[1]);
-            }
-        }
-    }
+    let mut nm = NetMap::from_connectivity(components, wires, connectivity);
 
     // ── GND detection ────────────────────────────────────────────────────
     let mut gnd_roots: HashSet<usize> = HashSet::new();

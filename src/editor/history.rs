@@ -49,7 +49,7 @@ impl crate::CircuitApp {
 
     pub(crate) fn invalidate_analysis_cache(&mut self) {
         self.circuit_revision = self.circuit_revision.saturating_add(1);
-        self.cached_netlist = None;
+        self.cached_connectivity = None;
         self.cached_simulation = None;
         self.cached_connected_pins = None;
     }

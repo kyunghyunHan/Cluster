@@ -30,7 +30,16 @@ pub(crate) struct TransientSample {
     pub(crate) source_v: f64,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn solve_transient(components: &[Component], wires: &[Wire]) -> Option<TransientResult> {
+    let netlist = build_circuit_netlist(components, wires);
+    solve_transient_with_netlist(components, &netlist)
+}
+
+pub(crate) fn solve_transient_with_netlist(
+    components: &[Component],
+    netlist: &crate::model::CircuitNetlist,
+) -> Option<TransientResult> {
     let capacitor = components
         .iter()
         .find(|component| component.kind == ComponentKind::Capacitor)?;
@@ -44,7 +53,6 @@ pub(crate) fn solve_transient(components: &[Component], wires: &[Wire]) -> Optio
         return None;
     }
 
-    let netlist = build_circuit_netlist(components, wires);
     let cap_a_net = netlist
         .pins
         .iter()

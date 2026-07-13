@@ -1,6 +1,11 @@
-use crate::app::{AlignDir, Selection, Tool};
+use crate::app::{AlignDir, Selection};
+use crate::commands::EditorCommand;
+use crate::commands::component::ComponentCommand;
+use crate::commands::document::DocumentCommand;
+use crate::commands::selection::SelectionCommand;
+use crate::commands::wiring::WiringCommand;
 use crate::engine::validation::ErcAutoFix;
-use crate::engine::{mna, netlist::build_circuit_netlist, simulation as simulation_engine};
+use crate::engine::{mna, netlist::build_canonical_connectivity, simulation as simulation_engine};
 use crate::model::cad::{CadProjectData, Point2};
 use crate::model::*;
 use crate::pcb::board::{Board, BoardOutline};
@@ -351,9 +356,10 @@ impl crate::CircuitApp {
     // ── Circuit mutation ─────────────────────────────────────────────────────
 
     pub(crate) fn add_component(&mut self, kind: ComponentKind, pos: Pos2) {
-        self.record_history();
-        self.place_component(kind, pos);
-        self.status = "Component placed. Drag to reposition, R to rotate.".to_string();
+        self.execute_editor_command(EditorCommand::Component(ComponentCommand::Place {
+            kind,
+            position: pos,
+        }));
     }
 
     pub(crate) fn place_component(&mut self, kind: ComponentKind, pos: Pos2) -> u64 {
@@ -567,26 +573,7 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn add_wire(&mut self, points: Vec<Pos2>) {
-        let points = crate::simplify_wire(points);
-        if points.len() < 2 {
-            return;
-        }
-        self.record_history();
-        let endpoints: Vec<Pos2> = points
-            .first()
-            .copied()
-            .into_iter()
-            .chain(points.last().copied())
-            .collect();
-        for ep in endpoints {
-            self.split_wire_at_point(ep);
-        }
-        let start = self.infer_wire_endpoint(points[0]);
-        let end = self.infer_wire_endpoint(*points.last().unwrap_or(&points[0]));
-        let id = self.next_id();
-        self.wires
-            .push(Wire::with_endpoints(id, points, start, end));
-        self.status = "Wire placed.".to_string();
+        self.execute_editor_command(EditorCommand::Wiring(WiringCommand::Add { points }));
     }
 
     pub(crate) fn infer_wire_endpoint(&self, point: Pos2) -> WireEndpoint {
@@ -638,92 +625,24 @@ impl crate::CircuitApp {
         }
     }
 
-    pub(crate) fn same_net_wires(&self, wire_id: u64) -> HashSet<u64> {
-        type Key = (i32, i32);
-        let mut ep_to_wires: HashMap<Key, Vec<u64>> = HashMap::with_capacity(self.wires.len() * 2);
-        let mut id_to_idx: HashMap<u64, usize> = HashMap::with_capacity(self.wires.len());
-        for (idx, wire) in self.wires.iter().enumerate() {
-            id_to_idx.insert(wire.id, idx);
-            for pt in wire.points.first().into_iter().chain(wire.points.last()) {
-                let key: Key = (pt.x.round() as i32, pt.y.round() as i32);
-                ep_to_wires.entry(key).or_default().push(wire.id);
-            }
-        }
-        if !id_to_idx.contains_key(&wire_id) {
+    pub(crate) fn same_net_wires(&mut self, wire_id: u64) -> HashSet<u64> {
+        let connectivity = self.current_connectivity();
+        let Some(net_id) = connectivity.netlist.wire_nets.get(&wire_id).copied() else {
             return HashSet::new();
-        }
-
-        let mut same_net: HashSet<u64> = HashSet::new();
-        let mut queue: Vec<u64> = vec![wire_id];
-        same_net.insert(wire_id);
-
-        while let Some(wid) = queue.pop() {
-            let wire = &self.wires[id_to_idx[&wid]];
-            let wire_eps: Vec<Pos2> = wire
-                .points
-                .first()
-                .copied()
-                .into_iter()
-                .chain(wire.points.last().copied())
-                .collect();
-
-            for &ep in &wire_eps {
-                let key: Key = (ep.x.round() as i32, ep.y.round() as i32);
-                for &candidate in ep_to_wires.get(&key).map(|v| v.as_slice()).unwrap_or(&[]) {
-                    if same_net.insert(candidate) {
-                        queue.push(candidate);
-                    }
-                }
-            }
-            for other in &self.wires {
-                if same_net.contains(&other.id) {
-                    continue;
-                }
-                let mut other_eps = other
-                    .points
-                    .first()
-                    .copied()
-                    .into_iter()
-                    .chain(other.points.last().copied());
-                let connected = other_eps.any(|oep| {
-                    wire.points
-                        .windows(2)
-                        .any(|seg| distance_to_segment(oep, seg[0], seg[1]) < 2.5)
-                }) || wire_eps.iter().any(|&ep| {
-                    other
-                        .points
-                        .windows(2)
-                        .any(|seg| distance_to_segment(ep, seg[0], seg[1]) < 2.5)
-                });
-                if connected && same_net.insert(other.id) {
-                    queue.push(other.id);
-                }
-            }
-        }
-        same_net
+        };
+        connectivity
+            .netlist
+            .wire_nets
+            .iter()
+            .filter_map(|(&candidate, &candidate_net)| {
+                (candidate_net == net_id).then_some(candidate)
+            })
+            .collect()
     }
 
     pub(crate) fn reset_canvas(&mut self) {
         self.backup_dirty_work("reset");
-        self.record_history();
-        self.components.clear();
-        self.wires.clear();
-        self.selected = None;
-        self.multi_selected.clear();
-        self.drag = None;
-        self.draft_wire.clear();
-        self.wire_from_select = false;
-        self.hovered_net_wire = None;
-        self.highlighted_net_wires.clear();
-        self.snap_target = None;
-        self.inline_edit = None;
-        self.context_menu = None;
-        self.counters = Counters::default();
-        self.next_id = 1;
-        self.tool = Tool::Select;
-        self.zoom = 1.0;
-        self.pan = Vec2::ZERO;
-        self.mark_dirty();
+        self.execute_editor_command(EditorCommand::Document(DocumentCommand::Reset));
     }
 
     pub(crate) fn add_wire_between(&mut self, a_id: u64, a_pin: &str, b_id: u64, b_pin: &str) {
@@ -1097,7 +1016,7 @@ impl crate::CircuitApp {
         self.refresh_pcb_analysis(&cad);
         self.history_state.dirty = false;
         self.cached_simulation = None;
-        self.cached_netlist = None;
+        self.cached_connectivity = None;
         self.last_autorecover_revision = self.circuit_revision;
         self.dirty_flags.geometry_dirty = false;
         self.dirty_flags.connectivity_dirty = false;
@@ -1421,109 +1340,15 @@ impl crate::CircuitApp {
     // ── Selection actions ────────────────────────────────────────────────────
 
     pub(crate) fn delete_selected(&mut self) {
-        if !self.multi_selected.is_empty() {
-            self.record_history();
-            let count = self.multi_selected.len();
-            self.components
-                .retain(|c| !self.multi_selected.contains(&c.id));
-            self.multi_selected.clear();
-            self.selected = None;
-            self.status = format!("Deleted {count} component(s).");
-            return;
-        }
-        match self.selected.take() {
-            Some(Selection::Component(id)) => {
-                self.record_history();
-                self.components.retain(|c| c.id != id);
-                self.status = "Component deleted.".to_string();
-            }
-            Some(Selection::Wire(id)) => {
-                self.record_history();
-                self.wires.retain(|w| w.id != id);
-                self.status = "Wire deleted.".to_string();
-            }
-            None => {
-                self.status = "Nothing selected to delete.".to_string();
-            }
-        }
+        self.execute_editor_command(EditorCommand::Selection(SelectionCommand::Delete));
     }
 
     pub(crate) fn rotate_selected(&mut self) {
-        let Some(Selection::Component(id)) = self.selected else {
-            return;
-        };
-        let Some(index) = self.components.iter().position(|c| c.id == id) else {
-            return;
-        };
-        self.record_history();
-        let old_pins = component_pins(&self.components[index]);
-        if let Some(component) = self.components.get_mut(index) {
-            component.rotation = (component.rotation + 90) % 360;
-        }
-        let new_pins = component_pins(&self.components[index]);
-        crate::move_attached_wire_endpoints(&mut self.wires, &old_pins, &new_pins);
-        for wire in self.wires.iter_mut() {
-            if wire.points.len() > 2 {
-                let first = wire.points[0];
-                let Some(&last) = wire.points.last() else {
-                    continue;
-                };
-                if old_pins.iter().any(|pin| first.distance(*pin) <= 20.0)
-                    || old_pins.iter().any(|pin| last.distance(*pin) <= 20.0)
-                {
-                    crate::tidy_wire_points(wire);
-                }
-            }
-        }
-        self.status = "Rotated and kept attached wires on pins.".to_string();
+        self.execute_editor_command(EditorCommand::Selection(SelectionCommand::Rotate));
     }
 
     pub(crate) fn duplicate_selected(&mut self) {
-        if !self.multi_selected.is_empty() {
-            self.record_history();
-            let offset = Vec2::new(self.grid * 2.0, self.grid * 2.0);
-            let old_ids: Vec<u64> = self.multi_selected.iter().copied().collect();
-            let mut new_ids = Vec::new();
-            let srcs: Vec<Component> = self
-                .components
-                .iter()
-                .filter(|c| old_ids.contains(&c.id))
-                .cloned()
-                .collect();
-            for src in srcs {
-                let mut dup = src;
-                dup.id = self.next_id();
-                dup.pos += offset;
-                dup.label = self.next_label(dup.kind);
-                new_ids.push(dup.id);
-                self.components.push(dup);
-            }
-            self.multi_selected = new_ids.iter().copied().collect();
-            self.status = format!("Duplicated {} component(s).", new_ids.len());
-            return;
-        }
-        let Some(Selection::Component(id)) = self.selected else {
-            self.status = "Select a component to duplicate.".to_string();
-            return;
-        };
-        let Some(source) = self
-            .components
-            .iter()
-            .find(|component| component.id == id)
-            .cloned()
-        else {
-            self.status = "Selected component is missing.".to_string();
-            return;
-        };
-        self.record_history();
-        let mut duplicate = source;
-        duplicate.id = self.next_id();
-        duplicate.pos += Vec2::new(self.grid * 2.0, self.grid * 2.0);
-        duplicate.label = self.next_label(duplicate.kind);
-        let duplicate_id = duplicate.id;
-        self.components.push(duplicate);
-        self.selected = Some(Selection::Component(duplicate_id));
-        self.status = "Component duplicated.".to_string();
+        self.execute_editor_command(EditorCommand::Selection(SelectionCommand::Duplicate));
     }
 
     // ── Export ───────────────────────────────────────────────────────────────
@@ -1549,10 +1374,10 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn export_spice_netlist(&mut self) {
-        match fs::write(
-            "cluster_circuit.cir",
-            crate::circuit_to_spice_netlist(&self.components, &self.wires),
-        ) {
+        let netlist = self.current_netlist();
+        let output =
+            crate::export::spice::export_spice_netlist_with_netlist(&self.components, &netlist);
+        match fs::write("cluster_circuit.cir", output) {
             Ok(()) => {
                 self.status = "Saved cluster_circuit.cir.".to_string();
             }
@@ -1618,109 +1443,13 @@ impl crate::CircuitApp {
     // ── Align & distribute ───────────────────────────────────────────────────
 
     pub(crate) fn align_selected(&mut self, dir: AlignDir) {
-        let ids: Vec<u64> = if !self.multi_selected.is_empty() {
-            self.multi_selected.iter().copied().collect()
-        } else if let Some(Selection::Component(id)) = self.selected {
-            vec![id]
-        } else {
-            return;
-        };
-        if ids.len() < 2 {
-            return;
-        }
-
-        let positions: Vec<(u64, Pos2)> = self
-            .components
-            .iter()
-            .filter(|c| ids.contains(&c.id))
-            .map(|c| (c.id, c.pos))
-            .collect();
-        if positions.len() < 2 {
-            self.status = "Select at least 2 valid components to align.".to_string();
-            return;
-        }
-
-        let target = match dir {
-            AlignDir::Left => positions
-                .iter()
-                .map(|p| p.1.x)
-                .fold(f32::INFINITY, f32::min),
-            AlignDir::Right => positions
-                .iter()
-                .map(|p| p.1.x)
-                .fold(f32::NEG_INFINITY, f32::max),
-            AlignDir::Top => positions
-                .iter()
-                .map(|p| p.1.y)
-                .fold(f32::INFINITY, f32::min),
-            AlignDir::Bottom => positions
-                .iter()
-                .map(|p| p.1.y)
-                .fold(f32::NEG_INFINITY, f32::max),
-            AlignDir::CenterH => {
-                let sum: f32 = positions.iter().map(|p| p.1.x).sum();
-                sum / positions.len() as f32
-            }
-            AlignDir::CenterV => {
-                let sum: f32 = positions.iter().map(|p| p.1.y).sum();
-                sum / positions.len() as f32
-            }
-        };
-
-        self.record_history();
-        for comp in self.components.iter_mut() {
-            if ids.contains(&comp.id) {
-                match dir {
-                    AlignDir::Left | AlignDir::Right | AlignDir::CenterH => comp.pos.x = target,
-                    AlignDir::Top | AlignDir::Bottom | AlignDir::CenterV => comp.pos.y = target,
-                }
-            }
-        }
-        self.status = format!("Aligned {} components.", positions.len());
+        self.execute_editor_command(EditorCommand::Selection(SelectionCommand::Align(dir)));
     }
 
     pub(crate) fn distribute_selected(&mut self, vertical: bool) {
-        let ids: Vec<u64> = if !self.multi_selected.is_empty() {
-            self.multi_selected.iter().copied().collect()
-        } else {
-            return;
-        };
-        if ids.len() < 3 {
-            return;
-        }
-
-        let mut ordered: Vec<(u64, f32)> = self
-            .components
-            .iter()
-            .filter(|c| ids.contains(&c.id))
-            .map(|c| (c.id, if vertical { c.pos.y } else { c.pos.x }))
-            .collect();
-        if ordered.len() < 3 {
-            self.status = "Select at least 3 valid components to distribute.".to_string();
-            return;
-        }
-        ordered.sort_by(|a, b| a.1.total_cmp(&b.1));
-
-        let Some(first) = ordered.first().map(|(_, pos)| *pos) else {
-            return;
-        };
-        let Some(last) = ordered.last().map(|(_, pos)| *pos) else {
-            return;
-        };
-        let step = (last - first) / (ordered.len() as f32 - 1.0);
-
-        self.record_history();
-        for (i, (id, _)) in ordered.iter().enumerate() {
-            let val = first + step * i as f32;
-            if let Some(comp) = self.components.iter_mut().find(|c| c.id == *id) {
-                if vertical {
-                    comp.pos.y = val;
-                } else {
-                    comp.pos.x = val;
-                }
-            }
-        }
-        self.status = format!("Distributed {} components.", ids.len());
+        self.execute_editor_command(EditorCommand::Selection(SelectionCommand::Distribute {
+            vertical,
+        }));
     }
 
     // ── Multi-page management ────────────────────────────────────────────────
@@ -1924,20 +1653,31 @@ impl crate::CircuitApp {
         }
         self.performance.simulation_cache_hit = false;
         self.simulation_run_state = crate::ui::app::SimulationRunState::Solving;
+        let connectivity = self.current_connectivity();
         let mna_started = std::time::Instant::now();
-        let mut simulation = simulation_engine::analyze_circuit(&self.components, &self.wires);
-        simulation.ac = mna::solve_ac(
+        let mut simulation = simulation_engine::analyze_circuit_with_connectivity(
+            &self.components,
+            &self.wires,
+            &connectivity,
+        );
+        simulation.ac = mna::solve_ac_with_connectivity(
             &self.components,
             &self.wires,
             self.simulation_ui.ac_freq_hz as f64,
+            &connectivity,
         );
-        simulation.transient =
-            crate::engine::transient::solve_transient(&self.components, &self.wires);
+        simulation.transient = crate::engine::transient::solve_transient_with_netlist(
+            &self.components,
+            &connectivity.netlist,
+        );
         self.performance.mna_ms = mna_started.elapsed().as_secs_f64() * 1_000.0;
-        let netlist = self.current_netlist();
         let erc_started = std::time::Instant::now();
-        simulation.erc =
-            crate::run_erc_with_netlist(&self.components, &self.wires, &simulation, &netlist);
+        simulation.erc = crate::run_erc_with_netlist(
+            &self.components,
+            &self.wires,
+            &simulation,
+            &connectivity.netlist,
+        );
         self.performance.erc_ms = erc_started.elapsed().as_secs_f64() * 1_000.0;
         self.cached_simulation = Some((self.circuit_revision, ac_key, simulation.clone()));
         self.simulation_revision = self.simulation_revision.saturating_add(1);
@@ -1958,19 +1698,23 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn current_netlist(&mut self) -> CircuitNetlist {
-        if let Some((revision, netlist)) = &self.cached_netlist
+        self.current_connectivity().netlist
+    }
+
+    pub(crate) fn current_connectivity(&mut self) -> CanonicalConnectivity {
+        if let Some((revision, connectivity)) = &self.cached_connectivity
             && *revision == self.circuit_revision
         {
             self.performance.netlist_cache_hit = true;
-            return netlist.clone();
+            return connectivity.clone();
         }
         self.performance.netlist_cache_hit = false;
         let started = std::time::Instant::now();
-        let netlist = build_circuit_netlist(&self.components, &self.wires);
+        let connectivity = build_canonical_connectivity(&self.components, &self.wires);
         self.performance.netlist_ms = started.elapsed().as_secs_f64() * 1_000.0;
-        self.cached_netlist = Some((self.circuit_revision, netlist.clone()));
+        self.cached_connectivity = Some((self.circuit_revision, connectivity.clone()));
         self.dirty_flags.connectivity_dirty = false;
-        netlist
+        connectivity
     }
 
     pub(crate) fn current_connected_pins(&mut self) -> Vec<(i32, i32)> {
@@ -1979,7 +1723,14 @@ impl crate::CircuitApp {
         {
             return pins.clone();
         }
-        let pins = crate::connected_pin_positions(&self.components, &self.wires);
+        let pins = self
+            .current_connectivity()
+            .netlist
+            .pins
+            .into_iter()
+            .filter(|pin| pin.connected_by_wire)
+            .map(|pin| (pin.position.x.round() as i32, pin.position.y.round() as i32))
+            .collect::<Vec<_>>();
         self.cached_connected_pins = Some((self.circuit_revision, pins.clone()));
         pins
     }

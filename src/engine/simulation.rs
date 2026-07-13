@@ -41,6 +41,15 @@ pub(crate) enum Conductance {
     Load,
 }
 
+#[allow(dead_code)] // Compatibility facade; runtime passes cached connectivity explicitly.
 pub(crate) fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simulation {
     crate::analyze_circuit(components, wires)
+}
+
+pub(crate) fn analyze_circuit_with_connectivity(
+    components: &[Component],
+    wires: &[Wire],
+    connectivity: &crate::model::CanonicalConnectivity,
+) -> Simulation {
+    crate::ui::app::analyze_circuit_with_connectivity(components, wires, connectivity)
 }

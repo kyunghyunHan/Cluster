@@ -2,7 +2,8 @@
 
 use egui::Pos2;
 
-use crate::{CircuitNodes, UnionFind};
+use crate::{CanonicalConnectivity, CircuitNodes, Component, UnionFind, Wire, component_pin_defs};
+use std::collections::HashMap;
 
 // ── Net assignment (position → net_root index) ────────────────────────────────
 
@@ -17,6 +18,45 @@ impl NetMap {
             nodes: CircuitNodes::default(),
             uf: UnionFind::default(),
         }
+    }
+
+    pub(super) fn from_connectivity(
+        components: &[Component],
+        wires: &[Wire],
+        connectivity: &CanonicalConnectivity,
+    ) -> Self {
+        let mut map = Self::new();
+        let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
+
+        for wire in wires {
+            let Some(&net_id) = connectivity.netlist.wire_nets.get(&wire.id) else {
+                for &point in &wire.points {
+                    map.reg(point);
+                }
+                continue;
+            };
+            for &point in &wire.points {
+                let index = map.reg(point);
+                members.entry(net_id).or_default().push(index);
+            }
+        }
+        for component in components {
+            for pin in component_pin_defs(component) {
+                let index = map.reg(pin.pos);
+                if let Some(net_id) = connectivity.net_for_pin(&crate::PinRef {
+                    component_id: component.id,
+                    pin_name: pin.label.to_string(),
+                }) {
+                    members.entry(net_id).or_default().push(index);
+                }
+            }
+        }
+        for indices in members.values() {
+            for pair in indices.windows(2) {
+                map.join(pair[0], pair[1]);
+            }
+        }
+        map
     }
 
     pub(super) fn reg(&mut self, pos: Pos2) -> usize {

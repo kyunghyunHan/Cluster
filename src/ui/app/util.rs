@@ -29,6 +29,7 @@ impl UnionFind {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn circuit_to_spice_netlist(components: &[Component], wires: &[Wire]) -> String {
     let mut nodes = CircuitNodes::default();
     let mut nets = UnionFind::default();
@@ -683,6 +684,7 @@ pub(crate) fn sanitize_code_ident(name: &str) -> String {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn spice_two_pin_nets(
     component: &Component,
     pins: &[CircuitPin],
@@ -705,6 +707,7 @@ pub(crate) fn spice_two_pin_nets(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn unique_spice_name(
     prefix: &str,
     label: &str,
@@ -733,6 +736,7 @@ pub(crate) fn unique_spice_name(
     with_id
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn spice_value(component: &Component, fallback: &str) -> String {
     let normalized = component.value.trim().replace(' ', "");
     if normalized.is_empty() {
@@ -762,6 +766,7 @@ pub(crate) fn spice_value(component: &Component, fallback: &str) -> String {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn spice_node_name(value: &str) -> Option<String> {
     let mut name = value
         .trim()

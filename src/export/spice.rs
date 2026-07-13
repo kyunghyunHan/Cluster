@@ -17,6 +17,13 @@ pub(crate) struct NgspiceResult {
 
 pub(crate) fn export_spice_netlist(components: &[Component], wires: &[Wire]) -> String {
     let netlist = build_circuit_netlist(components, wires);
+    export_spice_netlist_with_netlist(components, &netlist)
+}
+
+pub(crate) fn export_spice_netlist_with_netlist(
+    components: &[Component],
+    netlist: &crate::model::CircuitNetlist,
+) -> String {
     let net_names = netlist
         .nets
         .iter()
