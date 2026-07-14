@@ -203,7 +203,7 @@ does not infer application behavior for arbitrary modules.
 - JSON format with schema version tracking
 - Schema v4 stores explicit wire endpoints (`Pin`, `Junction`, or `FreePoint`)
   separately from the drawn polyline points.
-- Automatic `.bak` backup before every manual save
+- Atomic temporary-file replacement with `.bak` plus three rotated backup generations
 - Autosave to `cluster_autorecover.json` every 30 seconds
 - Corrupt or old-schema files are repaired on load — never silently discarded
 - Legacy files without endpoint metadata are migrated once on load: wire ends
@@ -212,6 +212,9 @@ does not infer application behavior for arbitrary modules.
 - The PCB dock can save and load a `project.cluster/` folder containing
   `schematic.json`, `board.json`, and `project.json`; repeated saves use the
   same backup-safe write path as normal circuit saves.
+- Custom part JSON supports schema v2 structured tags, voltage ranges, interface maps,
+  footprint/pad maps, simulation metadata, and documentation; schema v1 symbol-only files remain
+  compatible.
 
 ---
 

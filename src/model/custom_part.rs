@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::{LazyLock, Mutex, RwLock};
 
 pub(crate) const CUSTOM_PARTS_DIR: &str = "cluster_parts";
-pub(crate) const CUSTOM_PART_SCHEMA_VERSION: u32 = 1;
+pub(crate) const CUSTOM_PART_SCHEMA_VERSION: u32 = 2;
 
 /// Pin spacing used by module-style symbols (see `module_pin_y`).
 const PIN_SPACING: f32 = 20.0;
@@ -49,10 +49,22 @@ pub(crate) struct CustomPartFile {
     #[serde(default)]
     pub(crate) height: f32,
     pub(crate) pins: Vec<CustomPinFile>,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
+    #[serde(default)]
+    pub(crate) operating_voltage: Option<CustomVoltageRange>,
+    #[serde(default)]
+    pub(crate) interfaces: Vec<CustomInterfaceFile>,
+    #[serde(default)]
+    pub(crate) footprint: Option<CustomFootprintFile>,
+    #[serde(default)]
+    pub(crate) simulation: Option<CustomSimulationFile>,
+    #[serde(default)]
+    pub(crate) documentation: Option<String>,
 }
 
 fn default_schema_version() -> u32 {
-    CUSTOM_PART_SCHEMA_VERSION
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +77,45 @@ pub(crate) struct CustomPinFile {
     /// "left" (default) or "right".
     #[serde(default)]
     pub(crate) side: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct CustomVoltageRange {
+    pub(crate) min_v: f32,
+    pub(crate) max_v: f32,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct CustomInterfaceFile {
+    pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) pins: HashMap<String, String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct CustomFootprintFile {
+    pub(crate) id: String,
+    pub(crate) width_mm: f32,
+    pub(crate) height_mm: f32,
+    pub(crate) pads: Vec<CustomPadFile>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CustomPadFile {
+    pub(crate) number: String,
+    pub(crate) pin: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CustomSimulationFile {
+    pub(crate) support: String,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
 }
 
 // ── Resolved in-memory definition ─────────────────────────────────────────────
@@ -80,6 +131,12 @@ pub(crate) struct CustomPartDef {
     pub(crate) size: Vec2,
     pub(crate) left_pins: Vec<(&'static str, PinRole)>,
     pub(crate) right_pins: Vec<(&'static str, PinRole)>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) operating_voltage: Option<CustomVoltageRange>,
+    pub(crate) interfaces: Vec<CustomInterfaceFile>,
+    pub(crate) footprint: Option<CustomFootprintFile>,
+    pub(crate) simulation: Option<CustomSimulationFile>,
+    pub(crate) documentation: Option<String>,
 }
 
 pub(crate) fn parse_pin_role(role: &str) -> Option<PinRole> {
@@ -119,13 +176,29 @@ pub(crate) fn resolve_custom_part(file: CustomPartFile) -> Result<CustomPartDef,
     if file.pins.is_empty() {
         return Err("part must declare at least one pin".to_string());
     }
+    if !file.width.is_finite() || !file.height.is_finite() || file.width < 0.0 || file.height < 0.0
+    {
+        return Err("symbol width/height must be finite and non-negative".to_string());
+    }
+    if let Some(range) = &file.operating_voltage
+        && (!range.min_v.is_finite()
+            || !range.max_v.is_finite()
+            || range.min_v < 0.0
+            || range.max_v < range.min_v)
+    {
+        return Err("operating_voltage must contain a finite min_v <= max_v".to_string());
+    }
 
     let mut left_pins = Vec::new();
     let mut right_pins = Vec::new();
+    let mut pin_names = HashSet::new();
     for pin in &file.pins {
         let pin_name = pin.name.trim();
         if pin_name.is_empty() {
             return Err("every pin needs a non-empty `name`".to_string());
+        }
+        if !pin_names.insert(pin_name.to_ascii_lowercase()) {
+            return Err(format!("duplicate pin name `{pin_name}`"));
         }
         let role = parse_pin_role(&pin.role)
             .ok_or_else(|| format!("pin {pin_name}: unknown role `{}`", pin.role))?;
@@ -134,6 +207,38 @@ pub(crate) fn resolve_custom_part(file: CustomPartFile) -> Result<CustomPartDef,
             "" | "left" => left_pins.push(entry),
             "right" => right_pins.push(entry),
             other => return Err(format!("pin {pin_name}: unknown side `{other}`")),
+        }
+    }
+
+    if let Some(footprint) = &file.footprint {
+        if footprint.id.trim().is_empty()
+            || !footprint.width_mm.is_finite()
+            || !footprint.height_mm.is_finite()
+            || footprint.width_mm <= 0.0
+            || footprint.height_mm <= 0.0
+        {
+            return Err("footprint needs an id and positive finite dimensions".to_string());
+        }
+        if footprint.pads.is_empty() {
+            return Err("footprint must declare at least one pad".to_string());
+        }
+        let mut pad_numbers = HashSet::new();
+        let mut mapped_pins = HashSet::new();
+        for pad in &footprint.pads {
+            if pad.number.trim().is_empty() || !pad_numbers.insert(pad.number.trim()) {
+                return Err(format!("duplicate or empty footprint pad `{}`", pad.number));
+            }
+            let pin = pad.pin.trim().to_ascii_lowercase();
+            if !pin_names.contains(&pin) {
+                return Err(format!(
+                    "footprint pad {} maps unknown pin `{}`",
+                    pad.number, pad.pin
+                ));
+            }
+            mapped_pins.insert(pin);
+        }
+        if let Some(missing) = pin_names.difference(&mapped_pins).next() {
+            return Err(format!("footprint has no pad for pin `{missing}`"));
         }
     }
 
@@ -166,6 +271,12 @@ pub(crate) fn resolve_custom_part(file: CustomPartFile) -> Result<CustomPartDef,
         size: Vec2::new(width, height),
         left_pins,
         right_pins,
+        tags: file.tags,
+        operating_voltage: file.operating_voltage,
+        interfaces: file.interfaces,
+        footprint: file.footprint,
+        simulation: file.simulation,
+        documentation: file.documentation,
     })
 }
 
@@ -309,6 +420,24 @@ pub(crate) fn sample_part_json() -> String {
                 side: "right".to_string(),
             },
         ],
+        tags: vec!["sensor".to_string(), "i2c".to_string()],
+        operating_voltage: Some(CustomVoltageRange {
+            min_v: 1.8,
+            max_v: 3.6,
+        }),
+        interfaces: vec![CustomInterfaceFile {
+            kind: "i2c".to_string(),
+            pins: HashMap::from([
+                ("sda".to_string(), "SDA".to_string()),
+                ("scl".to_string(), "SCL".to_string()),
+            ]),
+        }],
+        footprint: None,
+        simulation: Some(CustomSimulationFile {
+            support: "symbolic".to_string(),
+            model: None,
+        }),
+        documentation: None,
     };
     serde_json::to_string_pretty(&sample).expect("sample part serializes")
 }
@@ -350,6 +479,57 @@ mod tests {
 
         let no_pins = parse_custom_part_json(r#"{"id": "user:x", "name": "X", "pins": []}"#);
         assert!(no_pins.unwrap_err().contains("at least one pin"));
+    }
+
+    #[test]
+    fn schema_v2_validates_duplicate_pins_and_footprint_mapping() {
+        let duplicate = parse_custom_part_json(
+            r#"{
+                "schema_version": 2,
+                "id": "user:duplicate",
+                "name": "Duplicate",
+                "pins": [{"name": "VCC"}, {"name": "vcc"}]
+            }"#,
+        );
+        assert!(duplicate.unwrap_err().contains("duplicate pin name"));
+
+        let missing_pad = parse_custom_part_json(
+            r#"{
+                "schema_version": 2,
+                "id": "user:footprint",
+                "name": "Footprint",
+                "pins": [{"name": "A"}, {"name": "B"}],
+                "footprint": {
+                    "id": "User:TwoPad",
+                    "width_mm": 4.0,
+                    "height_mm": 2.0,
+                    "pads": [{"number": "1", "pin": "A"}]
+                }
+            }"#,
+        );
+        assert!(missing_pad.unwrap_err().contains("no pad for pin"));
+    }
+
+    #[test]
+    fn schema_v2_structured_metadata_parses_while_v1_defaults_remain_supported() {
+        let def = parse_custom_part_json(
+            r#"{
+                "schema_version": 2,
+                "id": "user:i2c-module",
+                "name": "I2C Module",
+                "pins": [{"name": "SDA", "role": "i2c"}],
+                "tags": ["sensor", "i2c"],
+                "operating_voltage": {"min_v": 1.8, "max_v": 3.6},
+                "interfaces": [{"kind": "i2c", "pins": {"sda": "SDA"}}],
+                "simulation": {"support": "symbolic"},
+                "documentation": "docs/i2c-module.md"
+            }"#,
+        )
+        .expect("schema v2 part parses");
+        assert_eq!(def.tags, ["sensor", "i2c"]);
+        assert_eq!(def.operating_voltage.unwrap().max_v, 3.6);
+        assert_eq!(def.interfaces[0].kind, "i2c");
+        assert_eq!(def.documentation.as_deref(), Some("docs/i2c-module.md"));
     }
 
     #[test]

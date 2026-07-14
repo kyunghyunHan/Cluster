@@ -200,6 +200,13 @@ Notes:
 9. 프로젝트 관리: 일부 완료 - PCB dock에서 `project.cluster/` 폴더에 schematic/board/project JSON 저장 및 로드 지원. 향후 `.cluster` 파일, 자동 저장, 복구, 최근 프로젝트, 프로젝트 썸네일
 10. 고급 시뮬레이션: internal beginner DC 유지 + 선택적 ngspice export/run/import
 
+현재 구조 안정화 상태:
+- `ProjectDocument`/`EditorState`/`WorkspaceState`/`AnalysisState` 소유권 경계를 사용한다.
+- editor command는 typed `ChangeSet`을 반환하며 중앙 dispatcher가 cache/dirty/autosave/repaint를 처리한다.
+- canonical connectivity의 geometry/label/union-find/diagnostics 단계와 ERC rule registry가 분리되었다.
+- custom part schema v2는 v1 파일을 유지하면서 구조화 metadata와 footprint 검증을 지원한다.
+- 저장은 같은 디렉터리의 임시 파일을 sync/rename하고 3세대 backup을 유지한다.
+
 ## Definition Of Done
 
 작업 완료 전 확인한다.

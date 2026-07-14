@@ -263,22 +263,33 @@ pub(crate) fn write_with_backup(path: &str, content: &str) -> Result<(), String>
         return Err(format!("Save folder does not exist: {}", parent.display()));
     }
 
-    // Back up existing file before overwrite so data is never lost.
+    // Rotate three older generations before replacing the current backup.
     if target.exists() {
+        rotate_backup_generations(path)?;
         let backup_path = format!("{path}.bak");
-        if let Err(e) = std::fs::copy(path, &backup_path) {
-            // Non-fatal: log but continue.
-            eprintln!("Warning: could not create backup {backup_path}: {e}");
-        }
+        std::fs::copy(path, &backup_path)
+            .map_err(|error| format!("Create backup {backup_path}: {error}"))?;
     }
 
     let tmp_path = temporary_path_for(target);
     let result = (|| -> Result<(), String> {
-        let mut file = std::fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+        let mut file = std::fs::File::create(&tmp_path)
+            .map_err(|error| format!("Create {}: {error}", tmp_path.display()))?;
         file.write_all(content.as_bytes())
-            .map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp_path, target).map_err(|e| e.to_string())?;
+            .map_err(|error| format!("Write {}: {error}", tmp_path.display()))?;
+        file.sync_all()
+            .map_err(|error| format!("Sync {}: {error}", tmp_path.display()))?;
+        std::fs::rename(&tmp_path, target).map_err(|error| {
+            format!(
+                "Replace {} from {}: {error}",
+                target.display(),
+                tmp_path.display()
+            )
+        })?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("Sync save folder {}: {error}", parent.display()))?;
         Ok(())
     })();
 
@@ -287,6 +298,26 @@ pub(crate) fn write_with_backup(path: &str, content: &str) -> Result<(), String>
     }
 
     result
+}
+
+fn rotate_backup_generations(path: &str) -> Result<(), String> {
+    for generation in (1..=3).rev() {
+        let source = if generation == 1 {
+            format!("{path}.bak")
+        } else {
+            format!("{path}.bak.{}", generation - 1)
+        };
+        let destination = format!("{path}.bak.{generation}");
+        if Path::new(&source).exists() {
+            if Path::new(&destination).exists() {
+                std::fs::remove_file(&destination)
+                    .map_err(|error| format!("Remove old backup {destination}: {error}"))?;
+            }
+            std::fs::rename(&source, &destination)
+                .map_err(|error| format!("Rotate backup {source} to {destination}: {error}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn temporary_path_for(target: &Path) -> PathBuf {
@@ -313,6 +344,7 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("cluster-save-test-{unique}.json"));
         let backup = PathBuf::from(format!("{}.bak", path.display()));
+        let backup_1 = PathBuf::from(format!("{}.bak.1", path.display()));
         let tmp = temporary_path_for(&path);
 
         write_with_backup(path.to_str().unwrap(), "old").unwrap();
@@ -322,8 +354,13 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), "old");
         assert!(!tmp.exists());
 
+        write_with_backup(path.to_str().unwrap(), "newer").unwrap();
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(&backup_1).unwrap(), "old");
+
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(backup);
+        let _ = std::fs::remove_file(backup_1);
     }
 
     #[test]
