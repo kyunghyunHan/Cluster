@@ -1,5 +1,5 @@
 use crate::app::{AlignDir, Selection};
-use crate::commands::CommandDirtyState;
+use crate::commands::ChangeSet;
 use crate::{Component, component_pins};
 use egui::Vec2;
 
@@ -12,18 +12,19 @@ pub(crate) enum SelectionCommand {
 }
 
 impl SelectionCommand {
-    pub(crate) fn apply(self, app: &mut crate::CircuitApp) -> CommandDirtyState {
+    pub(crate) fn apply(self, app: &mut crate::CircuitApp) -> ChangeSet {
         match self {
             Self::Delete => {
-                if !app.multi_selected.is_empty() {
-                    let count = app.multi_selected.len();
+                if !app.editor.multi_selected.is_empty() {
+                    let count = app.editor.multi_selected.len();
+                    let selected = app.editor.multi_selected.clone();
                     app.components
-                        .retain(|component| !app.multi_selected.contains(&component.id));
-                    app.multi_selected.clear();
-                    app.selected = None;
+                        .retain(|component| !selected.contains(&component.id));
+                    app.editor.multi_selected.clear();
+                    app.editor.selected = None;
                     app.status = format!("Deleted {count} component(s).");
                 } else {
-                    match app.selected.take() {
+                    match app.editor.selected.take() {
                         Some(Selection::Component(id)) => {
                             app.components.retain(|component| component.id != id);
                             app.status = "Component deleted.".to_string();
@@ -34,21 +35,21 @@ impl SelectionCommand {
                         }
                         None => {
                             app.status = "Nothing selected to delete.".to_string();
-                            return CommandDirtyState::none();
+                            return ChangeSet::none();
                         }
                     }
                 }
             }
             Self::Rotate => {
-                let Some(Selection::Component(id)) = app.selected else {
-                    return CommandDirtyState::none();
+                let Some(Selection::Component(id)) = app.editor.selected else {
+                    return ChangeSet::none();
                 };
                 let Some(index) = app
                     .components
                     .iter()
                     .position(|component| component.id == id)
                 else {
-                    return CommandDirtyState::none();
+                    return ChangeSet::none();
                 };
                 let old_pins = component_pins(&app.components[index]);
                 app.components[index].rotation = (app.components[index].rotation + 90) % 360;
@@ -70,13 +71,13 @@ impl SelectionCommand {
                 app.status = "Rotated and kept attached wires on pins.".to_string();
             }
             Self::Duplicate => {
-                let sources = if !app.multi_selected.is_empty() {
+                let sources = if !app.editor.multi_selected.is_empty() {
                     app.components
                         .iter()
-                        .filter(|component| app.multi_selected.contains(&component.id))
+                        .filter(|component| app.editor.multi_selected.contains(&component.id))
                         .cloned()
                         .collect::<Vec<_>>()
-                } else if let Some(Selection::Component(id)) = app.selected {
+                } else if let Some(Selection::Component(id)) = app.editor.selected {
                     app.components
                         .iter()
                         .find(|component| component.id == id)
@@ -85,7 +86,7 @@ impl SelectionCommand {
                         .collect()
                 } else {
                     app.status = "Select a component to duplicate.".to_string();
-                    return CommandDirtyState::none();
+                    return ChangeSet::none();
                 };
                 let offset = Vec2::new(app.grid * 2.0, app.grid * 2.0);
                 let mut new_ids = Vec::new();
@@ -98,11 +99,11 @@ impl SelectionCommand {
                     app.components.push(duplicate);
                 }
                 if new_ids.len() == 1 {
-                    app.selected = Some(Selection::Component(new_ids[0]));
+                    app.editor.selected = Some(Selection::Component(new_ids[0]));
                     app.status = "Component duplicated.".to_string();
                 } else {
-                    app.multi_selected = new_ids.iter().copied().collect();
-                    app.selected = None;
+                    app.editor.multi_selected = new_ids.iter().copied().collect();
+                    app.editor.selected = None;
                     app.status = format!("Duplicated {} component(s).", new_ids.len());
                 }
             }
@@ -115,7 +116,7 @@ impl SelectionCommand {
                     .map(|component| component.pos)
                     .collect::<Vec<_>>();
                 if positions.len() < 2 {
-                    return CommandDirtyState::none();
+                    return ChangeSet::none();
                 }
                 let target = match direction {
                     AlignDir::Left => positions
@@ -160,7 +161,7 @@ impl SelectionCommand {
             Self::Distribute { vertical } => {
                 let ids = selected_component_ids(app);
                 if ids.len() < 3 {
-                    return CommandDirtyState::none();
+                    return ChangeSet::none();
                 }
                 let mut ordered = app
                     .components
@@ -182,7 +183,7 @@ impl SelectionCommand {
                     ordered.first().map(|row| row.1),
                     ordered.last().map(|row| row.1),
                 ) else {
-                    return CommandDirtyState::none();
+                    return ChangeSet::none();
                 };
                 let step = (last - first) / (ordered.len() as f32 - 1.0);
                 for (index, (id, _)) in ordered.iter().enumerate() {
@@ -201,14 +202,14 @@ impl SelectionCommand {
                 app.status = format!("Distributed {} components.", ids.len());
             }
         }
-        CommandDirtyState::document()
+        ChangeSet::schematic()
     }
 }
 
 fn selected_component_ids(app: &crate::CircuitApp) -> Vec<u64> {
-    if !app.multi_selected.is_empty() {
-        app.multi_selected.iter().copied().collect()
-    } else if let Some(Selection::Component(id)) = app.selected {
+    if !app.editor.multi_selected.is_empty() {
+        app.editor.multi_selected.iter().copied().collect()
+    } else if let Some(Selection::Component(id)) = app.editor.selected {
         vec![id]
     } else {
         Vec::new()

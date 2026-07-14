@@ -1,4 +1,4 @@
-use crate::commands::CommandDirtyState;
+use crate::commands::ChangeSet;
 
 #[allow(dead_code)]
 pub(crate) enum PropertiesCommand {
@@ -17,7 +17,7 @@ pub(crate) enum PropertiesCommand {
 }
 
 impl PropertiesCommand {
-    pub(crate) fn apply(self, app: &mut crate::CircuitApp) -> CommandDirtyState {
+    pub(crate) fn apply(self, app: &mut crate::CircuitApp) -> ChangeSet {
         match self {
             Self::SetComponentValue {
                 component_id,
@@ -28,7 +28,7 @@ impl PropertiesCommand {
                     .iter_mut()
                     .find(|component| component.id == component_id)
                 else {
-                    return CommandDirtyState::none();
+                    return ChangeSet::none();
                 };
                 component.value = value;
             }
@@ -38,7 +38,7 @@ impl PropertiesCommand {
                     .iter_mut()
                     .find(|component| component.id == component_id)
                 else {
-                    return CommandDirtyState::none();
+                    return ChangeSet::none();
                 };
                 let was_open = component.value.to_ascii_lowercase().contains("open");
                 component.value = if was_open { "closed" } else { "open" }.to_string();
@@ -55,12 +55,12 @@ impl PropertiesCommand {
                     .iter_mut()
                     .find(|component| component.id == component_id)
                 else {
-                    return CommandDirtyState::none();
+                    return ChangeSet::none();
                 };
                 component.label = label;
                 component.value = value;
             }
         }
-        CommandDirtyState::document()
+        ChangeSet::schematic()
     }
 }

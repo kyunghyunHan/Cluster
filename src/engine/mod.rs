@@ -1,3 +1,5 @@
+pub(crate) mod connectivity;
+pub(crate) mod erc;
 pub(crate) mod mna;
 pub(crate) mod netlist;
 pub(crate) mod ngspice;

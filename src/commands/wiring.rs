@@ -1,4 +1,4 @@
-use crate::commands::CommandDirtyState;
+use crate::commands::ChangeSet;
 use crate::model::Wire;
 use egui::Pos2;
 
@@ -11,18 +11,21 @@ pub(crate) enum WiringCommand {
         point_index: usize,
         position: Pos2,
     },
+    InsertControlPoint {
+        position: Pos2,
+    },
     Tidy {
         wire_id: Option<u64>,
     },
 }
 
 impl WiringCommand {
-    pub(crate) fn apply(self, app: &mut crate::CircuitApp) -> CommandDirtyState {
+    pub(crate) fn apply(self, app: &mut crate::CircuitApp) -> ChangeSet {
         match self {
             Self::Add { points } => {
                 let points = crate::simplify_wire(points);
                 if points.len() < 2 {
-                    return CommandDirtyState::none();
+                    return ChangeSet::none();
                 }
                 let endpoints = [points.first().copied(), points.last().copied()];
                 for endpoint in endpoints.into_iter().flatten() {
@@ -44,6 +47,18 @@ impl WiringCommand {
                 point_index,
                 position,
             ),
+            Self::InsertControlPoint { position } => {
+                let Some((wire_id, point_index)) =
+                    crate::ui::app::insert_wire_control_point(position, &mut app.wires)
+                else {
+                    return ChangeSet::none();
+                };
+                app.editor.drag = Some(crate::DragState::WirePoint {
+                    wire_id,
+                    point_index,
+                });
+                app.editor.selected = Some(crate::app::Selection::Wire(wire_id));
+            }
             Self::Tidy { wire_id } => {
                 let mut count = 0;
                 for wire in &mut app.wires {
@@ -59,6 +74,6 @@ impl WiringCommand {
                 };
             }
         }
-        CommandDirtyState::document()
+        ChangeSet::schematic()
     }
 }

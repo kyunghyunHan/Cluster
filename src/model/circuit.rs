@@ -51,6 +51,8 @@ pub(crate) struct CircuitSnapshot {
     #[allow(clippy::type_complexity)] // Migrated to SchematicPage in the next storage schema.
     pub(crate) pages: Vec<(String, Vec<Component>, Vec<Wire>, u64, Counters)>,
     pub(crate) current_page: usize,
+    /// Board data is stored in project-folder `board.json`, not schematic JSON.
+    pub(crate) board: crate::pcb::board::Board,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

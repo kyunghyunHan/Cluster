@@ -85,12 +85,14 @@ pub(crate) use symbols::*;
 pub(crate) use util::*;
 pub(crate) use widgets::*;
 
-pub(crate) struct UiState {
+pub(crate) struct WorkspaceState {
     pub(crate) show_help: bool,
     pub(crate) bottom_dock_tab: BottomDockTab,
     pub(crate) bottom_dock_open: bool,
     pub(crate) workspace: Workspace,
     pub(crate) show_performance_overlay: bool,
+    /// Set by the command dispatcher when a semantic change needs another frame.
+    pub(crate) repaint_requested: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -125,7 +127,7 @@ impl SimulationRunState {
     }
 }
 
-impl Default for UiState {
+impl Default for WorkspaceState {
     fn default() -> Self {
         Self {
             show_help: false,
@@ -133,6 +135,7 @@ impl Default for UiState {
             bottom_dock_open: true,
             workspace: Workspace::Schematic,
             show_performance_overlay: false,
+            repaint_requested: false,
         }
     }
 }
@@ -190,33 +193,61 @@ pub(crate) struct BreadboardUiState {
     pub(crate) open: bool,
 }
 
+#[derive(Default)]
 pub(crate) struct PcbUiState {
-    pub(crate) board: crate::pcb::board::Board,
-    pub(crate) cad: Option<crate::model::cad::CadProjectData>,
-    pub(crate) drc: Vec<crate::pcb::drc::DrcViolation>,
     pub(crate) ratsnest_count: usize,
     pub(crate) last_sync_revision: u64,
     pub(crate) selected_drc_index: Option<usize>,
 }
 
-impl Default for PcbUiState {
-    fn default() -> Self {
-        Self {
-            board: crate::pcb::board::Board::new_two_layer(80.0, 50.0),
-            cad: None,
-            drc: Vec::new(),
-            ratsnest_count: 0,
-            last_sync_revision: 0,
-            selected_drc_index: None,
-        }
-    }
+pub(crate) struct HistoryEntry {
+    pub(crate) snapshot: CircuitSnapshot,
+    pub(crate) description: &'static str,
+    pub(crate) merge_key: Option<crate::commands::CommandMergeKey>,
+    pub(crate) created_at: std::time::Instant,
 }
 
 #[derive(Default)]
 pub(crate) struct HistoryState {
-    pub(crate) undo: Vec<CircuitSnapshot>,
-    pub(crate) redo: Vec<CircuitSnapshot>,
+    pub(crate) undo: Vec<HistoryEntry>,
+    pub(crate) redo: Vec<HistoryEntry>,
     pub(crate) dirty: bool,
+}
+
+/// Transient editing state and command history. This is never serialized into
+/// the project document.
+pub(crate) struct EditorState {
+    pub(crate) tool: Tool,
+    pub(crate) pending_custom_part: Option<String>,
+    pub(crate) selected: Option<Selection>,
+    pub(crate) drag: Option<DragState>,
+    pub(crate) draft_wire: Vec<Pos2>,
+    pub(crate) wire_from_select: bool,
+    pub(crate) clipboard: Vec<Component>,
+    pub(crate) clipboard_wires: Vec<Wire>,
+    pub(crate) multi_selected: HashSet<u64>,
+    pub(crate) rect_select_start: Option<Pos2>,
+    pub(crate) snap_target: Option<Pos2>,
+    pub(crate) history: HistoryState,
+}
+
+impl Default for EditorState {
+    fn default() -> Self {
+        Self {
+            tool: Tool::Select,
+            pending_custom_part: None,
+            selected: None,
+            drag: None,
+            draft_wire: Vec::new(),
+            wire_from_select: false,
+            clipboard: Vec::new(),
+            clipboard_wires: Vec::new(),
+            multi_selected: HashSet::new(),
+            rect_select_start: None,
+            snap_target: None,
+            history: HistoryState::default(),
+        }
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -226,29 +257,42 @@ pub(crate) struct DirtyFlags {
     pub(crate) validation_dirty: bool,
     pub(crate) simulation_dirty: bool,
     pub(crate) pcb_sync_dirty: bool,
+    pub(crate) pcb_drc_dirty: bool,
 }
 
-impl DirtyFlags {
-    pub(crate) fn mark_document_changed(&mut self) {
-        self.geometry_dirty = true;
-        self.connectivity_dirty = true;
-        self.validation_dirty = true;
-        self.simulation_dirty = true;
-        self.pcb_sync_dirty = true;
+/// Derived analysis data. None of these fields are serialized as user data.
+pub(crate) struct AnalysisState {
+    pub(crate) circuit_revision: u64,
+    pub(crate) dirty_flags: DirtyFlags,
+    pub(crate) cached_connectivity: Option<(u64, CanonicalConnectivity)>,
+    pub(crate) cached_simulation: Option<(u64, u32, Simulation)>,
+    pub(crate) simulation_revision: u64,
+    pub(crate) cached_connected_pins: Option<(u64, Vec<(i32, i32)>)>,
+    pub(crate) current_flow_cache: CurrentFlowCache,
+    pub(crate) pcb_cad: Option<crate::model::cad::CadProjectData>,
+    pub(crate) pcb_drc: Vec<crate::pcb::drc::DrcViolation>,
+}
+
+impl Default for AnalysisState {
+    fn default() -> Self {
+        Self {
+            circuit_revision: 1,
+            dirty_flags: DirtyFlags::default(),
+            cached_connectivity: None,
+            cached_simulation: None,
+            simulation_revision: 0,
+            cached_connected_pins: None,
+            current_flow_cache: CurrentFlowCache::default(),
+            pcb_cad: None,
+            pcb_drc: Vec::new(),
+        }
     }
 }
 
 pub(crate) struct CircuitApp {
-    pub(crate) components: Vec<Component>,
-    pub(crate) wires: Vec<Wire>,
-    pub(crate) tool: Tool,
-    /// Custom part definition id armed for placement while
-    /// `tool == Tool::Place(ComponentKind::Custom)`.
-    pub(crate) pending_custom_part: Option<String>,
-    pub(crate) selected: Option<Selection>,
-    pub(crate) drag: Option<DragState>,
-    pub(crate) draft_wire: Vec<Pos2>,
-    pub(crate) wire_from_select: bool,
+    pub(crate) document: ProjectDocument,
+    pub(crate) editor: EditorState,
+    pub(crate) analysis: AnalysisState,
     pub(crate) grid: f32,
     pub(crate) snap: bool,
     pub(crate) orthogonal_wires: bool,
@@ -257,10 +301,7 @@ pub(crate) struct CircuitApp {
     pub(crate) simulate: bool,
     pub(crate) simulation_run_state: SimulationRunState,
     pub(crate) status: String,
-    pub(crate) next_id: u64,
-    pub(crate) counters: Counters,
-    pub(crate) history_state: HistoryState,
-    pub(crate) ui_state: UiState,
+    pub(crate) workspace_state: WorkspaceState,
     pub(crate) canvas: CanvasState,
     pub(crate) palette_ui: PaletteState,
     pub(crate) simulation_ui: SimulationUiState,
@@ -270,36 +311,12 @@ pub(crate) struct CircuitApp {
     // View
     pub(crate) zoom: f32,
     pub(crate) pan: Vec2,
-    // Clipboard
-    /// Multi-component clipboard (supports single and group copy)
-    pub(crate) clipboard: Vec<Component>,
-    /// Wires internal to the copied group (both endpoints in selection)
-    pub(crate) clipboard_wires: Vec<Wire>,
-    // Multi-select: component IDs
-    pub(crate) multi_selected: HashSet<u64>,
-    // World-space anchor for rectangle selection drag
-    pub(crate) rect_select_start: Option<Pos2>,
     // Net highlighting: wire ID hovered in select mode → highlight whole net
     pub(crate) hovered_net_wire: Option<u64>,
     // Cache of which wire IDs share the same net as hovered wire
     pub(crate) highlighted_net_wires: HashSet<u64>,
-    // Pin snap preview (world pos of pin we're about to snap to)
-    pub(crate) snap_target: Option<Pos2>,
-    pub(crate) circuit_revision: u64,
-    pub(crate) dirty_flags: DirtyFlags,
-    pub(crate) cached_connectivity: Option<(u64, CanonicalConnectivity)>,
-    pub(crate) cached_simulation: Option<(u64, u32, Simulation)>,
-    pub(crate) simulation_revision: u64,
-    pub(crate) cached_connected_pins: Option<(u64, Vec<(i32, i32)>)>,
-    pub(crate) current_flow_cache: CurrentFlowCache,
     pub(crate) last_autorecover_revision: u64,
     pub(crate) document_id: u64,
-    // ── Multi-page ──────────────────────────────────────────────────────
-    /// All pages: (name, components, wires, next_id, counters)
-    #[allow(clippy::type_complexity)]
-    // Kept compatible with schema-v4 snapshots during migration.
-    pub(crate) pages: Vec<(String, Vec<Component>, Vec<Wire>, u64, Counters)>,
-    pub(crate) current_page: usize,
     // ── Find dialog ─────────────────────────────────────────────────────
     pub(crate) show_find: bool,
     pub(crate) find_query: String,
@@ -330,6 +347,22 @@ pub(crate) struct PerformanceStats {
     pub(crate) visible_flow_wires: usize,
 }
 
+// Transitional field-access bridge while call sites migrate to explicit
+// `document` borrowing. The owned data lives only in ProjectDocument.
+impl std::ops::Deref for CircuitApp {
+    type Target = ProjectDocument;
+
+    fn deref(&self) -> &Self::Target {
+        &self.document
+    }
+}
+
+impl std::ops::DerefMut for CircuitApp {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.document
+    }
+}
+
 impl CircuitApp {
     pub(crate) fn new() -> Self {
         // Load user part definitions before any circuit file is opened so
@@ -337,14 +370,9 @@ impl CircuitApp {
         let (_loaded, _notes) =
             load_custom_parts_dir(std::path::Path::new(crate::model::CUSTOM_PARTS_DIR));
         Self {
-            components: Vec::new(),
-            wires: Vec::new(),
-            tool: Tool::Select,
-            pending_custom_part: None,
-            selected: None,
-            drag: None,
-            draft_wire: Vec::new(),
-            wire_from_select: false,
+            document: ProjectDocument::default(),
+            editor: EditorState::default(),
+            analysis: AnalysisState::default(),
             grid: 20.0,
             snap: true,
             orthogonal_wires: true,
@@ -353,10 +381,7 @@ impl CircuitApp {
             simulate: true,
             simulation_run_state: SimulationRunState::Dirty,
             status: String::new(),
-            next_id: 1,
-            counters: Counters::default(),
-            history_state: HistoryState::default(),
-            ui_state: UiState::default(),
+            workspace_state: WorkspaceState::default(),
             canvas: CanvasState::default(),
             palette_ui: PaletteState::default(),
             simulation_ui: SimulationUiState::default(),
@@ -365,32 +390,12 @@ impl CircuitApp {
             pcb_ui: PcbUiState::default(),
             zoom: 1.0,
             pan: Vec2::ZERO,
-            clipboard: Vec::new(),
-            clipboard_wires: Vec::new(),
-            multi_selected: HashSet::new(),
-            rect_select_start: None,
             hovered_net_wire: None,
             highlighted_net_wires: HashSet::new(),
-            snap_target: None,
-            circuit_revision: 1,
-            dirty_flags: DirtyFlags::default(),
-            cached_connectivity: None,
-            cached_simulation: None,
-            simulation_revision: 0,
-            cached_connected_pins: None,
-            current_flow_cache: CurrentFlowCache::default(),
             last_autorecover_revision: 0,
             document_id: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(1, |duration| duration.as_nanos() as u64),
-            pages: vec![(
-                "Page 1".to_string(),
-                Vec::new(),
-                Vec::new(),
-                1,
-                Counters::default(),
-            )],
-            current_page: 0,
             show_find: false,
             find_query: String::new(),
             find_results: Vec::new(),
@@ -406,12 +411,12 @@ impl CircuitApp {
     fn handle_top_toolbar_action(&mut self, action: TopToolbarAction, ctx: &egui::Context) {
         match action {
             TopToolbarAction::SelectTool => {
-                self.tool = Tool::Select;
-                self.draft_wire.clear();
+                self.editor.tool = Tool::Select;
+                self.editor.draft_wire.clear();
             }
             TopToolbarAction::WireTool => {
-                self.tool = Tool::Wire;
-                self.draft_wire.clear();
+                self.editor.tool = Tool::Wire;
+                self.editor.draft_wire.clear();
             }
             TopToolbarAction::Undo => self.undo(),
             TopToolbarAction::Redo => self.redo(),
@@ -428,12 +433,9 @@ impl CircuitApp {
             TopToolbarAction::LoadJson => self.load_circuit_json(),
             TopToolbarAction::RecoverAutosave => self.recover_autosave(),
             TopToolbarAction::TidyWires => {
-                self.record_history();
-                let count = self.wires.len();
-                for wire in &mut self.wires {
-                    tidy_wire_points(wire);
-                }
-                self.status = format!("Tidied {} wire(s).", count);
+                self.execute_editor_command(crate::commands::EditorCommand::Wiring(
+                    crate::commands::wiring::WiringCommand::Tidy { wire_id: None },
+                ));
             }
             TopToolbarAction::ExportSvg => self.export_svg(),
             TopToolbarAction::ExportPng => self.export_png(ctx),
@@ -447,7 +449,7 @@ impl CircuitApp {
             }
             TopToolbarAction::AddPage => self.add_page(),
             TopToolbarAction::RemoveCurrentPage => self.remove_current_page(),
-            TopToolbarAction::Help => self.ui_state.show_help = true,
+            TopToolbarAction::Help => self.workspace_state.show_help = true,
         }
     }
 
@@ -470,7 +472,7 @@ impl CircuitApp {
     fn handle_validation_panel_action(&mut self, action: ValidationPanelAction) {
         match action {
             ValidationPanelAction::SelectComponent(id) => {
-                self.selected = Some(Selection::Component(id));
+                self.editor.selected = Some(Selection::Component(id));
                 self.highlighted_net_wires.clear();
                 self.hovered_net_wire = None;
                 if let Some(comp) = self.components.iter().find(|component| component.id == id) {
@@ -479,7 +481,7 @@ impl CircuitApp {
                 }
             }
             ValidationPanelAction::SelectWire(id) => {
-                self.selected = Some(Selection::Wire(id));
+                self.editor.selected = Some(Selection::Wire(id));
                 self.hovered_net_wire = Some(id);
                 self.highlighted_net_wires = self.same_net_wires(id);
                 if let Some(wire) = self.wires.iter().find(|wire| wire.id == id) {
@@ -496,10 +498,13 @@ impl CircuitApp {
 
 impl eframe::App for CircuitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if std::mem::take(&mut self.workspace_state.repaint_requested) {
+            ctx.request_repaint();
+        }
         apply_app_style(ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "Cluster Circuits{}",
-            if self.history_state.dirty { " *" } else { "" }
+            if self.editor.history.dirty { " *" } else { "" }
         )));
 
         // ── Handle screenshot events ──────────────────────────────────────
@@ -541,7 +546,7 @@ impl eframe::App for CircuitApp {
             let toolbar_action = render_top_toolbar(
                 ui,
                 TopToolbarModel {
-                    tool: self.tool,
+                    tool: self.editor.tool,
                     zoom: self.zoom,
                     simulation_summary: &toolbar_simulation_summary,
                     snap: &mut self.snap,
@@ -556,7 +561,7 @@ impl eframe::App for CircuitApp {
                     grid: &mut self.grid,
                     ac_freq_hz: &mut self.simulation_ui.ac_freq_hz,
                     current_flow: &mut self.simulation_ui.current_flow,
-                    show_performance_overlay: &mut self.ui_state.show_performance_overlay,
+                    show_performance_overlay: &mut self.workspace_state.show_performance_overlay,
                 },
             );
             if let Some(action) = toolbar_action {
@@ -579,20 +584,20 @@ impl eframe::App for CircuitApp {
                     (Workspace::Code, "Code"),
                 ] {
                     if ui
-                        .selectable_label(self.ui_state.workspace == workspace, label)
+                        .selectable_label(self.workspace_state.workspace == workspace, label)
                         .clicked()
                     {
-                        self.ui_state.workspace = workspace;
+                        self.workspace_state.workspace = workspace;
                         match workspace {
                             Workspace::Schematic => {}
                             Workspace::Breadboard => self.breadboard_ui.open = true,
                             Workspace::Pcb => {
-                                self.ui_state.bottom_dock_open = true;
-                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                                self.workspace_state.bottom_dock_open = true;
+                                self.workspace_state.bottom_dock_tab = BottomDockTab::Pcb;
                             }
                             Workspace::Code => {
-                                self.ui_state.bottom_dock_open = true;
-                                self.ui_state.bottom_dock_tab = BottomDockTab::Logs;
+                                self.workspace_state.bottom_dock_open = true;
+                                self.workspace_state.bottom_dock_tab = BottomDockTab::Logs;
                                 self.status =
                                     "Code workspace: export an Arduino starter sketch from Export."
                                         .to_string();
@@ -634,31 +639,31 @@ impl eframe::App for CircuitApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let filter = self.palette_ui.filter.clone();
-                        let selected_custom = if self.tool == Tool::Place(ComponentKind::Custom) {
-                            self.pending_custom_part.clone()
+                        let selected_custom = if self.editor.tool == Tool::Place(ComponentKind::Custom) {
+                            self.editor.pending_custom_part.clone()
                         } else {
                             None
                         };
                         if let Some(action) = render_parts_palette(
                             ui,
                             &filter,
-                            selected_part(self.tool),
+                            selected_part(self.editor.tool),
                             selected_custom.as_deref(),
                         ) {
                             match action {
                                 PaletteAction::PlacePart { kind, label } => {
-                                    self.tool = Tool::Place(kind);
-                                    self.pending_custom_part = None;
-                                    self.draft_wire.clear();
+                                    self.editor.tool = Tool::Place(kind);
+                                    self.editor.pending_custom_part = None;
+                                    self.editor.draft_wire.clear();
                                     self.status = format!("Placing {label}. Click the canvas.");
                                 }
                                 PaletteAction::PlaceCustomPart { part_id } => {
                                     let name = custom_part(&part_id)
                                         .map(|def| def.name)
                                         .unwrap_or_else(|| part_id.clone());
-                                    self.pending_custom_part = Some(part_id);
-                                    self.tool = Tool::Place(ComponentKind::Custom);
-                                    self.draft_wire.clear();
+                                    self.editor.pending_custom_part = Some(part_id);
+                                    self.editor.tool = Tool::Place(ComponentKind::Custom);
+                                    self.editor.draft_wire.clear();
                                     self.status = format!("Placing {name}. Click the canvas.");
                                 }
                                 PaletteAction::ReloadCustomParts => {
@@ -970,7 +975,7 @@ impl eframe::App for CircuitApp {
                     ui.add_space(4.0);
                 }
                 render_inspector_header(ui, &mut self.inspector_ui.active_tab);
-                match self.selected {
+                match self.editor.selected {
                     Some(Selection::Component(id)) => {
                         let mut inspector_changed = false;
                         let mut inspector_status: Option<String> = None;
@@ -1395,7 +1400,7 @@ impl eframe::App for CircuitApp {
         });
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            let active_tool = match self.tool {
+            let active_tool = match self.editor.tool {
                 Tool::Select => "Select".to_string(),
                 Tool::Wire => "Wire".to_string(),
                 Tool::Place(kind) => format!("Place {}", component_kind_label(kind)),
@@ -1422,17 +1427,21 @@ impl eframe::App for CircuitApp {
                     snap: self.snap,
                     simulation_text,
                     simulation_color: simulation_text_color(&simulation),
-                    selection: selection_summary(self.selected, &self.components, &self.wires),
+                    selection: selection_summary(
+                        self.editor.selected,
+                        &self.components,
+                        &self.wires,
+                    ),
                     component_count: self.components.len(),
                     wire_count: self.wires.len(),
                     cursor_world: self.canvas.cursor_world_pos,
-                    dirty: self.history_state.dirty,
+                    dirty: self.editor.history.dirty,
                     page_name,
                 },
             );
         });
 
-        if self.ui_state.bottom_dock_open {
+        if self.workspace_state.bottom_dock_open {
             egui::TopBottomPanel::bottom("bottom_dock")
                 .default_height(190.0)
                 .resizable(true)
@@ -1440,13 +1449,13 @@ impl eframe::App for CircuitApp {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Analysis").strong().size(11.0));
                         if ui.small_button("Collapse").clicked() {
-                            self.ui_state.bottom_dock_open = false;
+                            self.workspace_state.bottom_dock_open = false;
                         }
                     });
                     if let Some(action) = render_bottom_dock(
                         ui,
                         BottomDockModel {
-                            active_tab: self.ui_state.bottom_dock_tab,
+                            active_tab: self.workspace_state.bottom_dock_tab,
                             violations: &simulation.erc,
                             has_components: !self.components.is_empty(),
                             simulation: &simulation,
@@ -1457,45 +1466,47 @@ impl eframe::App for CircuitApp {
                         },
                     ) {
                         match action {
-                            BottomDockAction::SetTab(tab) => self.ui_state.bottom_dock_tab = tab,
+                            BottomDockAction::SetTab(tab) => {
+                                self.workspace_state.bottom_dock_tab = tab
+                            }
                             BottomDockAction::Validation(validation_action) => {
                                 self.handle_validation_panel_action(validation_action);
                             }
                             BottomDockAction::OpenBreadboard => {
                                 self.breadboard_ui.open = true;
-                                self.ui_state.bottom_dock_tab = BottomDockTab::Breadboard;
+                                self.workspace_state.bottom_dock_tab = BottomDockTab::Breadboard;
                             }
                             BottomDockAction::UpdatePcb => {
                                 self.update_pcb_from_schematic();
-                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                                self.workspace_state.bottom_dock_tab = BottomDockTab::Pcb;
                             }
                             BottomDockAction::AutoPlacePcb => {
                                 self.auto_place_pcb_footprints();
-                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                                self.workspace_state.bottom_dock_tab = BottomDockTab::Pcb;
                             }
                             BottomDockAction::FitPcbBoard => {
                                 self.fit_pcb_board_to_contents();
-                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                                self.workspace_state.bottom_dock_tab = BottomDockTab::Pcb;
                             }
                             BottomDockAction::RoutePcbRatsnest => {
                                 self.route_pcb_ratsnest();
-                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                                self.workspace_state.bottom_dock_tab = BottomDockTab::Pcb;
                             }
                             BottomDockAction::SelectPcbDrc(index) => {
                                 self.select_pcb_drc_violation(index);
-                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                                self.workspace_state.bottom_dock_tab = BottomDockTab::Pcb;
                             }
                             BottomDockAction::SavePcbProject => {
                                 self.save_project_folder();
-                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                                self.workspace_state.bottom_dock_tab = BottomDockTab::Pcb;
                             }
                             BottomDockAction::LoadPcbProject => {
                                 self.load_project_folder();
-                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                                self.workspace_state.bottom_dock_tab = BottomDockTab::Pcb;
                             }
                             BottomDockAction::ExportPcbFabrication => {
                                 self.export_pcb_fabrication_files();
-                                self.ui_state.bottom_dock_tab = BottomDockTab::Pcb;
+                                self.workspace_state.bottom_dock_tab = BottomDockTab::Pcb;
                             }
                         }
                     }
@@ -1505,7 +1516,7 @@ impl eframe::App for CircuitApp {
                 .exact_height(26.0)
                 .show(ctx, |ui| {
                     if ui.small_button("Show analysis").clicked() {
-                        self.ui_state.bottom_dock_open = true;
+                        self.workspace_state.bottom_dock_open = true;
                     }
                 });
         }
@@ -1645,7 +1656,7 @@ impl eframe::App for CircuitApp {
                 })
                 .unwrap_or(1.0);
             self.performance.rendered_wire_segments = 0;
-            for wire in &self.wires {
+            for wire in &self.document.wires {
                 let visible = wire
                     .points
                     .iter()
@@ -1677,7 +1688,7 @@ impl eframe::App for CircuitApp {
                 draw_wire(
                     &painter,
                     wire,
-                    self.selected == Some(Selection::Wire(wire.id)),
+                    self.editor.selected == Some(Selection::Wire(wire.id)),
                     energized,
                     simulation.shorted && energized,
                     false,
@@ -1693,12 +1704,12 @@ impl eframe::App for CircuitApp {
                 );
             }
 
-            let flow_rebuilt = self.current_flow_cache.rebuild_if_needed(
+            let flow_rebuilt = self.analysis.current_flow_cache.rebuild_if_needed(
                 FlowCacheKey {
-                    geometry_revision: self.circuit_revision,
-                    simulation_revision: self.simulation_revision,
+                    geometry_revision: self.analysis.circuit_revision,
+                    simulation_revision: self.analysis.simulation_revision,
                 },
-                &self.wires,
+                &self.document.wires,
                 simulation
                     .dc
                     .as_ref()
@@ -1707,14 +1718,14 @@ impl eframe::App for CircuitApp {
             self.performance.flow_cache_hit = !flow_rebuilt;
             let flow_stats = if show_flow {
                 render_current_flow(
-                    &self.current_flow_cache,
+                    &self.analysis.current_flow_cache,
                     FlowRenderInput {
                         painter: &painter,
                         viewport: rect,
                         view,
                         time_seconds: ctx.input(|i| i.time),
                         settings: &self.simulation_ui.current_flow,
-                        selected_wire: match self.selected {
+                        selected_wire: match self.editor.selected {
                             Some(Selection::Wire(id)) => Some(id),
                             _ => None,
                         },
@@ -1745,7 +1756,7 @@ impl eframe::App for CircuitApp {
             let connected_pins = self.current_connected_pins();
 
             self.performance.rendered_components = 0;
-            for component in &self.components {
+            for component in &self.document.components {
                 let cid = component.id;
                 let size = component_size(component) * view.zoom;
                 if !Rect::from_center_size(
@@ -1769,7 +1780,7 @@ impl eframe::App for CircuitApp {
                 draw_component(
                     &painter,
                     component,
-                    self.selected == Some(Selection::Component(cid)),
+                    self.editor.selected == Some(Selection::Component(cid)),
                     self.show_pins && self.zoom >= 0.38,
                     simulation.energized_components.contains(&cid),
                     &connected_pins,
@@ -1782,7 +1793,7 @@ impl eframe::App for CircuitApp {
 
             // Multi-select highlight boxes
             for comp in &self.components {
-                if self.multi_selected.contains(&comp.id) {
+                if self.editor.multi_selected.contains(&comp.id) {
                     let sc = view.to_screen(comp.pos);
                     let sz = component_size(comp) * view.zoom;
                     let rot = ((comp.rotation % 360) + 360) % 360;
@@ -1802,7 +1813,7 @@ impl eframe::App for CircuitApp {
             }
 
             // Rectangle selection preview
-            if let (Some(start), Some(end)) = (self.rect_select_start, self.canvas.cursor_world_pos)
+            if let (Some(start), Some(end)) = (self.editor.rect_select_start, self.canvas.cursor_world_pos)
             {
                 let ss = view.to_screen(start);
                 let se = view.to_screen(end);
@@ -1842,10 +1853,10 @@ impl eframe::App for CircuitApp {
             if !self.components.is_empty() {
                 draw_minimap(&painter, rect, &self.components, &self.wires, view);
             }
-            if cfg!(debug_assertions) && self.ui_state.show_performance_overlay {
+            if cfg!(debug_assertions) && self.workspace_state.show_performance_overlay {
                 let fps = ctx.input(|input| 1.0 / input.stable_dt.max(1.0 / 240.0));
                 let lines = [
-                    format!("FPS {fps:.0}  ·  rev {}", self.circuit_revision),
+                    format!("FPS {fps:.0}  ·  rev {}", self.analysis.circuit_revision),
                     format!(
                         "Components {}/{}  ·  wire segments {}/{}",
                         self.performance.rendered_components,
@@ -1908,16 +1919,16 @@ impl eframe::App for CircuitApp {
             let pointer_in_rect = hover_pos.filter(|pos| rect.contains(*pos));
 
             self.canvas.cursor_world_pos = None;
-            self.snap_target = None;
+            self.editor.snap_target = None;
             if let Some(raw_hover) = pointer_in_rect {
                 let world_hover = view.to_world(raw_hover);
                 self.canvas.cursor_world_pos = Some(world_hover);
                 let mut world_pos = snap_pos(world_hover, rect, self.grid, self.snap);
-                let in_wire_mode = self.tool == Tool::Wire;
-                let in_select_mode = self.tool == Tool::Select;
+                let in_wire_mode = self.editor.tool == Tool::Wire;
+                let in_select_mode = self.editor.tool == Tool::Select;
 
                 // Ghost preview for placement mode
-                if let Tool::Place(place_kind) = self.tool {
+                if let Tool::Place(place_kind) = self.editor.tool {
                     let ghost_pos = world_pos;
                     let ghost_screen = view.to_screen(ghost_pos);
                     let ghost_size = {
@@ -1928,7 +1939,7 @@ impl eframe::App for CircuitApp {
                             rotation: 0,
                             label: String::new(),
                             value: String::new(),
-                            part_id: self.pending_custom_part.clone(),
+                            part_id: self.editor.pending_custom_part.clone(),
                         };
                         component_size(&dummy) * view.zoom
                     };
@@ -1967,7 +1978,7 @@ impl eframe::App for CircuitApp {
                         snap_to_nearest_connection(world_pos, &self.components, &self.wires)
                     {
                         world_pos = snapped;
-                        self.snap_target = Some(snapped);
+                        self.editor.snap_target = Some(snapped);
                     }
                     // Check if we're snapping to a specific pin
                     let snap_pin = nearest_pin_at(world_pos, &self.components, 10.0);
@@ -2023,8 +2034,8 @@ impl eframe::App for CircuitApp {
                     }
                 }
 
-                if in_wire_mode && !self.draft_wire.is_empty() {
-                    let source_pin = self.draft_wire.first().and_then(|start| {
+                if in_wire_mode && !self.editor.draft_wire.is_empty() {
+                    let source_pin = self.editor.draft_wire.first().and_then(|start| {
                         self.components
                             .iter()
                             .flat_map(component_pin_defs)
@@ -2088,7 +2099,7 @@ impl eframe::App for CircuitApp {
                         }
                     }
                     let preview =
-                        preview_wire_points(&self.draft_wire, world_pos, self.orthogonal_wires);
+                        preview_wire_points(&self.editor.draft_wire, world_pos, self.orthogonal_wires);
                     let screen_preview: Vec<Pos2> =
                         preview.iter().map(|&p| view.to_screen(p)).collect();
                     draw_wire_preview(&painter, &screen_preview);
@@ -2242,7 +2253,7 @@ impl eframe::App for CircuitApp {
             {
                 let world_raw = view.to_world(raw_pos);
                 let world_pos = snap_pos(world_raw, rect, self.grid, self.snap);
-                match self.tool {
+                match self.editor.tool {
                     Tool::Select => {
                         let ctrl = ctx.input(|i| i.modifiers.command);
                         if let Some(sel) = hit_test(world_raw, &self.components, &self.wires) {
@@ -2261,33 +2272,33 @@ impl eframe::App for CircuitApp {
                                         ),
                                     );
                                     ctx.request_repaint();
-                                    self.selected = Some(Selection::Component(cid));
+                                    self.editor.selected = Some(Selection::Component(cid));
                                 }
                             }
                             // Ctrl+click toggles multi-select; plain click sets primary selection
                             if ctrl {
                                 if let Selection::Component(cid) = sel {
-                                    if self.multi_selected.contains(&cid) {
-                                        self.multi_selected.remove(&cid);
+                                    if self.editor.multi_selected.contains(&cid) {
+                                        self.editor.multi_selected.remove(&cid);
                                     } else {
-                                        self.multi_selected.insert(cid);
+                                        self.editor.multi_selected.insert(cid);
                                     }
                                 }
                             } else {
-                                self.selected = Some(sel);
-                                self.multi_selected.clear();
+                                self.editor.selected = Some(sel);
+                                self.editor.multi_selected.clear();
                             }
                         } else if !ctrl {
-                            self.selected = None;
-                            self.multi_selected.clear();
+                            self.editor.selected = None;
+                            self.editor.multi_selected.clear();
                         }
                     }
                     Tool::Place(kind) => {
                         if kind == ComponentKind::Custom {
-                            if let Some(part_id) = self.pending_custom_part.clone() {
+                            if let Some(part_id) = self.editor.pending_custom_part.clone() {
                                 self.add_custom_component(&part_id, world_pos);
                             } else {
-                                self.tool = Tool::Select;
+                                self.editor.tool = Tool::Select;
                                 self.status =
                                     "No custom part selected. Pick one from My Parts.".to_string();
                             }
@@ -2299,15 +2310,15 @@ impl eframe::App for CircuitApp {
                         let wp =
                             snap_to_nearest_connection(world_pos, &self.components, &self.wires)
                                 .unwrap_or(world_pos);
-                        let already_started = !self.draft_wire.is_empty();
+                        let already_started = !self.editor.draft_wire.is_empty();
                         let landed = is_connection_point(wp, &self.components, &self.wires);
                         self.push_wire_point(wp);
-                        if already_started && landed && self.draft_wire.len() >= 2 {
-                            let points = std::mem::take(&mut self.draft_wire);
+                        if already_started && landed && self.editor.draft_wire.len() >= 2 {
+                            let points = std::mem::take(&mut self.editor.draft_wire);
                             self.add_wire(points);
-                            if self.wire_from_select {
-                                self.tool = Tool::Select;
-                                self.wire_from_select = false;
+                            if self.editor.wire_from_select {
+                                self.editor.tool = Tool::Select;
+                                self.editor.wire_from_select = false;
                             }
                         }
                     }
@@ -2315,23 +2326,23 @@ impl eframe::App for CircuitApp {
             }
 
             if response.clicked_by(egui::PointerButton::Secondary) {
-                if self.tool == Tool::Wire {
-                    if !self.draft_wire.is_empty() {
-                        let points = std::mem::take(&mut self.draft_wire);
+                if self.editor.tool == Tool::Wire {
+                    if !self.editor.draft_wire.is_empty() {
+                        let points = std::mem::take(&mut self.editor.draft_wire);
                         self.add_wire(points);
                     }
-                    if self.wire_from_select {
-                        self.tool = Tool::Select;
-                        self.wire_from_select = false;
+                    if self.editor.wire_from_select {
+                        self.editor.tool = Tool::Select;
+                        self.editor.wire_from_select = false;
                     }
-                } else if self.tool == Tool::Select {
+                } else if self.editor.tool == Tool::Select {
                     // Open context menu on component right-click
                     if let Some(raw_pos) = pointer_in_rect {
                         let world = view.to_world(raw_pos);
                         if let Some(Selection::Component(cid)) =
                             hit_test_component(world, &self.components)
                         {
-                            self.selected = Some(Selection::Component(cid));
+                            self.editor.selected = Some(Selection::Component(cid));
                             self.context_menu = Some((raw_pos, cid));
                         } else {
                             self.context_menu = None;
@@ -2404,7 +2415,7 @@ impl eframe::App for CircuitApp {
                 }
                 if let Some(act) = action {
                     self.context_menu = None;
-                    self.selected = Some(Selection::Component(menu_cid));
+                    self.editor.selected = Some(Selection::Component(menu_cid));
                     match act {
                         0 => {
                             self.rotate_selected();
@@ -2421,8 +2432,8 @@ impl eframe::App for CircuitApp {
                             self.delete_selected();
                         }
                         4 => {
-                            self.tool = Tool::Wire;
-                            self.wire_from_select = true;
+                            self.editor.tool = Tool::Wire;
+                            self.editor.wire_from_select = true;
                         }
                         _ => {}
                     }
@@ -2430,18 +2441,18 @@ impl eframe::App for CircuitApp {
                 ctx.request_repaint();
             }
 
-            if response.double_clicked() && self.tool == Tool::Wire && self.draft_wire.len() >= 2 {
-                let points = std::mem::take(&mut self.draft_wire);
+            if response.double_clicked() && self.editor.tool == Tool::Wire && self.editor.draft_wire.len() >= 2 {
+                let points = std::mem::take(&mut self.editor.draft_wire);
                 self.add_wire(points);
-                if self.wire_from_select {
-                    self.tool = Tool::Select;
-                    self.wire_from_select = false;
+                if self.editor.wire_from_select {
+                    self.editor.tool = Tool::Select;
+                    self.editor.wire_from_select = false;
                 }
             }
 
             // Double-click component in Select mode → open inline value editor
             if response.double_clicked()
-                && self.tool == Tool::Select
+                && self.editor.tool == Tool::Select
                 && self.inline_edit.is_none()
                 && let Some(raw_pos) = pointer_in_rect
             {
@@ -2455,7 +2466,12 @@ impl eframe::App for CircuitApp {
 
             // Render inline edit popup
             if let Some((edit_id, ref mut edit_text)) = self.inline_edit {
-                if let Some(comp) = self.components.iter().find(|c| c.id == edit_id) {
+                if let Some(comp) = self
+                    .document
+                    .components
+                    .iter()
+                    .find(|c| c.id == edit_id)
+                {
                     let sp = view.to_screen(comp.pos);
                     let popup_rect = Rect::from_center_size(
                         sp + Vec2::new(0.0, -component_size(comp).y * view.zoom * 0.7),
@@ -2518,7 +2534,7 @@ impl eframe::App for CircuitApp {
 
             if response.drag_started()
                 && !panning
-                && self.tool == Tool::Select
+                && self.editor.tool == Tool::Select
                 && let Some(pos) = pointer_in_rect
             {
                 let world = view.to_world(pos);
@@ -2526,51 +2542,46 @@ impl eframe::App for CircuitApp {
                     hit_test_wire_control_point(world, &self.wires)
                 {
                     self.record_history();
-                    self.drag = Some(DragState::WirePoint {
+                    self.editor.drag = Some(DragState::WirePoint {
                         wire_id,
                         point_index,
                     });
-                    self.selected = Some(Selection::Wire(wire_id));
+                    self.editor.selected = Some(Selection::Wire(wire_id));
                 } else if hit_test_wire(world, &self.wires).is_some() {
-                    self.record_history();
-                    if let Some((wire_id, point_index)) =
-                        insert_wire_control_point(world, &mut self.wires)
-                    {
-                        self.drag = Some(DragState::WirePoint {
-                            wire_id,
-                            point_index,
-                        });
-                        self.selected = Some(Selection::Wire(wire_id));
-                    }
+                    self.execute_editor_command(crate::commands::EditorCommand::Wiring(
+                        crate::commands::wiring::WiringCommand::InsertControlPoint {
+                            position: world,
+                        },
+                    ));
                 } else if let Some(Selection::Component(id)) =
                     hit_test_component(world, &self.components)
                 {
                     self.record_history();
                     if let Some(component) = self.components.iter().find(|c| c.id == id) {
-                        self.drag = Some(DragState::Component {
+                        self.editor.drag = Some(DragState::Component {
                             id,
                             offset: world - component.pos,
                         });
-                        self.selected = Some(Selection::Component(id));
+                        self.editor.selected = Some(Selection::Component(id));
                         // Ensure dragged component is in multi_selected if multi_selected is active
-                        if !self.multi_selected.is_empty() {
-                            self.multi_selected.insert(id);
+                        if !self.editor.multi_selected.is_empty() {
+                            self.editor.multi_selected.insert(id);
                         }
                     }
                 } else {
                     // Empty area — start rectangle selection
                     let ctrl = ctx.input(|i| i.modifiers.command);
-                    self.rect_select_start = Some(world);
+                    self.editor.rect_select_start = Some(world);
                     if !ctrl {
-                        self.selected = None;
-                        self.multi_selected.clear();
+                        self.editor.selected = None;
+                        self.editor.multi_selected.clear();
                     }
                 }
             }
 
             if response.dragged()
                 && !panning
-                && let (Some(drag), Some(pos)) = (self.drag.clone(), pointer_in_rect)
+                && let (Some(drag), Some(pos)) = (self.editor.drag.clone(), pointer_in_rect)
             {
                 let world = view.to_world(pos);
                 let mut data_changed = false;
@@ -2579,13 +2590,13 @@ impl eframe::App for CircuitApp {
                     DragState::Component { id, offset } => {
                         let snapped = snap_pos(world, rect, self.grid, self.snap);
                         let in_multi =
-                            self.multi_selected.len() > 1 && self.multi_selected.contains(&id);
+                            self.editor.multi_selected.len() > 1 && self.editor.multi_selected.contains(&id);
                         if in_multi {
                             let old_pos =
                                 self.components.iter().find(|c| c.id == id).map(|c| c.pos);
                             if let Some(old_pos) = old_pos {
                                 let mut delta = snapped - offset - old_pos;
-                                let ids = self.multi_selected.clone();
+                                let ids = self.editor.multi_selected.clone();
                                 let old_pins = self
                                     .components
                                     .iter()
@@ -2672,18 +2683,21 @@ impl eframe::App for CircuitApp {
 
             let primary_down = ctx.input(|i| i.pointer.primary_down());
             if !primary_down {
-                self.drag = None;
-                if let Some(start) = self.rect_select_start.take()
+                self.editor.drag = None;
+                if let Some(start) = self.editor.rect_select_start.take()
                     && let Some(end) = self.canvas.cursor_world_pos
                     && start.distance(end) > 4.0
                 {
                     let sel = Rect::from_two_pos(start, end);
-                    for comp in &self.components {
-                        if sel.contains(comp.pos) {
-                            self.multi_selected.insert(comp.id);
-                        }
-                    }
-                    self.status = format!("{} component(s) selected.", self.multi_selected.len());
+                    let selected_ids = self
+                        .document
+                        .components
+                        .iter()
+                        .filter(|component| sel.contains(component.pos))
+                        .map(|component| component.id)
+                        .collect::<Vec<_>>();
+                    self.editor.multi_selected.extend(selected_ids);
+                    self.status = format!("{} component(s) selected.", self.editor.multi_selected.len());
                 }
             }
         });
@@ -2691,13 +2705,13 @@ impl eframe::App for CircuitApp {
         // ── Keyboard shortcuts ────────────────────────────────────────────
         let backspace = ctx.input(|i| i.key_pressed(egui::Key::Backspace));
         // Backspace during wire drawing removes the last placed point
-        if backspace && self.tool == Tool::Wire && !self.draft_wire.is_empty() {
-            self.draft_wire.pop();
-            if self.orthogonal_wires && self.draft_wire.len() >= 2 {
+        if backspace && self.editor.tool == Tool::Wire && !self.editor.draft_wire.is_empty() {
+            self.editor.draft_wire.pop();
+            if self.orthogonal_wires && self.editor.draft_wire.len() >= 2 {
                 // pop the auto-inserted L-bend corner too
-                self.draft_wire.pop();
+                self.editor.draft_wire.pop();
             }
-            self.status = if self.draft_wire.is_empty() {
+            self.status = if self.editor.draft_wire.is_empty() {
                 "Wire cancelled.".to_string()
             } else {
                 "Wire point removed.".to_string()
@@ -2710,18 +2724,18 @@ impl eframe::App for CircuitApp {
             // Hierarchical Esc: find dialog → multi-select → single select → wire draft → select tool
             if self.show_find {
                 self.show_find = false;
-            } else if !self.draft_wire.is_empty() {
-                self.draft_wire.clear();
-                self.wire_from_select = false;
-            } else if !self.multi_selected.is_empty() {
-                self.multi_selected.clear();
-                self.selected = None;
-                self.rect_select_start = None;
-            } else if self.selected.is_some() {
-                self.selected = None;
+            } else if !self.editor.draft_wire.is_empty() {
+                self.editor.draft_wire.clear();
+                self.editor.wire_from_select = false;
+            } else if !self.editor.multi_selected.is_empty() {
+                self.editor.multi_selected.clear();
+                self.editor.selected = None;
+                self.editor.rect_select_start = None;
+            } else if self.editor.selected.is_some() {
+                self.editor.selected = None;
             } else {
-                self.tool = Tool::Select;
-                self.wire_from_select = false;
+                self.editor.tool = Tool::Select;
+                self.editor.wire_from_select = false;
             }
         }
 
@@ -2747,17 +2761,17 @@ impl eframe::App for CircuitApp {
 
         // Ctrl+C — copy selected component(s) + internal wires
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C)) {
-            self.clipboard.clear();
-            self.clipboard_wires.clear();
-            let ids: Vec<u64> = if !self.multi_selected.is_empty() {
-                self.multi_selected.iter().copied().collect()
-            } else if let Some(Selection::Component(id)) = self.selected {
+            self.editor.clipboard.clear();
+            self.editor.clipboard_wires.clear();
+            let ids: Vec<u64> = if !self.editor.multi_selected.is_empty() {
+                self.editor.multi_selected.iter().copied().collect()
+            } else if let Some(Selection::Component(id)) = self.editor.selected {
                 vec![id]
             } else {
                 Vec::new()
             };
             if !ids.is_empty() {
-                self.clipboard = self
+                self.editor.clipboard = self
                     .components
                     .iter()
                     .filter(|c| ids.contains(&c.id))
@@ -2765,12 +2779,13 @@ impl eframe::App for CircuitApp {
                     .collect();
                 // Copy wires whose BOTH endpoints lie within copied component pins
                 let pin_positions: HashSet<(i32, i32)> = self
+                    .editor
                     .clipboard
                     .iter()
                     .flat_map(component_pin_defs)
                     .map(|p| (p.pos.x.round() as i32, p.pos.y.round() as i32))
                     .collect();
-                self.clipboard_wires = self
+                self.editor.clipboard_wires = self
                     .wires
                     .iter()
                     .filter(|w| {
@@ -2789,22 +2804,22 @@ impl eframe::App for CircuitApp {
                     .collect();
                 self.status = format!(
                     "Copied {} component(s) + {} wire(s).",
-                    self.clipboard.len(),
-                    self.clipboard_wires.len()
+                    self.editor.clipboard.len(),
+                    self.editor.clipboard_wires.len()
                 );
             }
         }
 
         // Ctrl+V — paste clipboard with offset
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::V)) {
-            if self.clipboard.is_empty() {
+            if self.editor.clipboard.is_empty() {
                 self.status = "Clipboard empty. Ctrl+C to copy first.".to_string();
             } else {
                 let offset = Vec2::new(self.grid * 3.0, self.grid * 3.0);
                 self.execute_editor_command(crate::commands::EditorCommand::Component(
                     crate::commands::component::ComponentCommand::Paste {
-                        components: self.clipboard.clone(),
-                        wires: self.clipboard_wires.clone(),
+                        components: self.editor.clipboard.clone(),
+                        wires: self.editor.clipboard_wires.clone(),
                         offset,
                     },
                 ));
@@ -2812,8 +2827,11 @@ impl eframe::App for CircuitApp {
         }
 
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
-            self.multi_selected = self.components.iter().map(|c| c.id).collect();
-            self.status = format!("Selected all {} component(s).", self.multi_selected.len());
+            self.editor.multi_selected = self.components.iter().map(|c| c.id).collect();
+            self.status = format!(
+                "Selected all {} component(s).",
+                self.editor.multi_selected.len()
+            );
         }
 
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
@@ -2825,10 +2843,10 @@ impl eframe::App for CircuitApp {
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Enter))
-            && self.tool == Tool::Wire
-            && self.draft_wire.len() >= 2
+            && self.editor.tool == Tool::Wire
+            && self.editor.draft_wire.len() >= 2
         {
-            let points = std::mem::take(&mut self.draft_wire);
+            let points = std::mem::take(&mut self.editor.draft_wire);
             self.add_wire(points);
         }
 
@@ -2847,7 +2865,7 @@ impl eframe::App for CircuitApp {
                 crate::commands::wiring::WiringCommand::Tidy { wire_id: None },
             ));
         } else if ctx.input(|i| i.key_pressed(egui::Key::T))
-            && let Some(Selection::Wire(id)) = self.selected
+            && let Some(Selection::Wire(id)) = self.editor.selected
             && self.wires.iter().any(|w| w.id == id)
         {
             self.execute_editor_command(crate::commands::EditorCommand::Wiring(
@@ -2857,9 +2875,12 @@ impl eframe::App for CircuitApp {
 
         // Ctrl+A — Select all components
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
-            self.multi_selected = self.components.iter().map(|c| c.id).collect();
-            self.selected = None;
-            self.status = format!("{} component(s) selected.", self.multi_selected.len());
+            self.editor.multi_selected = self.components.iter().map(|c| c.id).collect();
+            self.editor.selected = None;
+            self.status = format!(
+                "{} component(s) selected.",
+                self.editor.multi_selected.len()
+            );
         }
 
         // Ctrl+D — Duplicate selected
@@ -2878,16 +2899,16 @@ impl eframe::App for CircuitApp {
 
         // W — Wire tool
         if ctx.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::W)) {
-            self.tool = Tool::Wire;
-            self.draft_wire.clear();
+            self.editor.tool = Tool::Wire;
+            self.editor.draft_wire.clear();
             self.status = "Wire tool.".to_string();
         }
 
         // S — Select tool
         if ctx.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::S)) {
-            self.tool = Tool::Select;
-            self.draft_wire.clear();
-            self.wire_from_select = false;
+            self.editor.tool = Tool::Select;
+            self.editor.draft_wire.clear();
+            self.editor.wire_from_select = false;
             self.status = "Select tool.".to_string();
         }
 
@@ -2898,13 +2919,13 @@ impl eframe::App for CircuitApp {
 
         // ? — Toggle shortcuts help
         if ctx.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::Questionmark)) {
-            self.ui_state.show_help = !self.ui_state.show_help;
+            self.workspace_state.show_help = !self.workspace_state.show_help;
         }
 
         // Space — toggle simulation on/off (when not dragging/panning)
         if ctx.input(|i| !i.modifiers.any() && i.key_pressed(egui::Key::Space))
-            && self.drag.is_none()
-            && self.tool != Tool::Wire
+            && self.editor.drag.is_none()
+            && self.editor.tool != Tool::Wire
         {
             self.simulate = !self.simulate;
             self.status = if self.simulate {
@@ -2932,25 +2953,25 @@ impl eframe::App for CircuitApp {
         ];
         for &(key, kind, name) in place_shortcuts {
             if ctx.input(|i| !i.modifiers.any() && i.key_pressed(key)) {
-                if self.tool == Tool::Place(kind) {
-                    self.tool = Tool::Select;
+                if self.editor.tool == Tool::Place(kind) {
+                    self.editor.tool = Tool::Select;
                     self.status = "Select tool.".to_string();
                 } else {
-                    self.tool = Tool::Place(kind);
-                    self.draft_wire.clear();
+                    self.editor.tool = Tool::Place(kind);
+                    self.editor.draft_wire.clear();
                     self.status = format!("Placing {}. Click the canvas.", name);
                 }
             }
         }
 
-        if self.drag.is_none() && !ctx.input(|i| i.pointer.primary_down()) {
+        if self.editor.drag.is_none() && !ctx.input(|i| i.pointer.primary_down()) {
             self.flush_autorecover_if_needed();
         }
 
         // ── Find dialog (floating overlay) ──────────────────────────────────
         // ── Keyboard shortcuts help dialog ───────────────────────────────────
-        if self.ui_state.show_help {
-            let mut open = self.ui_state.show_help;
+        if self.workspace_state.show_help {
+            let mut open = self.workspace_state.show_help;
             egui::Window::new("⌨  Keyboard Shortcuts")
                 .open(&mut open)
                 .collapsible(false)
@@ -3051,7 +3072,7 @@ impl eframe::App for CircuitApp {
                             .italics(),
                     );
                 });
-            self.ui_state.show_help = open;
+            self.workspace_state.show_help = open;
         }
 
         // ── DC / AC Analysis panel ──────────────────────────────────────────
@@ -3387,7 +3408,7 @@ impl eframe::App for CircuitApp {
 
                     if !self.find_results.is_empty() {
                         let cur_id = self.find_results[self.find_result_idx];
-                        self.selected = Some(Selection::Component(cur_id));
+                        self.editor.selected = Some(Selection::Component(cur_id));
                         // Center canvas on the found component
                         if let Some(comp) = self.components.iter().find(|c| c.id == cur_id) {
                             let canvas_center = self.canvas.rect.center().to_vec2();

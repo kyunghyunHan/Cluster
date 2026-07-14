@@ -1,4 +1,4 @@
-use crate::commands::CommandDirtyState;
+use crate::commands::ChangeSet;
 
 #[allow(dead_code)]
 pub(crate) enum LessonCommand {
@@ -6,7 +6,7 @@ pub(crate) enum LessonCommand {
 }
 
 impl LessonCommand {
-    pub(crate) fn apply(self, _app: &mut crate::CircuitApp) -> CommandDirtyState {
-        CommandDirtyState::none()
+    pub(crate) fn apply(self, _app: &mut crate::CircuitApp) -> ChangeSet {
+        ChangeSet::none()
     }
 }

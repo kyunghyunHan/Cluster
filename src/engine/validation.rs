@@ -367,41 +367,104 @@ impl ErcViolation {
 }
 
 pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolation> {
-    let mut v = Vec::new();
+    use crate::engine::erc::{ErcContext, ErcRegistry, FunctionRule};
 
-    check_duplicate_references(netlist, &mut v);
-    check_duplicate_named_nets(netlist, &mut v);
-    check_no_connect_pins(netlist, &mut v);
-    check_missing_gnd(netlist, &mut v);
-    check_power_gnd_short(netlist, &mut v);
-    check_led_without_resistor(netlist, &mut v);
-    check_reversed_led(netlist, &mut v);
-    check_reversed_diode(netlist, &mut v);
-    check_5v_on_3v3(netlist, &mut v);
-    check_gpio_direct_loads(netlist, &mut v);
-    check_esp_gpio_overvoltage(netlist, &mut v);
-    check_power_rail_conflicts(netlist, &mut v);
-    check_relay_flyback_diodes(netlist, &mut v);
-    check_i2c_pullups(netlist, &mut v);
-    check_i2c_pullup_values(netlist, &mut v);
-    check_oled_sda_scl_swap(netlist, &mut v);
-    check_uart_tx_rx_swap(netlist, &mut v);
-    check_spi_signal_mismatch(netlist, &mut v);
-    check_adc_overvoltage(netlist, &mut v);
-    check_i2c_address_conflict(netlist, &mut v);
-    check_missing_values(netlist, &mut v);
-    check_floating_pins(netlist, &mut v);
-    check_floating_dc_nets(netlist, &mut v);
-    check_open_voltage_sources(netlist, &mut v);
-    check_symbolic_components(netlist, &mut v);
-    check_output_output_conflict(netlist, &mut v);
-    check_power_input_not_driven(netlist, &mut v);
-    check_unconnected_input_pins(netlist, &mut v);
-    check_net_label_remote_short(netlist, &mut v);
-    check_regulator_voltage_range(netlist, &mut v);
-    check_missing_decoupling_caps(netlist, &mut v);
-
-    v
+    let mut registry = ErcRegistry::default();
+    registry.register(FunctionRule::new(
+        "annotation.duplicate_reference",
+        check_duplicate_references,
+    ));
+    registry.register(FunctionRule::new(
+        "net.duplicate_named",
+        check_duplicate_named_nets,
+    ));
+    registry.register(FunctionRule::new("pin.no_connect", check_no_connect_pins));
+    registry.register(FunctionRule::new("power.ground", check_missing_gnd));
+    registry.register(FunctionRule::new("power.short", check_power_gnd_short));
+    registry.register(FunctionRule::new(
+        "led.series_resistor",
+        check_led_without_resistor,
+    ));
+    registry.register(FunctionRule::new("led.polarity", check_reversed_led));
+    registry.register(FunctionRule::new("diode.polarity", check_reversed_diode));
+    registry.register(FunctionRule::new("power.5v_3v3", check_5v_on_3v3));
+    registry.register(FunctionRule::new(
+        "gpio.direct_load",
+        check_gpio_direct_loads,
+    ));
+    registry.register(FunctionRule::new(
+        "gpio.overvoltage",
+        check_esp_gpio_overvoltage,
+    ));
+    registry.register(FunctionRule::new(
+        "power.rail_conflict",
+        check_power_rail_conflicts,
+    ));
+    registry.register(FunctionRule::new(
+        "inductive.flyback",
+        check_relay_flyback_diodes,
+    ));
+    registry.register(FunctionRule::new("i2c.pullup", check_i2c_pullups));
+    registry.register(FunctionRule::new(
+        "i2c.pullup_value",
+        check_i2c_pullup_values,
+    ));
+    registry.register(FunctionRule::new(
+        "i2c.signal_mapping",
+        check_oled_sda_scl_swap,
+    ));
+    registry.register(FunctionRule::new(
+        "uart.signal_mapping",
+        check_uart_tx_rx_swap,
+    ));
+    registry.register(FunctionRule::new(
+        "spi.signal_mapping",
+        check_spi_signal_mismatch,
+    ));
+    registry.register(FunctionRule::new("adc.overvoltage", check_adc_overvoltage));
+    registry.register(FunctionRule::new("i2c.address", check_i2c_address_conflict));
+    registry.register(FunctionRule::new("value.required", check_missing_values));
+    registry.register(FunctionRule::new(
+        "connectivity.floating_pin",
+        check_floating_pins,
+    ));
+    registry.register(FunctionRule::new(
+        "connectivity.floating_dc",
+        check_floating_dc_nets,
+    ));
+    registry.register(FunctionRule::new(
+        "power.open_source",
+        check_open_voltage_sources,
+    ));
+    registry.register(FunctionRule::new(
+        "simulation.support",
+        check_symbolic_components,
+    ));
+    registry.register(FunctionRule::new(
+        "logic.output_conflict",
+        check_output_output_conflict,
+    ));
+    registry.register(FunctionRule::new(
+        "power.input_drive",
+        check_power_input_not_driven,
+    ));
+    registry.register(FunctionRule::new(
+        "logic.unconnected_input",
+        check_unconnected_input_pins,
+    ));
+    registry.register(FunctionRule::new(
+        "net.remote_label",
+        check_net_label_remote_short,
+    ));
+    registry.register(FunctionRule::new(
+        "regulator.range",
+        check_regulator_voltage_range,
+    ));
+    registry.register(FunctionRule::new(
+        "power.decoupling",
+        check_missing_decoupling_caps,
+    ));
+    registry.run(&ErcContext { netlist })
 }
 
 /// ERC rules that require solved DC operating-point results.

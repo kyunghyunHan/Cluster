@@ -9,6 +9,7 @@ impl crate::CircuitApp {
             counters: self.counters.clone(),
             pages: self.effective_pages(),
             current_page: self.current_page,
+            board: self.document.board.clone(),
         }
     }
 
@@ -31,57 +32,76 @@ impl crate::CircuitApp {
         self.current_page = snapshot
             .current_page
             .min(self.pages.len().saturating_sub(1));
-        self.selected = None;
-        self.drag = None;
-        self.draft_wire.clear();
+        self.document.board = snapshot.board;
+        self.editor.selected = None;
+        self.editor.drag = None;
+        self.editor.draft_wire.clear();
     }
 
     pub(crate) fn mark_dirty(&mut self) {
-        self.history_state.dirty = true;
-        self.dirty_flags.mark_document_changed();
-        self.invalidate_analysis_cache();
-        self.simulation_run_state = if self.simulate {
-            crate::ui::app::SimulationRunState::Dirty
-        } else {
-            crate::ui::app::SimulationRunState::Stopped
-        };
+        self.dispatch_changes(crate::commands::ChangeSet::schematic());
     }
 
+    pub(crate) fn invalidate_connectivity_cache(&mut self) {
+        self.analysis.circuit_revision = self.analysis.circuit_revision.saturating_add(1);
+        self.analysis.cached_connectivity = None;
+        self.invalidate_simulation_cache();
+    }
+
+    pub(crate) fn invalidate_simulation_cache(&mut self) {
+        self.analysis.cached_simulation = None;
+        self.analysis.cached_connected_pins = None;
+    }
+
+    /// Compatibility boundary for non-command inputs such as custom-part
+    /// registry reloads. Document edits should dispatch a typed ChangeSet.
     pub(crate) fn invalidate_analysis_cache(&mut self) {
-        self.circuit_revision = self.circuit_revision.saturating_add(1);
-        self.cached_connectivity = None;
-        self.cached_simulation = None;
-        self.cached_connected_pins = None;
+        self.invalidate_connectivity_cache();
     }
 
     pub(crate) fn record_history(&mut self) {
-        self.history_state.undo.push(self.snapshot());
-        if self.history_state.undo.len() > 80 {
-            self.history_state.undo.remove(0);
+        self.editor.history.undo.push(crate::ui::app::HistoryEntry {
+            snapshot: self.snapshot(),
+            description: "Edit document",
+            merge_key: None,
+            created_at: std::time::Instant::now(),
+        });
+        if self.editor.history.undo.len() > 80 {
+            self.editor.history.undo.remove(0);
         }
-        self.history_state.redo.clear();
+        self.editor.history.redo.clear();
         self.mark_dirty();
     }
 
     pub(crate) fn undo(&mut self) {
-        let Some(snapshot) = self.history_state.undo.pop() else {
+        let Some(entry) = self.editor.history.undo.pop() else {
             self.status = "Nothing to undo.".to_string();
             return;
         };
-        self.history_state.redo.push(self.snapshot());
-        self.restore_snapshot(snapshot);
+        self.editor.history.redo.push(crate::ui::app::HistoryEntry {
+            snapshot: self.snapshot(),
+            description: entry.description,
+            merge_key: entry.merge_key,
+            created_at: std::time::Instant::now(),
+        });
+        self.restore_snapshot(entry.snapshot);
         self.mark_dirty();
-        self.status = "Undo.".to_string();
+        self.status = format!("Undo: {}.", entry.description);
     }
 
     pub(crate) fn redo(&mut self) {
-        let Some(snapshot) = self.history_state.redo.pop() else {
+        let Some(entry) = self.editor.history.redo.pop() else {
             self.status = "Nothing to redo.".to_string();
             return;
         };
-        self.history_state.undo.push(self.snapshot());
-        self.restore_snapshot(snapshot);
+        self.editor.history.undo.push(crate::ui::app::HistoryEntry {
+            snapshot: self.snapshot(),
+            description: entry.description,
+            merge_key: entry.merge_key,
+            created_at: std::time::Instant::now(),
+        });
+        self.restore_snapshot(entry.snapshot);
         self.mark_dirty();
-        self.status = "Redo.".to_string();
+        self.status = format!("Redo: {}.", entry.description);
     }
 }

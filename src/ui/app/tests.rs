@@ -361,14 +361,14 @@ fn page_switch_does_not_dirty_or_reuse_stale_simulation() {
     let mut app = CircuitApp::new();
     app.load_led_demo();
     app.add_page();
-    app.history_state.dirty = false;
+    app.editor.history.dirty = false;
 
     let blank = app.current_simulation();
     assert_eq!(blank.summary, "No source or return");
 
     app.switch_page(0);
     assert!(
-        !app.history_state.dirty,
+        !app.editor.history.dirty,
         "Viewing another page should not mark data unsaved."
     );
 
@@ -632,7 +632,7 @@ fn rotating_connected_component_keeps_wire_endpoints_on_pins() {
 
     let old_a = app.pin_pos(resistor, "A").unwrap();
     let old_b = app.pin_pos(resistor, "B").unwrap();
-    app.selected = Some(Selection::Component(resistor));
+    app.editor.selected = Some(Selection::Component(resistor));
     app.rotate_selected();
     let new_a = app.pin_pos(resistor, "A").unwrap();
     let new_b = app.pin_pos(resistor, "B").unwrap();
@@ -1531,19 +1531,19 @@ fn pcb_auto_place_and_route_reduce_unplaced_and_ratsnest_counts() {
     let placed = app.pcb_dock_summary();
     assert_eq!(placed.unplaced_count, 0, "{placed:?}");
     assert!(
-        app.pcb_ui
+        app.document
             .board
             .footprints
             .iter()
             .all(|footprint| footprint.placed),
         "{:?}",
-        app.pcb_ui.board.footprints
+        app.document.board.footprints
     );
 
     app.route_pcb_ratsnest();
     let routed = app.pcb_dock_summary();
     assert_eq!(routed.ratsnest_count, 0, "{routed:?}");
-    assert!(!app.pcb_ui.board.tracks.is_empty());
+    assert!(!app.document.board.tracks.is_empty());
     assert!(app.status.contains("track"));
 }
 
@@ -1555,7 +1555,7 @@ fn pcb_fit_board_contains_placed_footprints_and_tracks() {
     app.auto_place_pcb_footprints();
     app.route_pcb_ratsnest();
 
-    if let Some(footprint) = app.pcb_ui.board.footprints.first_mut() {
+    if let Some(footprint) = app.document.board.footprints.first_mut() {
         footprint.position.x = 130.0;
         footprint.position.y = 90.0;
     }
@@ -1601,13 +1601,13 @@ fn pcb_drc_selection_updates_summary_preview_and_schematic_focus() {
     let mut app = CircuitApp::new();
     app.load_led_demo();
     app.update_pcb_from_schematic();
-    let footprint = app.pcb_ui.board.footprints.first().cloned().unwrap();
-    app.pcb_ui.board.outline = crate::pcb::board::BoardOutline::rectangular(1.0, 1.0);
-    let cad = app.pcb_ui.cad.clone().unwrap();
-    app.pcb_ui.drc = crate::pcb::drc::run_drc_with_nets(&app.pcb_ui.board, &cad.nets);
+    let footprint = app.document.board.footprints.first().cloned().unwrap();
+    app.document.board.outline = crate::pcb::board::BoardOutline::rectangular(1.0, 1.0);
+    let cad = app.analysis.pcb_cad.clone().unwrap();
+    app.analysis.pcb_drc = crate::pcb::drc::run_drc_with_nets(&app.document.board, &cad.nets);
     let drc_index = app
-        .pcb_ui
-        .drc
+        .analysis
+        .pcb_drc
         .iter()
         .position(|violation| violation.object_id == Some(footprint.id))
         .expect("footprint outside board should be tied to the footprint object");
@@ -1624,7 +1624,7 @@ fn pcb_drc_selection_updates_summary_preview_and_schematic_focus() {
             .any(|marker| marker.selected)
     );
     assert_eq!(
-        app.selected,
+        app.editor.selected,
         footprint
             .symbol_instance_id
             .map(crate::app::Selection::Component)
@@ -1637,7 +1637,7 @@ fn pcb_fabrication_export_is_blocked_by_drc_errors() {
     let mut app = CircuitApp::new();
     app.load_led_demo();
     app.update_pcb_from_schematic();
-    app.pcb_ui
+    app.document
         .board
         .tracks
         .push(crate::pcb::track::TrackSegment {
@@ -1648,8 +1648,8 @@ fn pcb_fabrication_export_is_blocked_by_drc_errors() {
             end: crate::model::cad::Point2::new(4.0, 0.01),
             width_mm: 0.01,
         });
-    let cad = app.pcb_ui.cad.clone().unwrap();
-    app.pcb_ui.drc = crate::pcb::drc::run_drc_with_nets(&app.pcb_ui.board, &cad.nets);
+    let cad = app.analysis.pcb_cad.clone().unwrap();
+    app.analysis.pcb_drc = crate::pcb::drc::run_drc_with_nets(&app.document.board, &cad.nets);
 
     app.export_pcb_fabrication_files();
 
@@ -1669,15 +1669,15 @@ fn project_folder_load_restores_schematic_board_and_pcb_analysis() {
     saved_app.route_pcb_ratsnest();
     saved_app.save_project_folder_to(&root).unwrap();
     let saved_component_count = saved_app.components.len();
-    let saved_track_count = saved_app.pcb_ui.board.tracks.len();
+    let saved_track_count = saved_app.document.board.tracks.len();
 
     let mut loaded_app = CircuitApp::new();
     loaded_app.load_project_folder_from(&root).unwrap();
 
     assert_eq!(loaded_app.components.len(), saved_component_count);
-    assert_eq!(loaded_app.pcb_ui.board.tracks.len(), saved_track_count);
+    assert_eq!(loaded_app.document.board.tracks.len(), saved_track_count);
     assert!(!loaded_app.pcb_dock_summary().dirty);
-    assert!(loaded_app.pcb_ui.cad.is_some());
+    assert!(loaded_app.analysis.pcb_cad.is_some());
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -1689,6 +1689,7 @@ fn ac_frequency_is_part_of_simulation_cache_key() {
 
     let _ = app.current_simulation();
     let first_key = app
+        .analysis
         .cached_simulation
         .as_ref()
         .map(|(_, key, _)| *key)
@@ -1697,6 +1698,7 @@ fn ac_frequency_is_part_of_simulation_cache_key() {
     app.simulation_ui.ac_freq_hz = 10_000.0;
     let _ = app.current_simulation();
     let second_key = app
+        .analysis
         .cached_simulation
         .as_ref()
         .map(|(_, key, _)| *key)

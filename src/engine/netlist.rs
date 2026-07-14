@@ -1,54 +1,11 @@
+use super::connectivity::diagnostics::geometry_diagnostics;
+use super::connectivity::geometry::{normalized_wire_segments, wire_endpoint_contact_points};
+use super::connectivity::labels::merge_key as label_merge_key;
+use super::connectivity::union_find::{ConnectivityNodes, ConnectivityUnionFind};
 use crate::model::*;
+#[cfg(test)]
 use egui::Pos2;
 use std::collections::{HashMap, HashSet};
-
-#[derive(Default)]
-struct NetlistNodes {
-    positions: Vec<Pos2>,
-}
-
-impl NetlistNodes {
-    fn node_for(&mut self, pos: Pos2) -> usize {
-        if let Some(index) = self
-            .positions
-            .iter()
-            .position(|existing| existing.distance(pos) <= 1.0)
-        {
-            return index;
-        }
-        self.positions.push(pos);
-        self.positions.len() - 1
-    }
-}
-
-#[derive(Default)]
-struct NetlistUnionFind {
-    parent: Vec<usize>,
-}
-
-impl NetlistUnionFind {
-    fn ensure(&mut self, index: usize) {
-        while self.parent.len() <= index {
-            self.parent.push(self.parent.len());
-        }
-    }
-
-    fn find(&mut self, index: usize) -> usize {
-        self.ensure(index);
-        if self.parent[index] != index {
-            self.parent[index] = self.find(self.parent[index]);
-        }
-        self.parent[index]
-    }
-
-    fn union(&mut self, a: usize, b: usize) {
-        let a = self.find(a);
-        let b = self.find(b);
-        if a != b {
-            self.parent[b] = a;
-        }
-    }
-}
 
 pub(crate) fn build_circuit_netlist(components: &[Component], wires: &[Wire]) -> CircuitNetlist {
     build_canonical_connectivity(components, wires).netlist
@@ -86,19 +43,9 @@ fn build_canonical_connectivity_with_page_scopes(
 ) -> CanonicalConnectivity {
     // Stage 1: geometry normalization. Saved geometry is not mutated; invalid
     // spans become diagnostics while valid polylines retain source identity.
-    let mut diagnostics = wires
-        .iter()
-        .filter(|wire| {
-            wire.points.len() < 2
-                || wire
-                    .points
-                    .windows(2)
-                    .all(|segment| segment[0].distance(segment[1]) <= f32::EPSILON)
-        })
-        .map(|wire| ConnectivityDiagnostic::DegenerateWire { wire_id: wire.id })
-        .collect::<Vec<_>>();
-    let mut nodes = NetlistNodes::default();
-    let mut nets = NetlistUnionFind::default();
+    let mut diagnostics = geometry_diagnostics(wires);
+    let mut nodes = ConnectivityNodes::default();
+    let mut nets = ConnectivityUnionFind::default();
 
     for wire in wires {
         for point in &wire.points {
@@ -211,14 +158,9 @@ fn build_canonical_connectivity_with_page_scopes(
             .get(&component.id)
             .copied()
             .unwrap_or_default();
-        if scope == NetLabelScope::Local {
-            continue;
-        }
         let page = component_pages.get(&component.id).copied().unwrap_or(0);
-        let key = match scope {
-            NetLabelScope::Local => unreachable!(),
-            NetLabelScope::Page => format!("page:{page}:{label}"),
-            NetLabelScope::Global => format!("global:{label}"),
+        let Some(key) = label_merge_key(scope, page, &label) else {
+            continue;
         };
         for pin in component_pin_defs(component) {
             label_nodes
@@ -492,96 +434,15 @@ fn electrical_type_for_role(role: PinRole) -> ElectricalType {
     }
 }
 
-fn wire_endpoint_contact_points(wires: &[Wire]) -> Vec<Pos2> {
-    let mut points = Vec::new();
-    for wire in wires {
-        points.extend(wire.points.first().copied());
-        points.extend(wire.points.last().copied());
-    }
-    points
-}
-
-struct NormalizedWireSegment {
-    id: u64,
-    wire_id: u64,
-    points: Vec<Pos2>,
-}
-
-fn normalized_wire_segments(
-    wires: &[Wire],
-    explicit_junctions: &[Pos2],
-) -> Vec<NormalizedWireSegment> {
-    let contacts = wire_endpoint_contact_points(wires)
-        .into_iter()
-        .chain(explicit_junctions.iter().copied())
-        .collect::<Vec<_>>();
-    let mut output = Vec::new();
-    let mut next_id = 1u64;
-
-    for wire in wires {
-        if wire.points.len() < 2 {
-            continue;
-        }
-        let mut cumulative = vec![0.0f32; wire.points.len()];
-        for index in 1..wire.points.len() {
-            cumulative[index] =
-                cumulative[index - 1] + wire.points[index - 1].distance(wire.points[index]);
-        }
-        let mut splits = contacts
-            .iter()
-            .filter_map(|&contact| {
-                polyline_parameter(&wire.points, contact, 1.0).map(|parameter| (parameter, contact))
-            })
-            .collect::<Vec<_>>();
-        splits.sort_by(|left, right| left.0.total_cmp(&right.0));
-        splits.dedup_by(|left, right| (left.0 - right.0).abs() <= 0.001);
-
-        for pair in splits.windows(2) {
-            let (from_parameter, from) = pair[0];
-            let (to_parameter, to) = pair[1];
-            if from.distance(to) <= f32::EPSILON {
-                continue;
-            }
-            let mut points = vec![from];
-            for (index, &point) in wire.points.iter().enumerate() {
-                let parameter = cumulative[index];
-                if parameter > from_parameter + 0.001 && parameter < to_parameter - 0.001 {
-                    points.push(point);
-                }
-            }
-            points.push(to);
-            output.push(NormalizedWireSegment {
-                id: next_id,
-                wire_id: wire.id,
-                points,
-            });
-            next_id += 1;
-        }
-    }
-    output
-}
-
-fn polyline_parameter(points: &[Pos2], position: Pos2, tolerance: f32) -> Option<f32> {
-    let mut cumulative = 0.0;
-    for segment in points.windows(2) {
-        let delta = segment[1] - segment[0];
-        let length_squared = delta.length_sq();
-        if length_squared <= f32::EPSILON {
-            continue;
-        }
-        let factor = (delta.dot(position - segment[0]) / length_squared).clamp(0.0, 1.0);
-        let length = length_squared.sqrt();
-        if (segment[0] + delta * factor).distance(position) <= tolerance {
-            return Some(cumulative + factor * length);
-        }
-        cumulative += length;
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type ConnectivitySignature = (
+        Vec<(u64, String, NetId)>,
+        Vec<(u64, usize, NetId)>,
+        Vec<(i64, i64, NetId)>,
+    );
 
     fn comp(id: u64, kind: ComponentKind, pos: Pos2, label: &str, value: &str) -> Component {
         Component {
@@ -614,13 +475,7 @@ mod tests {
         }
     }
 
-    fn connectivity_signature(
-        connectivity: &CanonicalConnectivity,
-    ) -> (
-        Vec<(u64, String, NetId)>,
-        Vec<(u64, usize, NetId)>,
-        Vec<(i64, i64, NetId)>,
-    ) {
+    fn connectivity_signature(connectivity: &CanonicalConnectivity) -> ConnectivitySignature {
         let mut pins = connectivity
             .pin_nets
             .iter()

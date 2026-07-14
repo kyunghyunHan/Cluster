@@ -378,9 +378,10 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn add_custom_component(&mut self, part_id: &str, pos: Pos2) {
-        self.record_history();
-        self.place_custom_component(part_id, pos);
-        self.status = "Custom part placed. Drag to reposition, R to rotate.".to_string();
+        self.execute_editor_command(EditorCommand::Component(ComponentCommand::PlaceCustom {
+            part_id: part_id.to_string(),
+            position: pos,
+        }));
     }
 
     /// Rescan `cluster_parts/` and report the outcome in the status bar.
@@ -484,7 +485,7 @@ impl crate::CircuitApp {
                 {
                     component.value = "330 ohm".to_string();
                 }
-                self.selected = Some(Selection::Component(id));
+                self.editor.selected = Some(Selection::Component(id));
                 self.status = "Auto fix placed a 330 ohm resistor. Wire it in series with the LED."
                     .to_string();
             }
@@ -503,7 +504,7 @@ impl crate::CircuitApp {
                     }
                 }
                 let wired = self.wire_i2c_pullup_fix(target_id, sda, scl);
-                self.selected = Some(Selection::Component(sda));
+                self.editor.selected = Some(Selection::Component(sda));
                 self.status = if wired {
                     "Auto fix added and wired two 4.7k I2C pull-ups.".to_string()
                 } else {
@@ -516,7 +517,7 @@ impl crate::CircuitApp {
                     base_pos + Vec2::new(120.0, -100.0),
                     "Use a MOSFET/transistor driver and separate supply for this load.",
                 );
-                self.selected = Some(Selection::Component(id));
+                self.editor.selected = Some(Selection::Component(id));
                 self.status = "Auto fix added a driver suggestion note.".to_string();
             }
             ErcAutoFix::AddRelayFlybackDiode { .. } => {
@@ -524,7 +525,7 @@ impl crate::CircuitApp {
                     self.place_component(ComponentKind::Diode, base_pos + Vec2::new(-120.0, 0.0));
                 self.add_wire_between(diode, "A", target_id, "COIL-");
                 self.add_wire_between(diode, "B", target_id, "COIL+");
-                self.selected = Some(Selection::Component(diode));
+                self.editor.selected = Some(Selection::Component(diode));
                 self.status = "Auto fix added a flyback diode across the relay coil.".to_string();
             }
             ErcAutoFix::AddLevelShifterNote { .. } => {
@@ -532,7 +533,7 @@ impl crate::CircuitApp {
                     base_pos + Vec2::new(120.0, -100.0),
                     "Add level shifter or resistor divider before this 3.3V GPIO.",
                 );
-                self.selected = Some(Selection::Component(id));
+                self.editor.selected = Some(Selection::Component(id));
                 self.status = "Auto fix added a level-shifter suggestion note.".to_string();
             }
         }
@@ -684,7 +685,7 @@ impl crate::CircuitApp {
             .iter()
             .filter_map(|(wire_id, net_id)| (*net_id == route.net_id).then_some(*wire_id))
             .collect();
-        self.selected = Some(Selection::Component(route.from_component_id));
+        self.editor.selected = Some(Selection::Component(route.from_component_id));
         self.status = format!(
             "Breadboard route: {} {} -> {} {}.",
             route.from_label, route.from_pin, route.to_label, route.to_pin
@@ -705,7 +706,7 @@ impl crate::CircuitApp {
             route.to_component_id,
             &to_pin,
         );
-        self.selected = Some(Selection::Component(route.from_component_id));
+        self.editor.selected = Some(Selection::Component(route.from_component_id));
         self.status = format!(
             "Added jumper: {} {} -> {} {}.",
             route.from_label, from_pin, route.to_label, to_pin
@@ -715,14 +716,14 @@ impl crate::CircuitApp {
     pub(crate) fn update_pcb_from_schematic(&mut self) {
         let netlist = self.current_netlist();
         let cad = CadProjectData::from_schematic(&self.components, &netlist);
-        self.pcb_ui
+        self.document
             .board
             .update_from_schematic(&cad.symbols, &cad.nets);
         self.refresh_pcb_analysis(&cad);
-        self.pcb_ui.cad = Some(cad);
-        self.pcb_ui.last_sync_revision = self.circuit_revision;
+        self.analysis.pcb_cad = Some(cad);
+        self.pcb_ui.last_sync_revision = self.analysis.circuit_revision;
         self.pcb_ui.selected_drc_index = None;
-        self.dirty_flags.pcb_sync_dirty = false;
+        self.analysis.dirty_flags.pcb_sync_dirty = false;
 
         let summary = self.pcb_dock_summary();
         self.status = format!(
@@ -734,7 +735,7 @@ impl crate::CircuitApp {
     pub(crate) fn auto_place_pcb_footprints(&mut self) {
         self.ensure_pcb_synced();
         let board_width = self
-            .pcb_ui
+            .document
             .board
             .outline
             .points
@@ -747,7 +748,7 @@ impl crate::CircuitApp {
         let step_y = 10.0;
         let usable_width = (board_width - start_x * 2.0).max(step_x);
         let per_row = (usable_width / step_x).floor().max(1.0) as usize;
-        for (index, footprint) in self.pcb_ui.board.footprints.iter_mut().enumerate() {
+        for (index, footprint) in self.document.board.footprints.iter_mut().enumerate() {
             let col = index % per_row;
             let row = index / per_row;
             footprint.position = crate::model::cad::Point2::new(
@@ -759,7 +760,7 @@ impl crate::CircuitApp {
         self.refresh_pcb_analysis_from_current();
         self.status = format!(
             "Auto-placed {} PCB footprint(s).",
-            self.pcb_ui.board.footprints.len()
+            self.document.board.footprints.len()
         );
     }
 
@@ -770,13 +771,13 @@ impl crate::CircuitApp {
         let mut max_x = f32::NEG_INFINITY;
         let mut max_y = f32::NEG_INFINITY;
 
-        for footprint in &self.pcb_ui.board.footprints {
+        for footprint in &self.document.board.footprints {
             min_x = min_x.min(footprint.position.x);
             min_y = min_y.min(footprint.position.y);
             max_x = max_x.max(footprint.position.x);
             max_y = max_y.max(footprint.position.y);
         }
-        for track in &self.pcb_ui.board.tracks {
+        for track in &self.document.board.tracks {
             for point in [track.start, track.end] {
                 min_x = min_x.min(point.x);
                 min_y = min_y.min(point.y);
@@ -784,7 +785,7 @@ impl crate::CircuitApp {
                 max_y = max_y.max(point.y);
             }
         }
-        for via in &self.pcb_ui.board.vias {
+        for via in &self.document.board.vias {
             min_x = min_x.min(via.position.x);
             min_y = min_y.min(via.position.y);
             max_x = max_x.max(via.position.x);
@@ -799,43 +800,43 @@ impl crate::CircuitApp {
         let margin = 6.0_f32;
         let shift_x = margin - min_x;
         let shift_y = margin - min_y;
-        for footprint in &mut self.pcb_ui.board.footprints {
+        for footprint in &mut self.document.board.footprints {
             footprint.position.x += shift_x;
             footprint.position.y += shift_y;
         }
-        for track in &mut self.pcb_ui.board.tracks {
+        for track in &mut self.document.board.tracks {
             track.start.x += shift_x;
             track.start.y += shift_y;
             track.end.x += shift_x;
             track.end.y += shift_y;
         }
-        for via in &mut self.pcb_ui.board.vias {
+        for via in &mut self.document.board.vias {
             via.position.x += shift_x;
             via.position.y += shift_y;
         }
 
         let width = (max_x - min_x + margin * 2.0).max(25.0);
         let height = (max_y - min_y + margin * 2.0).max(20.0);
-        self.pcb_ui.board.outline = BoardOutline::rectangular(width, height);
+        self.document.board.outline = BoardOutline::rectangular(width, height);
         self.refresh_pcb_analysis_from_current();
         self.status = format!("Fit PCB board to {:.1} x {:.1} mm.", width, height);
     }
 
     pub(crate) fn route_pcb_ratsnest(&mut self) {
         self.ensure_pcb_synced();
-        let Some(cad) = self.pcb_ui.cad.clone() else {
+        let Some(cad) = self.analysis.pcb_cad.clone() else {
             self.status = "Update PCB before routing ratsnest.".to_string();
             return;
         };
         let footprint_by_id = self
-            .pcb_ui
+            .document
             .board
             .footprints
             .iter()
             .map(|footprint| (footprint.id, footprint.position))
             .collect::<HashMap<_, _>>();
         let mut next_id = self
-            .pcb_ui
+            .document
             .board
             .tracks
             .iter()
@@ -844,9 +845,9 @@ impl crate::CircuitApp {
             .unwrap_or(0)
             + 1;
         let mut added = 0usize;
-        for ratsnest in self.pcb_ui.board.ratsnest_edges(&cad.nets) {
+        for ratsnest in self.document.board.ratsnest_edges(&cad.nets) {
             if self
-                .pcb_ui
+                .document
                 .board
                 .tracks
                 .iter()
@@ -860,19 +861,24 @@ impl crate::CircuitApp {
             ) else {
                 continue;
             };
-            self.pcb_ui.board.tracks.push(TrackSegment {
+            self.document.board.tracks.push(TrackSegment {
                 id: next_id,
                 net_id: ratsnest.net_id,
                 layer: BoardLayer::FrontCopper,
                 start,
                 end,
-                width_mm: self.pcb_ui.board.design_rules.min_track_width_mm.max(0.25),
+                width_mm: self
+                    .document
+                    .board
+                    .design_rules
+                    .min_track_width_mm
+                    .max(0.25),
             });
             next_id += 1;
             added += 1;
         }
         self.refresh_pcb_analysis(&cad);
-        self.pcb_ui.cad = Some(cad);
+        self.analysis.pcb_cad = Some(cad);
         self.status = if added == 0 {
             "No unrouted ratsnest edges needed a new track.".to_string()
         } else {
@@ -883,8 +889,8 @@ impl crate::CircuitApp {
     pub(crate) fn export_pcb_fabrication_files(&mut self) {
         self.ensure_pcb_synced();
         let drc_errors = self
-            .pcb_ui
-            .drc
+            .analysis
+            .pcb_drc
             .iter()
             .filter(|violation| violation.severity == DrcSeverity::Error)
             .count();
@@ -892,30 +898,33 @@ impl crate::CircuitApp {
             self.status = format!("PCB export blocked: fix {drc_errors} DRC error(s) first.");
             return;
         }
-        let Some(mut cad) = self.pcb_ui.cad.clone() else {
+        let Some(mut cad) = self.analysis.pcb_cad.clone() else {
             self.status = "Update PCB before fabrication export.".to_string();
             return;
         };
-        cad.board = Some(self.pcb_ui.board.clone());
+        cad.board = Some(self.document.board.clone());
         let writes = [
             (
                 "cluster_pcb_F_Cu.gbr",
                 crate::export::gerber::gerber_for_layer(
-                    &self.pcb_ui.board,
+                    &self.document.board,
                     BoardLayer::FrontCopper,
                 ),
             ),
             (
                 "cluster_pcb_B_Cu.gbr",
-                crate::export::gerber::gerber_for_layer(&self.pcb_ui.board, BoardLayer::BackCopper),
+                crate::export::gerber::gerber_for_layer(
+                    &self.document.board,
+                    BoardLayer::BackCopper,
+                ),
             ),
             (
                 "cluster_pcb_Edge_Cuts.gbr",
-                crate::export::gerber::gerber_for_layer(&self.pcb_ui.board, BoardLayer::EdgeCuts),
+                crate::export::gerber::gerber_for_layer(&self.document.board, BoardLayer::EdgeCuts),
             ),
             (
                 "cluster_pcb.drl",
-                crate::export::gerber::excellon_drill(&self.pcb_ui.board),
+                crate::export::gerber::excellon_drill(&self.document.board),
             ),
             ("cluster_pcb_bom.csv", crate::export::gerber::bom_csv(&cad)),
             ("cluster_pcb_cpl.csv", crate::export::gerber::cpl_csv(&cad)),
@@ -933,8 +942,8 @@ impl crate::CircuitApp {
     pub(crate) fn save_project_folder(&mut self) {
         match self.save_project_folder_to("project.cluster") {
             Ok(()) => {
-                self.history_state.dirty = false;
-                self.last_autorecover_revision = self.circuit_revision;
+                self.editor.history.dirty = false;
+                self.last_autorecover_revision = self.analysis.circuit_revision;
                 self.status =
                     "Saved project.cluster with schematic, PCB, and CAD data.".to_string();
             }
@@ -961,22 +970,22 @@ impl crate::CircuitApp {
         let layout = ProjectFolderLayout::new(root.as_ref());
         layout.create_dirs()?;
 
-        let mut cad = if let Some(cad) = self.pcb_ui.cad.clone() {
+        let mut cad = if let Some(cad) = self.analysis.pcb_cad.clone() {
             cad
         } else {
             let netlist = self.current_netlist();
             CadProjectData::from_schematic(&self.components, &netlist)
         };
-        cad.board = Some(self.pcb_ui.board.clone());
+        cad.board = Some(self.document.board.clone());
         cad.properties.insert(
             "document_revision".to_string(),
-            self.circuit_revision.to_string(),
+            self.analysis.circuit_revision.to_string(),
         );
 
         let schematic_json = serde_json::to_string_pretty(&SavedCircuit::from_app(self))
             .map_err(|error| error.to_string())?;
-        let board_json =
-            serde_json::to_string_pretty(&self.pcb_ui.board).map_err(|error| error.to_string())?;
+        let board_json = serde_json::to_string_pretty(&self.document.board)
+            .map_err(|error| error.to_string())?;
         let project_json = serde_json::to_string_pretty(&cad).map_err(|error| error.to_string())?;
 
         write_with_backup_path(&layout.schematic_json, &schematic_json)?;
@@ -1009,20 +1018,20 @@ impl crate::CircuitApp {
 
         self.record_history();
         self.restore_snapshot(snapshot);
-        self.pcb_ui.board = board;
-        self.pcb_ui.cad = Some(cad.clone());
-        self.pcb_ui.last_sync_revision = self.circuit_revision;
+        self.document.board = board;
+        self.analysis.pcb_cad = Some(cad.clone());
+        self.pcb_ui.last_sync_revision = self.analysis.circuit_revision;
         self.pcb_ui.selected_drc_index = None;
         self.refresh_pcb_analysis(&cad);
-        self.history_state.dirty = false;
-        self.cached_simulation = None;
-        self.cached_connectivity = None;
-        self.last_autorecover_revision = self.circuit_revision;
-        self.dirty_flags.geometry_dirty = false;
-        self.dirty_flags.connectivity_dirty = false;
-        self.dirty_flags.validation_dirty = false;
-        self.dirty_flags.simulation_dirty = true;
-        self.dirty_flags.pcb_sync_dirty = false;
+        self.editor.history.dirty = false;
+        self.analysis.cached_simulation = None;
+        self.analysis.cached_connectivity = None;
+        self.last_autorecover_revision = self.analysis.circuit_revision;
+        self.analysis.dirty_flags.geometry_dirty = false;
+        self.analysis.dirty_flags.connectivity_dirty = false;
+        self.analysis.dirty_flags.validation_dirty = false;
+        self.analysis.dirty_flags.simulation_dirty = true;
+        self.analysis.dirty_flags.pcb_sync_dirty = false;
         self.pending_fit = true;
         if !load_notes.is_empty() {
             self.status = format!(
@@ -1035,7 +1044,7 @@ impl crate::CircuitApp {
 
     pub(crate) fn select_pcb_drc_violation(&mut self, index: usize) {
         self.ensure_pcb_synced();
-        let Some(violation) = self.pcb_ui.drc.get(index).cloned() else {
+        let Some(violation) = self.analysis.pcb_drc.get(index).cloned() else {
             self.status = format!("PCB DRC item {index} is no longer available.");
             self.pcb_ui.selected_drc_index = None;
             return;
@@ -1043,14 +1052,14 @@ impl crate::CircuitApp {
         self.pcb_ui.selected_drc_index = Some(index);
         if let Some(object_id) = violation.object_id
             && let Some(component_id) = self
-                .pcb_ui
+                .document
                 .board
                 .footprints
                 .iter()
                 .find(|footprint| footprint.id == object_id)
                 .and_then(|footprint| footprint.symbol_instance_id)
         {
-            self.selected = Some(Selection::Component(component_id));
+            self.editor.selected = Some(Selection::Component(component_id));
             if let Some(component) = self
                 .components
                 .iter()
@@ -1073,47 +1082,48 @@ impl crate::CircuitApp {
     }
 
     fn ensure_pcb_synced(&mut self) {
-        if self.pcb_ui.cad.is_none()
-            || self.pcb_ui.last_sync_revision != self.circuit_revision
-            || self.dirty_flags.pcb_sync_dirty
+        if self.analysis.pcb_cad.is_none()
+            || self.pcb_ui.last_sync_revision != self.analysis.circuit_revision
+            || self.analysis.dirty_flags.pcb_sync_dirty
         {
             self.update_pcb_from_schematic();
         }
     }
 
     fn refresh_pcb_analysis_from_current(&mut self) {
-        if let Some(cad) = self.pcb_ui.cad.clone() {
+        if let Some(cad) = self.analysis.pcb_cad.clone() {
             self.refresh_pcb_analysis(&cad);
-            self.pcb_ui.cad = Some(cad);
+            self.analysis.pcb_cad = Some(cad);
         }
     }
 
     fn refresh_pcb_analysis(&mut self, cad: &CadProjectData) {
         self.pcb_ui.ratsnest_count = self.unrouted_pcb_ratsnest(cad).len();
-        self.pcb_ui.drc = run_drc_with_nets(&self.pcb_ui.board, &cad.nets);
+        self.analysis.pcb_drc = run_drc_with_nets(&self.document.board, &cad.nets);
+        self.analysis.dirty_flags.pcb_drc_dirty = false;
         if self
             .pcb_ui
             .selected_drc_index
-            .is_some_and(|index| index >= self.pcb_ui.drc.len())
+            .is_some_and(|index| index >= self.analysis.pcb_drc.len())
         {
             self.pcb_ui.selected_drc_index = None;
         }
     }
 
     fn unrouted_pcb_ratsnest(&self, cad: &CadProjectData) -> Vec<crate::pcb::board::RatsnestEdge> {
-        self.pcb_ui
+        self.document
             .board
             .ratsnest_edges(&cad.nets)
             .into_iter()
             .filter(|edge| {
                 !self
-                    .pcb_ui
+                    .document
                     .board
                     .tracks
                     .iter()
                     .any(|track| track.net_id == edge.net_id)
                     && !self
-                        .pcb_ui
+                        .document
                         .board
                         .vias
                         .iter()
@@ -1124,21 +1134,21 @@ impl crate::CircuitApp {
 
     pub(crate) fn pcb_dock_summary(&self) -> PcbDockSummary {
         let drc_errors = self
-            .pcb_ui
-            .drc
+            .analysis
+            .pcb_drc
             .iter()
             .filter(|violation| violation.severity == DrcSeverity::Error)
             .count();
         let drc_warnings = self
-            .pcb_ui
-            .drc
+            .analysis
+            .pcb_drc
             .iter()
             .filter(|violation| violation.severity == DrcSeverity::Warning)
             .count();
         PcbDockSummary {
-            footprint_count: self.pcb_ui.board.footprints.len(),
+            footprint_count: self.document.board.footprints.len(),
             unplaced_count: self
-                .pcb_ui
+                .document
                 .board
                 .footprints
                 .iter()
@@ -1147,10 +1157,10 @@ impl crate::CircuitApp {
             ratsnest_count: self.pcb_ui.ratsnest_count,
             drc_errors,
             drc_warnings,
-            dirty: self.dirty_flags.pcb_sync_dirty
-                || self.pcb_ui.last_sync_revision != self.circuit_revision,
+            dirty: self.analysis.dirty_flags.pcb_sync_dirty
+                || self.pcb_ui.last_sync_revision != self.analysis.circuit_revision,
             footprints: self
-                .pcb_ui
+                .document
                 .board
                 .footprints
                 .iter()
@@ -1167,8 +1177,8 @@ impl crate::CircuitApp {
                 })
                 .collect(),
             ratsnest: self
-                .pcb_ui
-                .cad
+                .analysis
+                .pcb_cad
                 .as_ref()
                 .map(|cad| {
                     self.unrouted_pcb_ratsnest(cad)
@@ -1183,8 +1193,8 @@ impl crate::CircuitApp {
                 })
                 .unwrap_or_default(),
             drc: self
-                .pcb_ui
-                .drc
+                .analysis
+                .pcb_drc
                 .iter()
                 .enumerate()
                 .map(|(index, violation)| PcbDrcRow {
@@ -1199,17 +1209,17 @@ impl crate::CircuitApp {
     }
 
     fn pcb_preview_data(&self) -> PcbPreviewData {
-        let (width_mm, height_mm) = pcb_outline_size(&self.pcb_ui.board.outline);
+        let (width_mm, height_mm) = pcb_outline_size(&self.document.board.outline);
         let footprint_positions = self
-            .pcb_ui
+            .document
             .board
             .footprints
             .iter()
             .map(|footprint| (footprint.id, footprint.position))
             .collect::<HashMap<_, _>>();
         let ratsnest = self
-            .pcb_ui
-            .cad
+            .analysis
+            .pcb_cad
             .as_ref()
             .map(|cad| {
                 self.unrouted_pcb_ratsnest(cad)
@@ -1231,7 +1241,7 @@ impl crate::CircuitApp {
             width_mm,
             height_mm,
             footprints: self
-                .pcb_ui
+                .document
                 .board
                 .footprints
                 .iter()
@@ -1243,7 +1253,7 @@ impl crate::CircuitApp {
                 })
                 .collect(),
             tracks: self
-                .pcb_ui
+                .document
                 .board
                 .tracks
                 .iter()
@@ -1257,8 +1267,8 @@ impl crate::CircuitApp {
                 .collect(),
             ratsnest,
             diagnostics: self
-                .pcb_ui
-                .drc
+                .analysis
+                .pcb_drc
                 .iter()
                 .enumerate()
                 .filter_map(|(index, violation)| {
@@ -1280,7 +1290,7 @@ impl crate::CircuitApp {
         }
         let object_id = violation.object_id?;
         if let Some(footprint) = self
-            .pcb_ui
+            .document
             .board
             .footprints
             .iter()
@@ -1289,7 +1299,7 @@ impl crate::CircuitApp {
             return Some(footprint.position);
         }
         if let Some(track) = self
-            .pcb_ui
+            .document
             .board
             .tracks
             .iter()
@@ -1300,7 +1310,7 @@ impl crate::CircuitApp {
                 (track.start.y + track.end.y) * 0.5,
             ));
         }
-        self.pcb_ui
+        self.document
             .board
             .vias
             .iter()
@@ -1321,7 +1331,7 @@ impl crate::CircuitApp {
 
     pub(crate) fn push_wire_point(&mut self, pos: Pos2) {
         if self.orthogonal_wires
-            && let Some(&last) = self.draft_wire.last()
+            && let Some(&last) = self.editor.draft_wire.last()
         {
             let dx = (pos.x - last.x).abs();
             let dy = (pos.y - last.y).abs();
@@ -1331,10 +1341,10 @@ impl crate::CircuitApp {
                 } else {
                     Pos2::new(last.x, pos.y)
                 };
-                crate::push_unique_point(&mut self.draft_wire, corner);
+                crate::push_unique_point(&mut self.editor.draft_wire, corner);
             }
         }
-        crate::push_unique_point(&mut self.draft_wire, pos);
+        crate::push_unique_point(&mut self.editor.draft_wire, pos);
     }
 
     // ── Selection actions ────────────────────────────────────────────────────
@@ -1416,8 +1426,8 @@ impl crate::CircuitApp {
         let path = crate::ui::app::default_save_path();
         match self.write_circuit_json(&path) {
             Ok(()) => {
-                self.history_state.dirty = false;
-                self.last_autorecover_revision = self.circuit_revision;
+                self.editor.history.dirty = false;
+                self.last_autorecover_revision = self.analysis.circuit_revision;
                 self.status = format!("Saved {}.", path.display());
             }
             Err(err) => {
@@ -1455,28 +1465,33 @@ impl crate::CircuitApp {
     // ── Multi-page management ────────────────────────────────────────────────
 
     pub(crate) fn save_current_page(&mut self) {
-        if let Some(page) = self.pages.get_mut(self.current_page) {
-            page.1 = self.components.clone();
-            page.2 = self.wires.clone();
-            page.3 = self.next_id;
-            page.4 = self.counters.clone();
+        let current_page = self.document.current_page;
+        let components = self.document.components.clone();
+        let wires = self.document.wires.clone();
+        let next_id = self.document.next_id;
+        let counters = self.document.counters.clone();
+        if let Some(page) = self.document.pages.get_mut(current_page) {
+            page.1 = components;
+            page.2 = wires;
+            page.3 = next_id;
+            page.4 = counters;
         }
     }
 
     pub(crate) fn load_page_state(&mut self, idx: usize) {
-        let (_, comps, wires, next_id, counters) = &self.pages[idx];
-        self.components = comps.clone();
-        self.wires = wires.clone();
-        self.next_id = *next_id;
-        self.counters = counters.clone();
-        self.selected = None;
-        self.multi_selected.clear();
-        self.draft_wire.clear();
-        self.drag = None;
-        self.rect_select_start = None;
+        let (_, components, wires, next_id, counters) = self.document.pages[idx].clone();
+        self.document.components = components;
+        self.document.wires = wires;
+        self.document.next_id = next_id;
+        self.document.counters = counters;
+        self.editor.selected = None;
+        self.editor.multi_selected.clear();
+        self.editor.draft_wire.clear();
+        self.editor.drag = None;
+        self.editor.rect_select_start = None;
         self.hovered_net_wire = None;
         self.highlighted_net_wires.clear();
-        self.snap_target = None;
+        self.editor.snap_target = None;
         self.invalidate_analysis_cache();
     }
 
@@ -1515,7 +1530,8 @@ impl crate::CircuitApp {
         }
         self.save_current_page();
         self.record_history();
-        self.pages.remove(self.current_page);
+        let current_page = self.document.current_page;
+        self.document.pages.remove(current_page);
         let new_idx = self.current_page.saturating_sub(1);
         self.current_page = new_idx;
         self.load_page_state(new_idx);
@@ -1572,7 +1588,7 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn backup_dirty_work(&mut self, reason: &str) {
-        if !self.history_state.dirty || (self.components.is_empty() && self.wires.is_empty()) {
+        if !self.editor.history.dirty || (self.components.is_empty() && self.wires.is_empty()) {
             return;
         }
         self.save_current_page();
@@ -1603,10 +1619,11 @@ impl crate::CircuitApp {
                 if recovery {
                     self.mark_dirty();
                 } else {
-                    self.history_state.dirty = false;
-                    self.circuit_revision = self.circuit_revision.saturating_add(1);
-                    self.cached_simulation = None;
-                    self.last_autorecover_revision = self.circuit_revision;
+                    self.editor.history.dirty = false;
+                    self.analysis.circuit_revision =
+                        self.analysis.circuit_revision.saturating_add(1);
+                    self.analysis.cached_simulation = None;
+                    self.last_autorecover_revision = self.analysis.circuit_revision;
                 }
                 self.status = if load_notes.is_empty() {
                     format!("Loaded {}.", path.display())
@@ -1633,8 +1650,8 @@ impl crate::CircuitApp {
             return crate::engine::simulation::Simulation::default();
         }
         let ac_key = self.simulation_ui.ac_freq_hz.to_bits();
-        if let Some((revision, cached_ac_key, simulation)) = &self.cached_simulation
-            && *revision == self.circuit_revision
+        if let Some((revision, cached_ac_key, simulation)) = &self.analysis.cached_simulation
+            && *revision == self.analysis.circuit_revision
             && *cached_ac_key == ac_key
         {
             self.performance.simulation_cache_hit = true;
@@ -1679,10 +1696,11 @@ impl crate::CircuitApp {
             &connectivity.netlist,
         );
         self.performance.erc_ms = erc_started.elapsed().as_secs_f64() * 1_000.0;
-        self.cached_simulation = Some((self.circuit_revision, ac_key, simulation.clone()));
-        self.simulation_revision = self.simulation_revision.saturating_add(1);
-        self.dirty_flags.validation_dirty = false;
-        self.dirty_flags.simulation_dirty = false;
+        self.analysis.cached_simulation =
+            Some((self.analysis.circuit_revision, ac_key, simulation.clone()));
+        self.analysis.simulation_revision = self.analysis.simulation_revision.saturating_add(1);
+        self.analysis.dirty_flags.validation_dirty = false;
+        self.analysis.dirty_flags.simulation_dirty = false;
         self.simulation_run_state = match simulation.status {
             crate::engine::simulation::SimulationStatus::Ok => {
                 crate::ui::app::SimulationRunState::Valid
@@ -1702,8 +1720,8 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn current_connectivity(&mut self) -> CanonicalConnectivity {
-        if let Some((revision, connectivity)) = &self.cached_connectivity
-            && *revision == self.circuit_revision
+        if let Some((revision, connectivity)) = &self.analysis.cached_connectivity
+            && *revision == self.analysis.circuit_revision
         {
             self.performance.netlist_cache_hit = true;
             return connectivity.clone();
@@ -1712,14 +1730,15 @@ impl crate::CircuitApp {
         let started = std::time::Instant::now();
         let connectivity = build_canonical_connectivity(&self.components, &self.wires);
         self.performance.netlist_ms = started.elapsed().as_secs_f64() * 1_000.0;
-        self.cached_connectivity = Some((self.circuit_revision, connectivity.clone()));
-        self.dirty_flags.connectivity_dirty = false;
+        self.analysis.cached_connectivity =
+            Some((self.analysis.circuit_revision, connectivity.clone()));
+        self.analysis.dirty_flags.connectivity_dirty = false;
         connectivity
     }
 
     pub(crate) fn current_connected_pins(&mut self) -> Vec<(i32, i32)> {
-        if let Some((revision, pins)) = &self.cached_connected_pins
-            && *revision == self.circuit_revision
+        if let Some((revision, pins)) = &self.analysis.cached_connected_pins
+            && *revision == self.analysis.circuit_revision
         {
             return pins.clone();
         }
@@ -1731,13 +1750,13 @@ impl crate::CircuitApp {
             .filter(|pin| pin.connected_by_wire)
             .map(|pin| (pin.position.x.round() as i32, pin.position.y.round() as i32))
             .collect::<Vec<_>>();
-        self.cached_connected_pins = Some((self.circuit_revision, pins.clone()));
+        self.analysis.cached_connected_pins = Some((self.analysis.circuit_revision, pins.clone()));
         pins
     }
 
     pub(crate) fn flush_autorecover_if_needed(&mut self) {
-        if !self.history_state.dirty
-            || self.last_autorecover_revision == self.circuit_revision
+        if !self.editor.history.dirty
+            || self.last_autorecover_revision == self.analysis.circuit_revision
             || (self.components.is_empty() && self.wires.is_empty())
         {
             return;
@@ -1749,7 +1768,7 @@ impl crate::CircuitApp {
             self.status = format!("Auto backup failed: {err}");
             return;
         }
-        self.last_autorecover_revision = self.circuit_revision;
+        self.last_autorecover_revision = self.analysis.circuit_revision;
     }
 
     #[allow(clippy::type_complexity)] // Compatibility boundary for schema-v4 pages.
@@ -1922,6 +1941,7 @@ impl SavedCircuit {
                 counters,
                 pages,
                 current_page,
+                board: Board::new_two_layer(80.0, 50.0),
             },
             load_notes,
         ))

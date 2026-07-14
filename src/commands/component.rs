@@ -1,4 +1,4 @@
-use crate::commands::CommandDirtyState;
+use crate::commands::ChangeSet;
 use crate::model::{Component, ComponentKind, Wire};
 use egui::{Pos2, Vec2};
 use std::collections::HashMap;
@@ -7,6 +7,10 @@ use std::collections::HashSet;
 pub(crate) enum ComponentCommand {
     Place {
         kind: ComponentKind,
+        position: Pos2,
+    },
+    PlaceCustom {
+        part_id: String,
         position: Pos2,
     },
     Paste {
@@ -21,11 +25,15 @@ pub(crate) enum ComponentCommand {
 }
 
 impl ComponentCommand {
-    pub(crate) fn apply(self, app: &mut crate::CircuitApp) -> CommandDirtyState {
+    pub(crate) fn apply(self, app: &mut crate::CircuitApp) -> ChangeSet {
         match self {
             Self::Place { kind, position } => {
                 app.place_component(kind, position);
                 app.status = "Component placed. Drag to reposition, R to rotate.".to_string();
+            }
+            Self::PlaceCustom { part_id, position } => {
+                app.place_custom_component(&part_id, position);
+                app.status = "Custom part placed. Drag to reposition, R to rotate.".to_string();
             }
             Self::Paste {
                 components,
@@ -63,8 +71,8 @@ impl ComponentCommand {
                         .collect();
                     app.wires.push(Wire::new(new_wire_id, points));
                 }
-                app.multi_selected = new_ids.iter().copied().collect();
-                app.selected = None;
+                app.editor.multi_selected = new_ids.iter().copied().collect();
+                app.editor.selected = None;
                 app.status = format!(
                     "Pasted {} component(s) + {} wire(s).",
                     new_ids.len(),
@@ -76,7 +84,7 @@ impl ComponentCommand {
                 delta,
             } => {
                 if delta.length_sq() <= 0.01 {
-                    return CommandDirtyState::none();
+                    return ChangeSet::none();
                 }
                 let old_pins = app
                     .components
@@ -111,6 +119,6 @@ impl ComponentCommand {
                 }
             }
         }
-        CommandDirtyState::document()
+        ChangeSet::schematic()
     }
 }
