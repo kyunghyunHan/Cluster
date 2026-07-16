@@ -1251,7 +1251,7 @@ impl eframe::App for CircuitApp {
                                 ui.add_space(6.0);
                                 egui::Frame::NONE
                                     .fill(Color32::from_rgb(58, 28, 24))
-                                    .stroke(Stroke::new(1.0, Color32::from_rgb(160, 64, 54)))
+                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(160, 64, 54)))
                                     .corner_radius(egui::CornerRadius::same(5))
                                     .inner_margin(egui::Margin::symmetric(8, 5))
                                     .show(ui, |ui| {
@@ -1806,7 +1806,7 @@ impl eframe::App for CircuitApp {
                     painter.rect_stroke(
                         sb.expand(8.0),
                         4.0,
-                        Stroke::new(1.5, Color32::from_rgb(110, 170, 220)),
+                        Stroke::new(1.5_f32, Color32::from_rgb(110, 170, 220)),
                         StrokeKind::Outside,
                     );
                 }
@@ -1826,7 +1826,7 @@ impl eframe::App for CircuitApp {
                 painter.rect_stroke(
                     sel_rect,
                     0.0,
-                    Stroke::new(1.0, Color32::from_rgb(100, 178, 255)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(100, 178, 255)),
                     StrokeKind::Outside,
                 );
             }
@@ -1946,11 +1946,11 @@ impl eframe::App for CircuitApp {
                     let ghost_rect = Rect::from_center_size(ghost_screen, ghost_size);
                     // Translucent crosshair
                     let ghost_col = Color32::from_rgba_unmultiplied(80, 200, 140, 90);
-                    let ghost_stroke = Stroke::new(1.6, ghost_col);
+                    let ghost_stroke = Stroke::new(1.6_f32, ghost_col);
                     painter.rect_stroke(
                         ghost_rect.expand(4.0),
                         4.0,
-                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(60, 180, 120, 55)),
+                        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(60, 180, 120, 55)),
                         StrokeKind::Middle,
                     );
                     // Crosshair at snap point
@@ -1988,7 +1988,7 @@ impl eframe::App for CircuitApp {
                         painter.circle_stroke(
                             sp,
                             view.scale_f(10.0),
-                            Stroke::new(2.5, Color32::from_rgb(50, 255, 120)),
+                            Stroke::new(2.5_f32, Color32::from_rgb(50, 255, 120)),
                         );
                         painter.circle_filled(
                             sp,
@@ -2011,7 +2011,7 @@ impl eframe::App for CircuitApp {
                         painter.circle_stroke(
                             sp,
                             view.scale_f(8.0),
-                            Stroke::new(2.0, Color32::from_rgb(100, 240, 160)),
+                            Stroke::new(2.0_f32, Color32::from_rgb(100, 240, 160)),
                         );
                         painter.circle_filled(
                             sp,
@@ -2024,7 +2024,7 @@ impl eframe::App for CircuitApp {
                         painter.circle_stroke(
                             sp,
                             view.scale_f(7.0),
-                            Stroke::new(1.8, Color32::from_rgb(80, 200, 255)),
+                            Stroke::new(1.8_f32, Color32::from_rgb(80, 200, 255)),
                         );
                         painter.circle_filled(
                             sp,
@@ -2062,9 +2062,9 @@ impl eframe::App for CircuitApp {
                                     5.0,
                                     Stroke::new(
                                         if tone == SmartWireTone::Compatible {
-                                            1.8
+                                            1.8_f32
                                         } else {
-                                            1.0
+                                            1.0_f32
                                         },
                                         color,
                                     ),
@@ -2372,7 +2372,7 @@ impl eframe::App for CircuitApp {
                 painter.rect_stroke(
                     menu_rect,
                     5.0,
-                    Stroke::new(1.0, Color32::from_rgb(55, 68, 82)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(55, 68, 82)),
                     StrokeKind::Outside,
                 );
 
@@ -2481,7 +2481,7 @@ impl eframe::App for CircuitApp {
                     painter.rect_stroke(
                         popup_rect,
                         4.0,
-                        Stroke::new(1.5, Color32::from_rgb(80, 180, 120)),
+                        Stroke::new(1.5_f32, Color32::from_rgb(80, 180, 120)),
                         StrokeKind::Outside,
                     );
                     let text_pos = popup_rect.min + Vec2::new(6.0, 5.0);

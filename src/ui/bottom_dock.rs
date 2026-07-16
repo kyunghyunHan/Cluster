@@ -348,7 +348,7 @@ fn render_pcb_preview(ui: &mut egui::Ui, preview: &PcbPreviewData) {
     painter.rect_stroke(
         rect,
         4.0,
-        Stroke::new(1.0, Color32::from_rgb(50, 61, 74)),
+        Stroke::new(1.0_f32, Color32::from_rgb(50, 61, 74)),
         StrokeKind::Inside,
     );
 
@@ -376,7 +376,7 @@ fn render_pcb_preview(ui: &mut egui::Ui, preview: &PcbPreviewData) {
     painter.rect_stroke(
         board_rect,
         2.0,
-        Stroke::new(1.3, Color32::from_rgb(120, 170, 145)),
+        Stroke::new(1.3_f32, Color32::from_rgb(120, 170, 145)),
         StrokeKind::Inside,
     );
 
@@ -398,7 +398,7 @@ fn render_pcb_preview(ui: &mut egui::Ui, preview: &PcbPreviewData) {
                 map(track.start_x_mm, track.start_y_mm),
                 map(track.end_x_mm, track.end_y_mm),
             ],
-            Stroke::new(2.0, color),
+            Stroke::new(2.0_f32, color),
         );
     }
 
@@ -408,7 +408,7 @@ fn render_pcb_preview(ui: &mut egui::Ui, preview: &PcbPreviewData) {
                 map(ratsnest.start_x_mm, ratsnest.start_y_mm),
                 map(ratsnest.end_x_mm, ratsnest.end_y_mm),
             ],
-            Stroke::new(1.0, Color32::from_rgb(210, 205, 95)),
+            Stroke::new(1.0_f32, Color32::from_rgb(210, 205, 95)),
         );
     }
 
@@ -419,17 +419,17 @@ fn render_pcb_preview(ui: &mut egui::Ui, preview: &PcbPreviewData) {
             PcbDrcSeverity::Warning => Color32::from_rgb(245, 190, 70),
         };
         let radius = if diagnostic.selected { 6.5 } else { 4.5 };
-        painter.circle_stroke(center, radius, Stroke::new(1.8, color));
+        painter.circle_stroke(center, radius, Stroke::new(1.8_f32, color));
         painter.line_segment(
             [center - Vec2::splat(radius), center + Vec2::splat(radius)],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0_f32, color),
         );
         painter.line_segment(
             [
                 center + Vec2::new(-radius, radius),
                 center + Vec2::new(radius, -radius),
             ],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0_f32, color),
         );
     }
 

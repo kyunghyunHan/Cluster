@@ -293,13 +293,13 @@ fn tool_button(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response
     let (fill, stroke, text) = if selected {
         (
             theme::BG_ACTIVE,
-            Stroke::new(1.0, theme::ACCENT),
+            Stroke::new(1.0_f32, theme::ACCENT),
             theme::TEXT_PRIMARY,
         )
     } else {
         (
             theme::BG_BUTTON,
-            Stroke::new(1.0, theme::STROKE_MUTED),
+            Stroke::new(1.0_f32, theme::STROKE_MUTED),
             theme::TEXT_PRIMARY,
         )
     };
@@ -315,7 +315,7 @@ fn compact_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
         egui::Button::new(egui::RichText::new(label).color(theme::TEXT_PRIMARY))
             .fill(theme::BG_BUTTON)
-            .stroke(Stroke::new(1.0, theme::STROKE_MUTED))
+            .stroke(Stroke::new(1.0_f32, theme::STROKE_MUTED))
             .min_size(Vec2::new(46.0, 24.0)),
     )
 }
@@ -325,7 +325,7 @@ fn menu_action(ui: &mut egui::Ui, label: &str) -> egui::Response {
         Vec2::new(180.0, 27.0),
         egui::Button::new(egui::RichText::new(label).color(theme::TEXT_PRIMARY))
             .fill(theme::BG_BUTTON)
-            .stroke(Stroke::new(1.0, theme::STROKE_MUTED)),
+            .stroke(Stroke::new(1.0_f32, theme::STROKE_MUTED)),
     )
 }
 
@@ -341,7 +341,7 @@ fn toolbar_menu(ui: &mut egui::Ui, label: &str, add_contents: impl FnOnce(&mut e
 fn status_pill(ui: &mut egui::Ui, text: &str) {
     egui::Frame::NONE
         .fill(theme::BG_PANEL_DARK)
-        .stroke(Stroke::new(1.0, theme::WARNING))
+        .stroke(Stroke::new(1.0_f32, theme::WARNING))
         .corner_radius(egui::CornerRadius::same(5))
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {

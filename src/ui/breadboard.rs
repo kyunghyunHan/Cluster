@@ -287,7 +287,7 @@ fn draw_breadboard_preview(painter: &egui::Painter, rect: Rect, guide: &Breadboa
     painter.rect_stroke(
         rect,
         6.0,
-        Stroke::new(1.0, Color32::from_rgb(70, 78, 88)),
+        Stroke::new(1.0_f32, Color32::from_rgb(70, 78, 88)),
         StrokeKind::Outside,
     );
 
@@ -298,14 +298,14 @@ fn draw_breadboard_preview(painter: &egui::Painter, rect: Rect, guide: &Breadboa
             Pos2::new(rect.left() + 18.0, rail_top),
             Pos2::new(rect.right() - 18.0, rail_top),
         ],
-        Stroke::new(3.0, Color32::from_rgb(220, 80, 80)),
+        Stroke::new(3.0_f32, Color32::from_rgb(220, 80, 80)),
     );
     painter.line_segment(
         [
             Pos2::new(rect.left() + 18.0, rail_bottom),
             Pos2::new(rect.right() - 18.0, rail_bottom),
         ],
-        Stroke::new(3.0, Color32::from_rgb(90, 145, 235)),
+        Stroke::new(3.0_f32, Color32::from_rgb(90, 145, 235)),
     );
 
     let left_module = Rect::from_min_size(
@@ -321,13 +321,13 @@ fn draw_breadboard_preview(painter: &egui::Painter, rect: Rect, guide: &Breadboa
     painter.rect_stroke(
         left_module,
         4.0,
-        Stroke::new(1.0, Color32::from_rgb(95, 120, 145)),
+        Stroke::new(1.0_f32, Color32::from_rgb(95, 120, 145)),
         StrokeKind::Outside,
     );
     painter.rect_stroke(
         right_module,
         4.0,
-        Stroke::new(1.0, Color32::from_rgb(95, 120, 145)),
+        Stroke::new(1.0_f32, Color32::from_rgb(95, 120, 145)),
         StrokeKind::Outside,
     );
     painter.text(
@@ -355,7 +355,7 @@ fn draw_breadboard_preview(painter: &egui::Painter, rect: Rect, guide: &Breadboa
             "I2C clock" => Color32::from_rgb(240, 190, 85),
             _ => Color32::from_rgb(190, 200, 210),
         };
-        let stroke = Stroke::new(if route.connected { 2.2 } else { 1.4 }, color);
+        let stroke = Stroke::new(if route.connected { 2.2_f32 } else { 1.4_f32 }, color);
         let from = Pos2::new(left_module.right(), y);
         let to = Pos2::new(right_module.left(), y);
         painter.line_segment([from, to], stroke);
@@ -363,7 +363,7 @@ fn draw_breadboard_preview(painter: &egui::Painter, rect: Rect, guide: &Breadboa
             painter.circle_stroke(
                 Pos2::new((from.x + to.x) * 0.5, y),
                 5.0,
-                Stroke::new(1.4, Color32::from_rgb(255, 190, 80)),
+                Stroke::new(1.4_f32, Color32::from_rgb(255, 190, 80)),
             );
         }
     }
@@ -390,7 +390,7 @@ fn status_pill(ui: &mut egui::Ui, text: &str, tone: BreadboardTone) {
     };
     egui::Frame::NONE
         .fill(bg)
-        .stroke(Stroke::new(1.0, stroke))
+        .stroke(Stroke::new(1.0_f32, stroke))
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(6, 2))
         .show(ui, |ui| {

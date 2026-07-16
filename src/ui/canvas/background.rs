@@ -36,7 +36,7 @@ pub(crate) fn draw_grid(painter: &Painter, rect: Rect, grid: f32, view: CanvasVi
     }
     let world_origin = view.to_screen(Pos2::ZERO);
     if rect.contains(world_origin) {
-        let stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(80, 120, 160, 40));
+        let stroke = Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(80, 120, 160, 40));
         painter.line_segment(
             [
                 Pos2::new(world_origin.x, rect.top()),

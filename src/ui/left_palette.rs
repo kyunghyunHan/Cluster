@@ -534,7 +534,7 @@ fn palette_frame(
     ui.add_space(3.0);
     egui::Frame::NONE
         .fill(Color32::from_rgb(23, 28, 35))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(58, 68, 80)))
+        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(58, 68, 80)))
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(5, 3))
         .show(ui, |ui| {
@@ -579,13 +579,13 @@ fn palette_card(
     let (fill, stroke, color) = if is_selected {
         (
             Color32::from_rgb(38, 70, 82),
-            Stroke::new(1.0, Color32::from_rgb(105, 178, 255)),
+            Stroke::new(1.0_f32, Color32::from_rgb(105, 178, 255)),
             Color32::from_rgb(235, 246, 255),
         )
     } else {
         (
             Color32::from_rgb(25, 29, 35),
-            Stroke::new(1.0, Color32::from_rgb(43, 50, 58)),
+            Stroke::new(1.0_f32, Color32::from_rgb(43, 50, 58)),
             Color32::from_rgb(198, 207, 216),
         )
     };

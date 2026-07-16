@@ -14,11 +14,11 @@ pub(crate) fn draw_component(
     show_dc_overlay: bool,
 ) {
     let stroke = if selected {
-        Stroke::new(2.2, Color32::from_rgb(90, 235, 170))
+        Stroke::new(2.2_f32, Color32::from_rgb(90, 235, 170))
     } else if energized {
-        Stroke::new(2.8, Color32::from_rgb(255, 185, 80))
+        Stroke::new(2.8_f32, Color32::from_rgb(255, 185, 80))
     } else {
-        Stroke::new(2.0, Color32::from_rgb(222, 226, 232))
+        Stroke::new(2.0_f32, Color32::from_rgb(222, 226, 232))
     };
     let screen_center = view.to_screen(component.pos);
     let size = component_size(component) * view.zoom;
@@ -44,12 +44,12 @@ pub(crate) fn draw_component(
         painter.rect_stroke(
             sel_rect,
             4.0,
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(80, 200, 140, 80)),
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(80, 200, 140, 80)),
             StrokeKind::Outside,
         );
         // Corner L-brackets for crisp selection feel
         let col = Color32::from_rgb(70, 220, 150);
-        let cs = Stroke::new(2.0, col);
+        let cs = Stroke::new(2.0_f32, col);
         let cr = sel_rect.width().min(sel_rect.height()) * 0.25;
         let corners = [
             sel_rect.left_top(),
@@ -383,9 +383,9 @@ pub(crate) fn draw_component(
             // Bordered text box with the note text (stored in `value`)
             let text_fill = Color32::from_rgba_unmultiplied(30, 36, 46, 220);
             let border = if selected {
-                Stroke::new(1.5, Color32::from_rgb(90, 200, 140))
+                Stroke::new(1.5_f32, Color32::from_rgb(90, 200, 140))
             } else {
-                Stroke::new(1.0, Color32::from_rgb(90, 110, 140))
+                Stroke::new(1.0_f32, Color32::from_rgb(90, 110, 140))
             };
             painter.rect_filled(rect, 4.0, text_fill);
             painter.rect_stroke(rect, 4.0, border, egui::StrokeKind::Outside);
@@ -484,18 +484,26 @@ pub(crate) fn draw_component(
             let is_connected = connected_pins.contains(&key);
             if is_connected {
                 painter.circle_filled(spos, 3.0, Color32::from_rgb(250, 205, 95));
-                painter.circle_stroke(spos, 4.0, Stroke::new(1.0, Color32::from_rgb(40, 35, 20)));
+                painter.circle_stroke(
+                    spos,
+                    4.0,
+                    Stroke::new(1.0_f32, Color32::from_rgb(40, 35, 20)),
+                );
             } else {
                 // Unconnected pin: hollow circle with small cross
-                painter.circle_stroke(spos, 4.5, Stroke::new(1.5, Color32::from_rgb(220, 80, 60)));
+                painter.circle_stroke(
+                    spos,
+                    4.5,
+                    Stroke::new(1.5_f32, Color32::from_rgb(220, 80, 60)),
+                );
                 let d = 3.0;
                 painter.line_segment(
                     [spos - Vec2::new(d, 0.0), spos + Vec2::new(d, 0.0)],
-                    Stroke::new(1.0, Color32::from_rgb(220, 80, 60)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(220, 80, 60)),
                 );
                 painter.line_segment(
                     [spos - Vec2::new(0.0, d), spos + Vec2::new(0.0, d)],
-                    Stroke::new(1.0, Color32::from_rgb(220, 80, 60)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(220, 80, 60)),
                 );
             }
             if should_draw_pin_label(component.kind, &pin) {
@@ -561,7 +569,7 @@ pub(crate) fn draw_component(
                 bg,
                 3.0,
                 Stroke::new(
-                    0.8,
+                    0.8_f32,
                     if energized {
                         Color32::from_rgb(200, 140, 30)
                     } else {
@@ -632,20 +640,20 @@ pub(crate) fn draw_wire(
     };
 
     let stroke = if selected {
-        Stroke::new(3.5, Color32::from_rgb(90, 235, 170))
+        Stroke::new(3.5_f32, Color32::from_rgb(90, 235, 170))
     } else if fault_highlight {
-        Stroke::new(4.2, Color32::from_rgb(255, 72, 58))
+        Stroke::new(4.2_f32, Color32::from_rgb(255, 72, 58))
     } else if open_wire {
-        Stroke::new(2.2, Color32::from_rgb(225, 155, 65))
+        Stroke::new(2.2_f32, Color32::from_rgb(225, 155, 65))
     } else if let Some(v) = dc_voltage {
         let col = mna::voltage_color(v, dc_vmax);
         Stroke::new(base_w, col)
     } else if energized {
         Stroke::new(base_w, Color32::from_rgb(255, 170, 55))
     } else if net_highlighted {
-        Stroke::new(2.8, Color32::from_rgb(140, 210, 255))
+        Stroke::new(2.8_f32, Color32::from_rgb(140, 210, 255))
     } else {
-        Stroke::new(2.0, Color32::from_rgb(105, 178, 255))
+        Stroke::new(2.0_f32, Color32::from_rgb(105, 178, 255))
     };
 
     let mut screen_points: Vec<Pos2> = wire.points.iter().map(|&p| view.to_screen(p)).collect();
@@ -780,7 +788,7 @@ pub(crate) fn draw_flow_markers(painter: &egui::Painter, points: &[Pos2], flow_p
         painter.add(egui::Shape::convex_polygon(
             vec![tip, left, right],
             Color32::from_rgb(255, 245, 120),
-            Stroke::new(1.4, Color32::from_rgb(90, 55, 0)),
+            Stroke::new(1.4_f32, Color32::from_rgb(90, 55, 0)),
         ));
 
         // Bright dot at tail for glow effect
@@ -802,7 +810,7 @@ pub(crate) fn draw_short_fault_markers(painter: &egui::Painter, points: &[Pos2])
 
     let spacing = 70.0;
     let marker_count = (total / spacing).ceil().max(1.0) as usize;
-    let stroke = Stroke::new(2.0, Color32::from_rgb(255, 220, 210));
+    let stroke = Stroke::new(2.0_f32, Color32::from_rgb(255, 220, 210));
     for idx in 0..marker_count {
         let distance = if marker_count == 1 {
             total * 0.5
@@ -967,7 +975,7 @@ pub(crate) fn draw_pin_label(painter: &egui::Painter, component_center: Pos2, pi
 }
 
 pub(crate) fn draw_wire_preview(painter: &egui::Painter, points: &[Pos2]) {
-    let stroke = Stroke::new(1.8, Color32::from_rgb(130, 200, 255));
+    let stroke = Stroke::new(1.8_f32, Color32::from_rgb(130, 200, 255));
     for segment in points.windows(2) {
         painter.line_segment([segment[0], segment[1]], stroke);
     }
@@ -1670,14 +1678,14 @@ pub(crate) fn draw_transformer(
             Pos2::new(core_x - 2.0, center.y - hh),
             Pos2::new(core_x - 2.0, center.y + hh),
         ],
-        Stroke::new(2.0, stroke.color),
+        Stroke::new(2.0_f32, stroke.color),
     );
     painter.line_segment(
         [
             Pos2::new(core_x + 2.0, center.y - hh),
             Pos2::new(core_x + 2.0, center.y + hh),
         ],
-        Stroke::new(2.0, stroke.color),
+        Stroke::new(2.0_f32, stroke.color),
     );
     // Lead wires
     painter.line_segment(
@@ -1721,16 +1729,16 @@ pub(crate) fn draw_thermistor(painter: &egui::Painter, rect: Rect, rotation: i32
     let arr_end = Pos2::new(center.x + hw * 0.6, center.y - hh * 0.8);
     painter.line_segment(
         [arr_start, arr_end],
-        Stroke::new(1.5, Color32::from_rgb(255, 160, 80)),
+        Stroke::new(1.5_f32, Color32::from_rgb(255, 160, 80)),
     );
     // Arrowhead
     painter.line_segment(
         [arr_end, Pos2::new(arr_end.x - 5.0, arr_end.y + 2.0)],
-        Stroke::new(1.5, Color32::from_rgb(255, 160, 80)),
+        Stroke::new(1.5_f32, Color32::from_rgb(255, 160, 80)),
     );
     painter.line_segment(
         [arr_end, Pos2::new(arr_end.x - 2.0, arr_end.y + 5.0)],
-        Stroke::new(1.5, Color32::from_rgb(255, 160, 80)),
+        Stroke::new(1.5_f32, Color32::from_rgb(255, 160, 80)),
     );
     painter.text(
         Pos2::new(center.x + hw * 0.7, center.y - hh * 0.9),
@@ -1836,7 +1844,7 @@ pub(crate) fn draw_junctions(painter: &egui::Painter, wires: &[Wire], view: Canv
         painter.circle_stroke(
             sp,
             r + 1.5,
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(105, 178, 255, 80)),
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(105, 178, 255, 80)),
         );
     }
 
@@ -1871,8 +1879,8 @@ pub(crate) fn draw_junctions(painter: &egui::Painter, wires: &[Wire], view: Canv
                 let p0 = ha0.lerp(ctrl, 0.5);
                 let p2 = ha1.lerp(ctrl, 0.5);
                 let bg = Color32::from_rgb(18, 22, 28);
-                painter.line_segment([ha0, ha1], Stroke::new(5.0, bg));
-                let hop_stroke = Stroke::new(2.0, Color32::from_rgb(105, 178, 255));
+                painter.line_segment([ha0, ha1], Stroke::new(5.0_f32, bg));
+                let hop_stroke = Stroke::new(2.0_f32, Color32::from_rgb(105, 178, 255));
                 painter.line_segment([ha0, p0], hop_stroke);
                 painter.line_segment([p0, ctrl], hop_stroke);
                 painter.line_segment([ctrl, p2], hop_stroke);
@@ -2476,13 +2484,13 @@ pub(crate) fn draw_oled(
         painter.rect_stroke(
             screen_rect.expand(2.5),
             4.0,
-            Stroke::new(2.0, Color32::from_rgba_unmultiplied(80, 200, 255, 60)),
+            Stroke::new(2.0_f32, Color32::from_rgba_unmultiplied(80, 200, 255, 60)),
             StrokeKind::Outside,
         );
         painter.rect_stroke(
             screen_rect,
             3.0,
-            Stroke::new(1.0, Color32::from_rgb(40, 160, 220)),
+            Stroke::new(1.0_f32, Color32::from_rgb(40, 160, 220)),
             StrokeKind::Outside,
         );
 
@@ -2507,7 +2515,7 @@ pub(crate) fn draw_oled(
                 Pos2::new(sx + 4.0, title_y),
                 Pos2::new(sx + sw - 4.0, title_y),
             ],
-            Stroke::new(1.0, Color32::from_rgb(60, 160, 220)),
+            Stroke::new(1.0_f32, Color32::from_rgb(60, 160, 220)),
         );
 
         // Signal-bar icon (3 bars, left side)
@@ -2562,7 +2570,7 @@ pub(crate) fn draw_oled(
         painter.rect_stroke(
             screen_rect,
             3.0,
-            Stroke::new(1.0, Color32::from_rgb(32, 36, 42)),
+            Stroke::new(1.0_f32, Color32::from_rgb(32, 36, 42)),
             StrokeKind::Outside,
         );
         painter.text(
@@ -2605,21 +2613,21 @@ pub(crate) fn draw_breadboard(painter: &egui::Painter, rect: Rect, stroke: Strok
             Pos2::new(rect.left() + 14.0, plus_y),
             Pos2::new(rect.right() - 14.0, plus_y),
         ],
-        Stroke::new(2.0, Color32::from_rgb(255, 185, 80)),
+        Stroke::new(2.0_f32, Color32::from_rgb(255, 185, 80)),
     );
     painter.line_segment(
         [
             Pos2::new(rect.left() + 14.0, minus_y),
             Pos2::new(rect.right() - 14.0, minus_y),
         ],
-        Stroke::new(2.0, Color32::from_rgb(120, 190, 255)),
+        Stroke::new(2.0_f32, Color32::from_rgb(120, 190, 255)),
     );
     painter.line_segment(
         [
             Pos2::new(rect.center().x, rect.top() + 66.0),
             Pos2::new(rect.center().x, rect.bottom() - 14.0),
         ],
-        Stroke::new(1.4, Color32::from_rgb(80, 85, 92)),
+        Stroke::new(1.4_f32, Color32::from_rgb(80, 85, 92)),
     );
 
     let hole = Color32::from_rgb(70, 76, 84);

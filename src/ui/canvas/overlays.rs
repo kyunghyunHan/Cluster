@@ -35,7 +35,7 @@ pub(crate) fn draw_probe_card(
     painter.rect_stroke(
         card,
         3.0,
-        Stroke::new(1.0, theme::STROKE_PANEL),
+        Stroke::new(1.0_f32, theme::STROKE_PANEL),
         StrokeKind::Outside,
     );
     for (index, line) in lines.iter().enumerate() {

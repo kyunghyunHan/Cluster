@@ -1243,27 +1243,26 @@ fn check_missing_values(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
                     });
                 }
             }
-            ComponentKind::Battery | ComponentKind::VSource => {
+            ComponentKind::Battery | ComponentKind::VSource
                 if pin.component_value.trim().is_empty()
-                    || parse_metric_value(&pin.component_value, "v").is_none()
-                {
-                    seen.insert(pin.component_id);
-                    v.push(ErcViolation {
-                        rule: ErcRule::MissingValue,
-                        severity: ErcSeverity::Warning,
-                        component_id: Some(pin.component_id),
-                        wire_id: None,
-                        message: format!(
-                            "{} {} has no valid voltage value.",
-                            if pin.component_kind == ComponentKind::Battery {
-                                "Battery"
-                            } else {
-                                "Voltage source"
-                            },
-                            pin.component_label
-                        ),
-                    });
-                }
+                    || parse_metric_value(&pin.component_value, "v").is_none() =>
+            {
+                seen.insert(pin.component_id);
+                v.push(ErcViolation {
+                    rule: ErcRule::MissingValue,
+                    severity: ErcSeverity::Warning,
+                    component_id: Some(pin.component_id),
+                    wire_id: None,
+                    message: format!(
+                        "{} {} has no valid voltage value.",
+                        if pin.component_kind == ComponentKind::Battery {
+                            "Battery"
+                        } else {
+                            "Voltage source"
+                        },
+                        pin.component_label
+                    ),
+                });
             }
             _ => {}
         }

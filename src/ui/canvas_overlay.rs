@@ -18,7 +18,7 @@ pub(crate) fn draw_simulation_legend(
     painter.rect_stroke(
         rect,
         6.0,
-        Stroke::new(1.0, Color32::from_rgb(58, 68, 80)),
+        Stroke::new(1.0_f32, Color32::from_rgb(58, 68, 80)),
         egui::StrokeKind::Outside,
     );
     painter.text(
@@ -35,7 +35,7 @@ pub(crate) fn draw_simulation_legend(
             Pos2::new(rect.left() + 12.0, y1),
             Pos2::new(rect.left() + 54.0, y1),
         ],
-        Stroke::new(3.0, Color32::from_rgb(255, 176, 64)),
+        Stroke::new(3.0_f32, Color32::from_rgb(255, 176, 64)),
     );
     painter.text(
         Pos2::new(rect.left() + 64.0, y1 - 7.0),
@@ -51,7 +51,7 @@ pub(crate) fn draw_simulation_legend(
             Pos2::new(rect.left() + 12.0, y2),
             Pos2::new(rect.left() + 54.0, y2),
         ],
-        Stroke::new(2.0, Color32::from_rgb(80, 132, 220)),
+        Stroke::new(2.0_f32, Color32::from_rgb(80, 132, 220)),
     );
     painter.text(
         Pos2::new(rect.left() + 64.0, y2 - 7.0),

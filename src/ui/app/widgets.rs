@@ -28,7 +28,7 @@ pub(crate) fn apply_app_style(ctx: &egui::Context) {
     visuals.widgets.inactive.bg_fill = Color32::from_rgb(31, 36, 43);
     visuals.widgets.hovered.bg_fill = Color32::from_rgb(43, 50, 59);
     visuals.widgets.active.bg_fill = Color32::from_rgb(46, 58, 68);
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(52, 58, 66));
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(52, 58, 66));
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
@@ -51,7 +51,7 @@ pub(crate) fn compact_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
         egui::Button::new(egui::RichText::new(label).color(Color32::from_rgb(215, 222, 230)))
             .fill(Color32::from_rgb(31, 36, 43))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(56, 64, 74)))
+            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(56, 64, 74)))
             .min_size(Vec2::new(74.0, 26.0)),
     )
 }
@@ -65,7 +65,7 @@ pub(crate) fn palette_action(ui: &mut egui::Ui, label: &str) -> egui::Response {
                 .color(Color32::from_rgb(216, 224, 232)),
         )
         .fill(Color32::from_rgb(28, 33, 39))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(48, 56, 64))),
+        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 56, 64))),
     )
 }
 
@@ -119,7 +119,7 @@ pub(crate) fn status_pill(ui: &mut egui::Ui, text: &str, tone: StatusTone) {
     };
     egui::Frame::NONE
         .fill(fill)
-        .stroke(Stroke::new(1.0, stroke))
+        .stroke(Stroke::new(1.0_f32, stroke))
         .corner_radius(egui::CornerRadius::same(5))
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
@@ -386,7 +386,7 @@ pub(crate) fn render_lesson_report(ui: &mut egui::Ui, report: &LessonReport) {
 
     egui::Frame::NONE
         .fill(fill)
-        .stroke(Stroke::new(1.0, stroke))
+        .stroke(Stroke::new(1.0_f32, stroke))
         .corner_radius(egui::CornerRadius::same(5))
         .inner_margin(egui::Margin::symmetric(9, 7))
         .show(ui, |ui| {
@@ -485,7 +485,7 @@ pub(crate) fn palette_section(
     ui.add_space(3.0);
     egui::Frame::NONE
         .fill(Color32::from_rgb(23, 28, 35))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(58, 68, 80)))
+        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(58, 68, 80)))
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(5, 3))
         .show(ui, |ui| {

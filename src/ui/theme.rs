@@ -86,7 +86,7 @@ pub(crate) const SIMULATION_START_MS: u64 = 700;
 pub(crate) fn panel_frame() -> egui::Frame {
     egui::Frame::NONE
         .fill(BG_PANEL)
-        .stroke(Stroke::new(1.0, STROKE_PANEL))
+        .stroke(Stroke::new(1.0_f32, STROKE_PANEL))
         .corner_radius(egui::CornerRadius::same(PANEL_RADIUS))
         .inner_margin(egui::Margin::symmetric(6, 4))
 }
@@ -94,16 +94,16 @@ pub(crate) fn panel_frame() -> egui::Frame {
 pub(crate) fn card_frame() -> egui::Frame {
     egui::Frame::NONE
         .fill(BG_PANEL_DARK)
-        .stroke(Stroke::new(1.0, STROKE_MUTED))
+        .stroke(Stroke::new(1.0_f32, STROKE_MUTED))
         .corner_radius(egui::CornerRadius::same(CARD_RADIUS))
         .inner_margin(egui::Margin::symmetric(6, 5))
 }
 
 pub(crate) fn tool_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
     let (fill, stroke, text) = if active {
-        (BG_ACTIVE, Stroke::new(1.0, ACCENT), Color32::WHITE)
+        (BG_ACTIVE, Stroke::new(1.0_f32, ACCENT), Color32::WHITE)
     } else {
-        (BG_BUTTON, Stroke::new(1.0, STROKE_MUTED), TEXT_PRIMARY)
+        (BG_BUTTON, Stroke::new(1.0_f32, STROKE_MUTED), TEXT_PRIMARY)
     };
     ui.add(
         egui::Button::new(egui::RichText::new(label).size(11.0).color(text))

@@ -63,7 +63,7 @@ pub(crate) fn draw_minimap(
     painter.rect_stroke(
         mm_rect,
         4.0,
-        Stroke::new(1.0, Color32::from_rgb(50, 65, 85)),
+        Stroke::new(1.0_f32, Color32::from_rgb(50, 65, 85)),
         egui::StrokeKind::Middle,
     );
 
@@ -72,7 +72,7 @@ pub(crate) fn draw_minimap(
         for seg in wire.points.windows(2) {
             painter.line_segment(
                 [to_mm(seg[0]), to_mm(seg[1])],
-                Stroke::new(1.0, Color32::from_rgb(70, 130, 200)),
+                Stroke::new(1.0_f32, Color32::from_rgb(70, 130, 200)),
             );
         }
     }
@@ -98,7 +98,7 @@ pub(crate) fn draw_minimap(
         painter.rect_stroke(
             vp_rect,
             2.0,
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(80, 180, 255, 140)),
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(80, 180, 255, 140)),
             egui::StrokeKind::Middle,
         );
     }
@@ -207,7 +207,7 @@ pub(crate) fn draw_node_voltage_indicators(
                         painter.circle_stroke(
                             sp,
                             5.5,
-                            Stroke::new(1.0, Color32::from_rgb(20, 24, 30)),
+                            Stroke::new(1.0_f32, Color32::from_rgb(20, 24, 30)),
                         );
                         // Show voltage label at junctions (only when zoom is high enough)
                         if view.zoom >= 0.8 {
@@ -288,7 +288,7 @@ pub(crate) fn draw_sim_summary(
         bg,
         4.0,
         Stroke::new(
-            1.0,
+            1.0_f32,
             if simulation.shorted {
                 Color32::from_rgb(220, 60, 60)
             } else if simulation.status == SimulationStatus::Ok {
@@ -346,7 +346,7 @@ pub(crate) fn draw_title_block(
     painter.rect_stroke(
         rect,
         4.0,
-        Stroke::new(1.0, Color32::from_rgb(60, 70, 82)),
+        Stroke::new(1.0_f32, Color32::from_rgb(60, 70, 82)),
         StrokeKind::Outside,
     );
 
@@ -356,7 +356,7 @@ pub(crate) fn draw_title_block(
                 Pos2::new(rect.left() + 10.0, rect.top() + y),
                 Pos2::new(rect.right() - 10.0, rect.top() + y),
             ],
-            Stroke::new(1.0, Color32::from_rgb(50, 58, 68)),
+            Stroke::new(1.0_f32, Color32::from_rgb(50, 58, 68)),
         )
     };
 
@@ -467,7 +467,7 @@ pub(crate) fn draw_empty_canvas_hint(painter: &egui::Painter, canvas: Rect) {
     painter.rect_stroke(
         rect,
         6.0,
-        Stroke::new(1.0, Color32::from_rgb(58, 66, 76)),
+        Stroke::new(1.0_f32, Color32::from_rgb(58, 66, 76)),
         StrokeKind::Outside,
     );
     painter.text(

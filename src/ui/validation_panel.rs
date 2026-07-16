@@ -148,7 +148,7 @@ fn render_violation_row(
 fn simulation_support_chip(ui: &mut egui::Ui, label: &str) {
     egui::Frame::NONE
         .fill(Color32::from_rgb(28, 34, 42))
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(56, 68, 80)))
+        .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(56, 68, 80)))
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(6, 2))
         .show(ui, |ui| {

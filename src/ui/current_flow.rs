@@ -264,7 +264,7 @@ pub(crate) fn render_current_flow(
                         input.view.to_screen(segment.end),
                     ],
                     Stroke::new(
-                        if emphasized { 4.5 } else { 3.2 },
+                        if emphasized { 4.5_f32 } else { 3.2_f32 },
                         theme::CURRENT_GLOW
                             .gamma_multiply(alpha as f32 / 255.0 * input.startup_progress),
                     ),
