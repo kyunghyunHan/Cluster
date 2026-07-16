@@ -1,4 +1,5 @@
 use crate::commands::ChangeSet;
+use crate::commands::context::{CommandContext, CommandOutcome};
 use crate::model::{Component, ComponentKind, Wire};
 use egui::{Pos2, Vec2};
 use std::collections::HashMap;
@@ -25,15 +26,17 @@ pub(crate) enum ComponentCommand {
 }
 
 impl ComponentCommand {
-    pub(crate) fn apply(self, app: &mut crate::CircuitApp) -> ChangeSet {
+    pub(crate) fn apply(self, context: &mut CommandContext<'_>) -> CommandOutcome {
         match self {
             Self::Place { kind, position } => {
-                app.place_component(kind, position);
-                app.status = "Component placed. Drag to reposition, R to rotate.".to_string();
+                context.place_component(kind, position);
+                return CommandOutcome::new(ChangeSet::schematic())
+                    .with_status("Component placed. Drag to reposition, R to rotate.");
             }
             Self::PlaceCustom { part_id, position } => {
-                app.place_custom_component(&part_id, position);
-                app.status = "Custom part placed. Drag to reposition, R to rotate.".to_string();
+                context.place_custom_component(&part_id, position);
+                return CommandOutcome::new(ChangeSet::schematic())
+                    .with_status("Custom part placed. Drag to reposition, R to rotate.");
             }
             Self::Paste {
                 components,
@@ -43,14 +46,14 @@ impl ComponentCommand {
                 let mut id_map = HashMap::new();
                 let mut new_ids = Vec::new();
                 for source in components {
-                    let new_id = app.next_id();
+                    let new_id = context.next_id();
                     id_map.insert(source.id, new_id);
                     let new_label = if source.kind == ComponentKind::Custom {
-                        app.next_custom_label(source.part_id.as_deref())
+                        context.next_custom_label(source.part_id.as_deref())
                     } else {
-                        app.next_label(source.kind)
+                        context.next_label(source.kind)
                     };
-                    app.components.push(Component {
+                    context.components_mut().push(Component {
                         id: new_id,
                         kind: source.kind,
                         pos: source.pos + offset,
@@ -63,48 +66,48 @@ impl ComponentCommand {
                 }
                 let wire_count = wires.len();
                 for source in wires {
-                    let new_wire_id = app.next_id();
+                    let new_wire_id = context.next_id();
                     let points = source
                         .points
                         .into_iter()
                         .map(|point| point + offset)
                         .collect();
-                    app.wires.push(Wire::new(new_wire_id, points));
+                    context.wires_mut().push(Wire::new(new_wire_id, points));
                 }
-                app.editor.multi_selected = new_ids.iter().copied().collect();
-                app.editor.selected = None;
-                app.status = format!(
+                context.set_multi_selected(new_ids.iter().copied().collect());
+                context.set_selected(None);
+                return CommandOutcome::new(ChangeSet::schematic()).with_status(format!(
                     "Pasted {} component(s) + {} wire(s).",
                     new_ids.len(),
                     wire_count
-                );
+                ));
             }
             Self::Move {
                 component_ids,
                 delta,
             } => {
                 if delta.length_sq() <= 0.01 {
-                    return ChangeSet::none();
+                    return CommandOutcome::unchanged();
                 }
-                let old_pins = app
-                    .components
+                let old_pins = context
+                    .components()
                     .iter()
                     .filter(|component| component_ids.contains(&component.id))
                     .flat_map(crate::component_pins)
                     .collect::<Vec<_>>();
-                for component in &mut app.components {
+                for component in context.components_mut() {
                     if component_ids.contains(&component.id) {
                         component.pos += delta;
                     }
                 }
-                let new_pins = app
-                    .components
+                let new_pins = context
+                    .components()
                     .iter()
                     .filter(|component| component_ids.contains(&component.id))
                     .flat_map(crate::component_pins)
                     .collect::<Vec<_>>();
-                crate::move_attached_wire_endpoints(&mut app.wires, &old_pins, &new_pins);
-                for wire in &mut app.wires {
+                crate::move_attached_wire_endpoints(context.wires_mut(), &old_pins, &new_pins);
+                for wire in context.wires_mut() {
                     if wire.points.len() > 2 {
                         let first = wire.points[0];
                         let Some(&last) = wire.points.last() else {
@@ -119,6 +122,6 @@ impl ComponentCommand {
                 }
             }
         }
-        ChangeSet::schematic()
+        CommandOutcome::new(ChangeSet::schematic())
     }
 }

@@ -4,6 +4,7 @@
 //! production code allowed to mutate schematic collections directly.
 
 pub(crate) mod component;
+mod context;
 pub(crate) mod document;
 pub(crate) mod lessons;
 pub(crate) mod pcb;
@@ -12,6 +13,7 @@ pub(crate) mod selection;
 pub(crate) mod wiring;
 
 use component::ComponentCommand;
+use context::{CommandContext, CommandOutcome, CommandPostAction};
 use document::DocumentCommand;
 use lessons::LessonCommand;
 use pcb::PcbCommand;
@@ -22,42 +24,64 @@ use wiring::WiringCommand;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ChangeSet {
     pub(crate) document_changed: bool,
-    pub(crate) connectivity_changed: bool,
-    pub(crate) electrical_changed: bool,
-    pub(crate) board_changed: bool,
-    pub(crate) visual_only: bool,
-    pub(crate) autosave_eligible: bool,
+    pub(crate) connectivity_dirty: bool,
+    pub(crate) validation_dirty: bool,
+    pub(crate) simulation_dirty: bool,
+    pub(crate) pcb_dirty: bool,
+    pub(crate) autosave_dirty: bool,
 }
 
 impl ChangeSet {
     pub(crate) const fn schematic() -> Self {
         Self {
             document_changed: true,
-            connectivity_changed: true,
-            electrical_changed: true,
-            board_changed: false,
-            visual_only: false,
-            autosave_eligible: true,
+            connectivity_dirty: true,
+            validation_dirty: true,
+            simulation_dirty: true,
+            pcb_dirty: true,
+            autosave_dirty: true,
+        }
+    }
+
+    pub(crate) const fn properties() -> Self {
+        Self {
+            document_changed: true,
+            connectivity_dirty: false,
+            validation_dirty: true,
+            simulation_dirty: true,
+            pcb_dirty: true,
+            autosave_dirty: true,
+        }
+    }
+
+    pub(crate) const fn board() -> Self {
+        Self {
+            document_changed: true,
+            connectivity_dirty: false,
+            validation_dirty: false,
+            simulation_dirty: false,
+            pcb_dirty: true,
+            autosave_dirty: true,
         }
     }
 
     pub(crate) const fn none() -> Self {
         Self {
             document_changed: false,
-            connectivity_changed: false,
-            electrical_changed: false,
-            board_changed: false,
-            visual_only: false,
-            autosave_eligible: false,
+            connectivity_dirty: false,
+            validation_dirty: false,
+            simulation_dirty: false,
+            pcb_dirty: false,
+            autosave_dirty: false,
         }
     }
 
     pub(crate) const fn needs_repaint(self) -> bool {
         self.document_changed
-            || self.connectivity_changed
-            || self.electrical_changed
-            || self.board_changed
-            || self.visual_only
+            || self.connectivity_dirty
+            || self.validation_dirty
+            || self.simulation_dirty
+            || self.pcb_dirty
     }
 }
 
@@ -130,15 +154,15 @@ impl EditorCommand {
         }
     }
 
-    pub(crate) fn apply(self, app: &mut crate::CircuitApp) -> ChangeSet {
+    fn apply(self, context: &mut CommandContext<'_>) -> CommandOutcome {
         match self {
-            Self::Component(command) => command.apply(app),
-            Self::Wiring(command) => command.apply(app),
-            Self::Selection(command) => command.apply(app),
-            Self::Properties(command) => command.apply(app),
-            Self::Document(command) => command.apply(app),
-            Self::Pcb(command) => command.apply(app),
-            Self::Lesson(command) => command.apply(app),
+            Self::Component(command) => command.apply(context),
+            Self::Wiring(command) => command.apply(context),
+            Self::Selection(command) => command.apply(context),
+            Self::Properties(command) => command.apply(context),
+            Self::Document(command) => command.apply(context),
+            Self::Pcb(command) => command.apply(context),
+            Self::Lesson(command) => command.apply(context),
         }
     }
 }
@@ -148,8 +172,9 @@ impl crate::CircuitApp {
         let snapshot = self.snapshot();
         let description = command.description();
         let merge_key = command.merge_key();
-        let changes = command.apply(self);
-        if changes.document_changed || changes.board_changed {
+        let outcome = command.apply(&mut CommandContext::new(self));
+        let changes = outcome.changes;
+        if changes.document_changed {
             let merges_with_previous = merge_key.is_some()
                 && self.editor.history.undo.last().is_some_and(|entry| {
                     entry.merge_key == merge_key
@@ -169,6 +194,7 @@ impl crate::CircuitApp {
             self.editor.history.redo.clear();
         }
         self.dispatch_changes(changes);
+        self.apply_command_outcome(outcome);
         changes
     }
 
@@ -176,32 +202,46 @@ impl crate::CircuitApp {
         &mut self,
         command: EditorCommand,
     ) -> ChangeSet {
-        let changes = command.apply(self);
+        let outcome = command.apply(&mut CommandContext::new(self));
+        let changes = outcome.changes;
         self.dispatch_changes(changes);
+        self.apply_command_outcome(outcome);
         changes
     }
 
+    fn apply_command_outcome(&mut self, outcome: CommandOutcome) {
+        if let Some(status) = outcome.status {
+            self.status = status;
+        }
+        if outcome.post_action == CommandPostAction::ResetWorkspaceView {
+            self.hovered_net_wire = None;
+            self.highlighted_net_wires.clear();
+            self.inline_edit = None;
+            self.context_menu = None;
+            self.zoom = 1.0;
+            self.pan = egui::Vec2::ZERO;
+        }
+    }
+
     pub(crate) fn dispatch_changes(&mut self, changes: ChangeSet) {
-        if changes.autosave_eligible {
+        if changes.autosave_dirty {
             self.editor.history.dirty = true;
         }
         self.analysis.dirty_flags.geometry_dirty |= changes.document_changed;
-        self.analysis.dirty_flags.connectivity_dirty |= changes.connectivity_changed;
-        self.analysis.dirty_flags.validation_dirty |=
-            changes.connectivity_changed || changes.electrical_changed;
-        self.analysis.dirty_flags.simulation_dirty |=
-            changes.connectivity_changed || changes.electrical_changed;
-        self.analysis.dirty_flags.pcb_sync_dirty |= changes.connectivity_changed;
-        self.analysis.dirty_flags.pcb_drc_dirty |= changes.board_changed;
-        if changes.board_changed {
+        self.analysis.dirty_flags.connectivity_dirty |= changes.connectivity_dirty;
+        self.analysis.dirty_flags.validation_dirty |= changes.validation_dirty;
+        self.analysis.dirty_flags.simulation_dirty |= changes.simulation_dirty;
+        self.analysis.dirty_flags.pcb_sync_dirty |= changes.connectivity_dirty;
+        self.analysis.dirty_flags.pcb_drc_dirty |= changes.pcb_dirty;
+        if changes.pcb_dirty {
             self.analysis.pcb_drc.clear();
         }
-        if changes.connectivity_changed {
+        if changes.connectivity_dirty {
             self.invalidate_connectivity_cache();
-        } else if changes.electrical_changed {
+        } else if changes.simulation_dirty {
             self.invalidate_simulation_cache();
         }
-        if changes.connectivity_changed || changes.electrical_changed {
+        if changes.simulation_dirty {
             self.simulation_run_state = if self.simulate {
                 crate::ui::app::SimulationRunState::Dirty
             } else {
@@ -222,11 +262,11 @@ mod tests {
     fn schematic_change_has_precise_invalidation_semantics() {
         let dirty = ChangeSet::schematic();
         assert!(dirty.document_changed);
-        assert!(dirty.connectivity_changed);
-        assert!(!dirty.board_changed);
-        assert!(!dirty.visual_only);
-        assert!(dirty.electrical_changed);
-        assert!(dirty.autosave_eligible);
+        assert!(dirty.connectivity_dirty);
+        assert!(dirty.validation_dirty);
+        assert!(dirty.simulation_dirty);
+        assert!(dirty.pcb_dirty);
+        assert!(dirty.autosave_dirty);
     }
 
     #[test]
@@ -266,8 +306,9 @@ mod tests {
             })));
 
         assert_eq!(app.document.board.tracks.len(), 1);
-        assert!(changes.board_changed);
-        assert!(!changes.connectivity_changed);
+        assert!(changes.document_changed);
+        assert!(changes.pcb_dirty);
+        assert!(!changes.connectivity_dirty);
         assert_eq!(app.analysis.circuit_revision, revision);
         assert!(app.analysis.dirty_flags.pcb_drc_dirty);
 

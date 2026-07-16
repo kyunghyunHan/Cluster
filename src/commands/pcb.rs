@@ -1,4 +1,5 @@
 use crate::commands::ChangeSet;
+use crate::commands::context::{CommandContext, CommandOutcome};
 use crate::model::cad::Point2;
 use crate::pcb::board::BoardOutline;
 use crate::pcb::track::TrackSegment;
@@ -16,69 +17,35 @@ pub(crate) enum PcbCommand {
 }
 
 impl PcbCommand {
-    pub(crate) fn apply(self, app: &mut crate::CircuitApp) -> ChangeSet {
+    pub(crate) fn apply(self, context: &mut CommandContext<'_>) -> CommandOutcome {
         let changed = match self {
             Self::MoveFootprint {
                 footprint_id,
                 position,
-            } => app
-                .document
-                .board
-                .footprints
-                .iter_mut()
-                .find(|footprint| footprint.id == footprint_id)
-                .is_some_and(|footprint| {
-                    footprint.position = position;
-                    footprint.placed = true;
-                    true
-                }),
+            } => context.move_footprint(footprint_id, position),
             Self::RotateFootprint {
                 footprint_id,
                 delta_deg,
-            } => app
-                .document
-                .board
-                .footprints
-                .iter_mut()
-                .find(|footprint| footprint.id == footprint_id)
-                .is_some_and(|footprint| {
-                    footprint.rotation_deg = (footprint.rotation_deg + delta_deg).rem_euclid(360.0);
-                    true
-                }),
+            } => context.rotate_footprint(footprint_id, delta_deg),
             Self::AddTrack(track) => {
-                app.document.board.tracks.push(track);
+                context.add_track(track);
                 true
             }
-            Self::RemoveTrack { track_id } => {
-                let before = app.document.board.tracks.len();
-                app.document
-                    .board
-                    .tracks
-                    .retain(|track| track.id != track_id);
-                before != app.document.board.tracks.len()
-            }
+            Self::RemoveTrack { track_id } => context.remove_track(track_id),
             Self::AddVia(via) => {
-                app.document.board.vias.push(via);
+                context.add_via(via);
                 true
             }
-            Self::RemoveVia { via_id } => {
-                let before = app.document.board.vias.len();
-                app.document.board.vias.retain(|via| via.id != via_id);
-                before != app.document.board.vias.len()
-            }
+            Self::RemoveVia { via_id } => context.remove_via(via_id),
             Self::SetOutline(outline) => {
-                app.document.board.outline = outline;
+                context.set_outline(outline);
                 true
             }
         };
         if changed {
-            ChangeSet {
-                board_changed: true,
-                autosave_eligible: true,
-                ..ChangeSet::none()
-            }
+            CommandOutcome::new(ChangeSet::board())
         } else {
-            ChangeSet::none()
+            CommandOutcome::unchanged()
         }
     }
 }

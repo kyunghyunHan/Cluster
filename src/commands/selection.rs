@@ -1,5 +1,6 @@
 use crate::app::{AlignDir, Selection};
 use crate::commands::ChangeSet;
+use crate::commands::context::{CommandContext, CommandOutcome};
 use crate::{Component, component_pins};
 use egui::Vec2;
 
@@ -12,50 +13,55 @@ pub(crate) enum SelectionCommand {
 }
 
 impl SelectionCommand {
-    pub(crate) fn apply(self, app: &mut crate::CircuitApp) -> ChangeSet {
+    pub(crate) fn apply(self, context: &mut CommandContext<'_>) -> CommandOutcome {
         match self {
             Self::Delete => {
-                if !app.editor.multi_selected.is_empty() {
-                    let count = app.editor.multi_selected.len();
-                    let selected = app.editor.multi_selected.clone();
-                    app.components
+                if !context.multi_selected().is_empty() {
+                    let selected = context.multi_selected().clone();
+                    let count = selected.len();
+                    context
+                        .components_mut()
                         .retain(|component| !selected.contains(&component.id));
-                    app.editor.multi_selected.clear();
-                    app.editor.selected = None;
-                    app.status = format!("Deleted {count} component(s).");
+                    context.clear_multi_selected();
+                    context.set_selected(None);
+                    CommandOutcome::new(ChangeSet::schematic())
+                        .with_status(format!("Deleted {count} component(s)."))
                 } else {
-                    match app.editor.selected.take() {
+                    match context.take_selected() {
                         Some(Selection::Component(id)) => {
-                            app.components.retain(|component| component.id != id);
-                            app.status = "Component deleted.".to_string();
+                            context
+                                .components_mut()
+                                .retain(|component| component.id != id);
+                            CommandOutcome::new(ChangeSet::schematic())
+                                .with_status("Component deleted.")
                         }
                         Some(Selection::Wire(id)) => {
-                            app.wires.retain(|wire| wire.id != id);
-                            app.status = "Wire deleted.".to_string();
+                            context.wires_mut().retain(|wire| wire.id != id);
+                            CommandOutcome::new(ChangeSet::schematic()).with_status("Wire deleted.")
                         }
                         None => {
-                            app.status = "Nothing selected to delete.".to_string();
-                            return ChangeSet::none();
+                            CommandOutcome::unchanged().with_status("Nothing selected to delete.")
                         }
                     }
                 }
             }
             Self::Rotate => {
-                let Some(Selection::Component(id)) = app.editor.selected else {
-                    return ChangeSet::none();
+                let Some(Selection::Component(id)) = context.selected() else {
+                    return CommandOutcome::unchanged();
                 };
-                let Some(index) = app
-                    .components
+                let Some(index) = context
+                    .components()
                     .iter()
                     .position(|component| component.id == id)
                 else {
-                    return ChangeSet::none();
+                    return CommandOutcome::unchanged();
                 };
-                let old_pins = component_pins(&app.components[index]);
-                app.components[index].rotation = (app.components[index].rotation + 90) % 360;
-                let new_pins = component_pins(&app.components[index]);
-                crate::move_attached_wire_endpoints(&mut app.wires, &old_pins, &new_pins);
-                for wire in &mut app.wires {
+                let old_pins = component_pins(&context.components()[index]);
+                context.components_mut()[index].rotation =
+                    (context.components()[index].rotation + 90) % 360;
+                let new_pins = component_pins(&context.components()[index]);
+                crate::move_attached_wire_endpoints(context.wires_mut(), &old_pins, &new_pins);
+                for wire in context.wires_mut() {
                     if wire.points.len() > 2 {
                         let first = wire.points[0];
                         let Some(&last) = wire.points.last() else {
@@ -68,55 +74,59 @@ impl SelectionCommand {
                         }
                     }
                 }
-                app.status = "Rotated and kept attached wires on pins.".to_string();
+                CommandOutcome::new(ChangeSet::schematic())
+                    .with_status("Rotated and kept attached wires on pins.")
             }
             Self::Duplicate => {
-                let sources = if !app.editor.multi_selected.is_empty() {
-                    app.components
+                let sources = if !context.multi_selected().is_empty() {
+                    context
+                        .components()
                         .iter()
-                        .filter(|component| app.editor.multi_selected.contains(&component.id))
+                        .filter(|component| context.multi_selected().contains(&component.id))
                         .cloned()
                         .collect::<Vec<_>>()
-                } else if let Some(Selection::Component(id)) = app.editor.selected {
-                    app.components
+                } else if let Some(Selection::Component(id)) = context.selected() {
+                    context
+                        .components()
                         .iter()
                         .find(|component| component.id == id)
                         .cloned()
                         .into_iter()
                         .collect()
                 } else {
-                    app.status = "Select a component to duplicate.".to_string();
-                    return ChangeSet::none();
+                    return CommandOutcome::unchanged()
+                        .with_status("Select a component to duplicate.");
                 };
-                let offset = Vec2::new(app.grid * 2.0, app.grid * 2.0);
+                let offset = Vec2::new(context.grid() * 2.0, context.grid() * 2.0);
                 let mut new_ids = Vec::new();
                 for source in sources {
                     let mut duplicate: Component = source;
-                    duplicate.id = app.next_id();
+                    duplicate.id = context.next_id();
                     duplicate.pos += offset;
-                    duplicate.label = app.next_label(duplicate.kind);
+                    duplicate.label = context.next_label(duplicate.kind);
                     new_ids.push(duplicate.id);
-                    app.components.push(duplicate);
+                    context.components_mut().push(duplicate);
                 }
                 if new_ids.len() == 1 {
-                    app.editor.selected = Some(Selection::Component(new_ids[0]));
-                    app.status = "Component duplicated.".to_string();
+                    context.set_selected(Some(Selection::Component(new_ids[0])));
+                    CommandOutcome::new(ChangeSet::schematic()).with_status("Component duplicated.")
                 } else {
-                    app.editor.multi_selected = new_ids.iter().copied().collect();
-                    app.editor.selected = None;
-                    app.status = format!("Duplicated {} component(s).", new_ids.len());
+                    context.set_multi_selected(new_ids.iter().copied().collect());
+                    context.set_selected(None);
+                    CommandOutcome::new(ChangeSet::schematic())
+                        .with_status(format!("Duplicated {} component(s).", new_ids.len()))
                 }
             }
             Self::Align(direction) => {
-                let ids = selected_component_ids(app);
-                let positions = app
-                    .components
+                let ids = selected_component_ids(context);
+                let positions = context
+                    .components()
                     .iter()
                     .filter(|component| ids.contains(&component.id))
                     .map(|component| component.pos)
                     .collect::<Vec<_>>();
                 if positions.len() < 2 {
-                    return ChangeSet::none();
+                    return CommandOutcome::unchanged();
                 }
                 let target = match direction {
                     AlignDir::Left => positions
@@ -144,7 +154,7 @@ impl SelectionCommand {
                             / positions.len() as f32
                     }
                 };
-                for component in &mut app.components {
+                for component in context.components_mut() {
                     if ids.contains(&component.id) {
                         match direction {
                             AlignDir::Left | AlignDir::Right | AlignDir::CenterH => {
@@ -156,15 +166,16 @@ impl SelectionCommand {
                         }
                     }
                 }
-                app.status = format!("Aligned {} components.", positions.len());
+                CommandOutcome::new(ChangeSet::schematic())
+                    .with_status(format!("Aligned {} components.", positions.len()))
             }
             Self::Distribute { vertical } => {
-                let ids = selected_component_ids(app);
+                let ids = selected_component_ids(context);
                 if ids.len() < 3 {
-                    return ChangeSet::none();
+                    return CommandOutcome::unchanged();
                 }
-                let mut ordered = app
-                    .components
+                let mut ordered = context
+                    .components()
                     .iter()
                     .filter(|component| ids.contains(&component.id))
                     .map(|component| {
@@ -183,12 +194,12 @@ impl SelectionCommand {
                     ordered.first().map(|row| row.1),
                     ordered.last().map(|row| row.1),
                 ) else {
-                    return ChangeSet::none();
+                    return CommandOutcome::unchanged();
                 };
                 let step = (last - first) / (ordered.len() as f32 - 1.0);
                 for (index, (id, _)) in ordered.iter().enumerate() {
-                    if let Some(component) = app
-                        .components
+                    if let Some(component) = context
+                        .components_mut()
                         .iter_mut()
                         .find(|component| component.id == *id)
                     {
@@ -199,17 +210,17 @@ impl SelectionCommand {
                         }
                     }
                 }
-                app.status = format!("Distributed {} components.", ids.len());
+                CommandOutcome::new(ChangeSet::schematic())
+                    .with_status(format!("Distributed {} components.", ids.len()))
             }
         }
-        ChangeSet::schematic()
     }
 }
 
-fn selected_component_ids(app: &crate::CircuitApp) -> Vec<u64> {
-    if !app.editor.multi_selected.is_empty() {
-        app.editor.multi_selected.iter().copied().collect()
-    } else if let Some(Selection::Component(id)) = app.editor.selected {
+fn selected_component_ids(context: &CommandContext<'_>) -> Vec<u64> {
+    if !context.multi_selected().is_empty() {
+        context.multi_selected().iter().copied().collect()
+    } else if let Some(Selection::Component(id)) = context.selected() {
         vec![id]
     } else {
         Vec::new()

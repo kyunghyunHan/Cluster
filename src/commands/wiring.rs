@@ -1,4 +1,5 @@
 use crate::commands::ChangeSet;
+use crate::commands::context::{CommandContext, CommandOutcome};
 use crate::model::Wire;
 use egui::Pos2;
 
@@ -20,60 +21,63 @@ pub(crate) enum WiringCommand {
 }
 
 impl WiringCommand {
-    pub(crate) fn apply(self, app: &mut crate::CircuitApp) -> ChangeSet {
+    pub(crate) fn apply(self, context: &mut CommandContext<'_>) -> CommandOutcome {
         match self {
             Self::Add { points } => {
                 let points = crate::simplify_wire(points);
                 if points.len() < 2 {
-                    return ChangeSet::none();
+                    return CommandOutcome::unchanged();
                 }
                 let endpoints = [points.first().copied(), points.last().copied()];
                 for endpoint in endpoints.into_iter().flatten() {
-                    app.split_wire_at_point(endpoint);
+                    context.split_wire_at_point(endpoint);
                 }
-                let start = app.infer_wire_endpoint(points[0]);
-                let end = app.infer_wire_endpoint(*points.last().unwrap_or(&points[0]));
-                let id = app.next_id();
-                app.wires.push(Wire::with_endpoints(id, points, start, end));
-                app.status = "Wire placed.".to_string();
+                let start = context.infer_wire_endpoint(points[0]);
+                let end = context.infer_wire_endpoint(*points.last().unwrap_or(&points[0]));
+                let id = context.next_id();
+                context
+                    .wires_mut()
+                    .push(Wire::with_endpoints(id, points, start, end));
+                return CommandOutcome::new(ChangeSet::schematic()).with_status("Wire placed.");
             }
             Self::MoveControlPoint {
                 wire_id,
                 point_index,
                 position,
             } => crate::ui::app::move_wire_control_point(
-                &mut app.wires,
+                context.wires_mut(),
                 wire_id,
                 point_index,
                 position,
             ),
             Self::InsertControlPoint { position } => {
                 let Some((wire_id, point_index)) =
-                    crate::ui::app::insert_wire_control_point(position, &mut app.wires)
+                    crate::ui::app::insert_wire_control_point(position, context.wires_mut())
                 else {
-                    return ChangeSet::none();
+                    return CommandOutcome::unchanged();
                 };
-                app.editor.drag = Some(crate::DragState::WirePoint {
+                context.set_drag(Some(crate::DragState::WirePoint {
                     wire_id,
                     point_index,
-                });
-                app.editor.selected = Some(crate::app::Selection::Wire(wire_id));
+                }));
+                context.set_selected(Some(crate::app::Selection::Wire(wire_id)));
             }
             Self::Tidy { wire_id } => {
                 let mut count = 0;
-                for wire in &mut app.wires {
+                for wire in context.wires_mut() {
                     if wire_id.is_none_or(|id| id == wire.id) {
                         crate::tidy_wire_points(wire);
                         count += 1;
                     }
                 }
-                app.status = if wire_id.is_some() {
+                let status = if wire_id.is_some() {
                     "Wire straightened.".to_string()
                 } else {
                     format!("Tidied {count} wire(s).")
                 };
+                return CommandOutcome::new(ChangeSet::schematic()).with_status(status);
             }
         }
-        ChangeSet::schematic()
+        CommandOutcome::new(ChangeSet::schematic())
     }
 }
