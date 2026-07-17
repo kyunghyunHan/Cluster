@@ -11,7 +11,8 @@ impl crate::CircuitApp {
             wires: self.wires.clone(),
             next_id: self.next_id,
             counters: self.counters.clone(),
-            pages: self.effective_pages(),
+            annotations: self.annotations.clone(),
+            pages: self.effective_project_pages(),
             current_page: self.current_page,
             board: self.document.board.clone(),
         }
@@ -22,14 +23,16 @@ impl crate::CircuitApp {
         self.wires = snapshot.wires;
         self.next_id = snapshot.next_id;
         self.counters = snapshot.counters;
+        self.annotations = snapshot.annotations;
         self.pages = if snapshot.pages.is_empty() {
-            vec![(
-                "Page 1".to_string(),
-                self.components.clone(),
-                self.wires.clone(),
-                self.next_id,
-                self.counters.clone(),
-            )]
+            vec![crate::model::ProjectPage {
+                name: "Page 1".to_string(),
+                components: self.components.clone(),
+                wires: self.wires.clone(),
+                next_id: self.next_id,
+                counters: self.counters.clone(),
+                annotations: self.annotations.clone(),
+            }]
         } else {
             snapshot.pages
         };

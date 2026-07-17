@@ -1395,13 +1395,13 @@ impl eframe::App for CircuitApp {
             let page_names = self
                 .pages
                 .iter()
-                .map(|page| page.0.clone())
+                .map(|page| page.name.clone())
                 .collect::<Vec<_>>();
             if let Some(action) = render_page_tabs(ui, &page_names, self.current_page) {
                 match action {
                     PageTabsAction::SwitchTo(idx) => self.switch_page(idx),
                     PageTabsAction::RenameDefault(idx) => {
-                        self.pages[idx].0 = format!("Page {}", idx + 1);
+                        self.pages[idx].name = format!("Page {}", idx + 1);
                     }
                     PageTabsAction::AddPage => self.add_page(),
                 }
@@ -1425,7 +1425,7 @@ impl eframe::App for CircuitApp {
             let page_name = self
                 .pages
                 .get(self.current_page)
-                .map(|page| page.0.as_str())
+                .map(|page| page.name.as_str())
                 .unwrap_or("Page");
             render_status_bar(
                 ui,

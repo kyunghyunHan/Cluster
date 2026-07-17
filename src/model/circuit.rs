@@ -1,4 +1,6 @@
 use super::component::{Component, ComponentKind};
+use super::net::SchematicAnnotations;
+use super::project::ProjectPage;
 use super::wire::{SavedWireEndpoint, Wire};
 use egui::Vec2;
 use serde::{Deserialize, Serialize};
@@ -48,8 +50,8 @@ pub(crate) struct CircuitSnapshot {
     pub(crate) wires: Vec<Wire>,
     pub(crate) next_id: u64,
     pub(crate) counters: Counters,
-    #[allow(clippy::type_complexity)] // Migrated to SchematicPage in the next storage schema.
-    pub(crate) pages: Vec<(String, Vec<Component>, Vec<Wire>, u64, Counters)>,
+    pub(crate) annotations: SchematicAnnotations,
+    pub(crate) pages: Vec<ProjectPage>,
     pub(crate) current_page: usize,
     /// Board data is stored in project-folder `board.json`, not schematic JSON.
     pub(crate) board: crate::pcb::board::Board,
@@ -110,14 +112,14 @@ pub(crate) struct SavedWire {
     pub(crate) end: Option<SavedWireEndpoint>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SavedJunctionDot {
     pub(crate) id: u64,
     pub(crate) x: f32,
     pub(crate) y: f32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SavedNoConnectMarker {
     pub(crate) id: u64,
     pub(crate) x: f32,

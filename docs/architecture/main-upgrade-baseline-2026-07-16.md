@@ -127,3 +127,27 @@ remain crate-visible.
 4. Remove remaining persistent mutation paths outside commands and migration.
 5. Build the dedicated PCB workspace and route state machine on that boundary.
 
+## 2026-07-18 implementation update
+
+- Replaced the runtime five-element page tuple with `ProjectPage`.
+- Added page-owned `SchematicAnnotations`; junction and no-connect records now
+  survive page switching, history snapshots, autosave, JSON save/load and
+  project-folder save/load.
+- Kept schematic JSON at schema 4. Existing `junction_dots` and
+  `no_connect_markers` fields are still read and written, so no file migration
+  is required.
+- Invalid or duplicate annotation records are dropped with load notes instead
+  of causing a panic.
+- The revision-cached app connectivity builder now passes document annotations
+  into the canonical graph. ERC, simulation, current-flow, Breadboard, PCB,
+  SPICE and code generation therefore consume the same annotated projection.
+- `CanonicalConnectivity` now exposes both legacy coordinate-to-net mapping and
+  stable `JunctionId`-to-`NetId` mapping.
+- Regression coverage verifies exact pin, junction-id, junction-position,
+  wire-segment and wire net equality after JSON round trips, plus independent
+  annotations on multiple pages.
+
+Remaining Phase 2 work is deliberately not reported as complete: the canvas
+still needs explicit junction/no-connect authoring commands and interaction
+states. The compatibility `CircuitApp` dereference boundary and the main
+builder body in `engine/netlist.rs` also remain extraction targets.

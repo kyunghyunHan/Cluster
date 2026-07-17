@@ -22,7 +22,8 @@ pub(crate) use custom_part::{
 pub(crate) use graph::{CanonicalConnectivity, ConnectivityDiagnostic, ConnectivityPoint, NetId};
 pub(crate) use ids::JunctionId;
 pub(crate) use net::{
-    CircuitNetlist, Net, NetLabelScope, NetlistAnnotations, NoConnectMarker, WireNetSegment,
+    CircuitNetlist, JunctionDot, Net, NetLabelScope, NetlistAnnotations, NoConnectDot,
+    NoConnectMarker, SchematicAnnotations, WireNetSegment,
 };
 pub(crate) use pin::{CircuitPin, ElectricalType, NetlistPin, PinRef, PinRole};
 // Only the items needed by code outside the model module are re-exported.
@@ -31,7 +32,7 @@ pub(crate) use pin::{CircuitPin, ElectricalType, NetlistPin, PinRef, PinRole};
 pub(crate) use pin_defs::{
     component_pin_defs, component_pins, component_size, module_pin_y, rotate_point,
 };
-pub(crate) use project::ProjectDocument;
+pub(crate) use project::{ProjectDocument, ProjectPage};
 pub(crate) use wire::{
     Wire, WireEndpoint, WireSegmentId, distance_to_segment, point_touches_wire_segment,
 };

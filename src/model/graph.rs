@@ -61,6 +61,7 @@ pub(crate) enum ConnectivityDiagnostic {
 pub(crate) struct CanonicalConnectivity {
     pub(crate) netlist: CircuitNetlist,
     pub(crate) pin_nets: HashMap<PinRef, NetId>,
+    pub(crate) junction_id_nets: HashMap<JunctionId, NetId>,
     pub(crate) junction_nets: HashMap<ConnectivityPoint, NetId>,
     pub(crate) wire_segment_nets: HashMap<WireSegmentId, NetId>,
     pub(crate) diagnostics: Vec<ConnectivityDiagnostic>,
@@ -76,6 +77,10 @@ impl CanonicalConnectivity {
         self.junction_nets
             .get(&ConnectivityPoint::from(position))
             .copied()
+    }
+
+    pub(crate) fn net_for_junction_id(&self, junction_id: JunctionId) -> Option<NetId> {
+        self.junction_id_nets.get(&junction_id).copied()
     }
 
     pub(crate) fn net_for_segment(&self, segment: WireSegmentId) -> Option<NetId> {

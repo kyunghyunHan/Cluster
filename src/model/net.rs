@@ -1,4 +1,5 @@
 use super::graph::NetId;
+use super::ids::JunctionId;
 use super::pin::{NetlistPin, PinRef};
 use egui::Pos2;
 use std::collections::HashMap;
@@ -15,11 +16,40 @@ pub(crate) enum NetLabelScope {
     Global,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct JunctionDot {
+    pub(crate) id: JunctionId,
+    pub(crate) position: Pos2,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NoConnectDot {
     pub(crate) id: u64,
     pub(crate) position: Pos2,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct SchematicAnnotations {
+    pub(crate) junction_dots: Vec<JunctionDot>,
+    pub(crate) no_connect_markers: Vec<NoConnectDot>,
+}
+
+impl SchematicAnnotations {
+    pub(crate) fn netlist_annotations(&self) -> NetlistAnnotations {
+        NetlistAnnotations {
+            junction_endpoints: self
+                .junction_dots
+                .iter()
+                .map(|dot| (dot.id, dot.position))
+                .collect(),
+            no_connects: self
+                .no_connect_markers
+                .iter()
+                .map(|marker| marker.position)
+                .collect(),
+            ..NetlistAnnotations::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

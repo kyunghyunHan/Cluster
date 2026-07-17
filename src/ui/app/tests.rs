@@ -289,6 +289,61 @@ fn saved_circuit_round_trips_components_and_wires() {
 }
 
 #[test]
+fn saved_circuit_round_trips_annotations_and_exact_connectivity() {
+    let mut app = CircuitApp::new();
+    app.place_component(ComponentKind::Resistor, Pos2::new(240.0, 200.0));
+    let no_connect_position = component_pin_defs(&app.components[0])[0].pos;
+    app.wires = vec![
+        Wire::new(100, vec![Pos2::new(100.0, 100.0), Pos2::new(200.0, 100.0)]),
+        Wire::new(101, vec![Pos2::new(150.0, 50.0), Pos2::new(150.0, 150.0)]),
+    ];
+    app.annotations = SchematicAnnotations {
+        junction_dots: vec![JunctionDot {
+            id: JunctionId(50),
+            position: Pos2::new(150.0, 100.0),
+        }],
+        no_connect_markers: vec![NoConnectDot {
+            id: 51,
+            position: no_connect_position,
+        }],
+    };
+    app.next_id = 102;
+    app.invalidate_connectivity_cache();
+
+    let before = app.current_connectivity();
+    let saved = SavedCircuit::from_app(&app);
+    assert_eq!(saved.junction_dots.len(), 1);
+    assert_eq!(saved.no_connect_markers.len(), 1);
+    assert_eq!(saved.pages[0].junction_dots.len(), 1);
+    assert_eq!(saved.pages[0].no_connect_markers.len(), 1);
+
+    let json = serde_json::to_string(&saved).unwrap();
+    let (snapshot, load_notes) = serde_json::from_str::<SavedCircuit>(&json)
+        .unwrap()
+        .into_snapshot()
+        .unwrap();
+    assert!(load_notes.is_empty(), "{load_notes:?}");
+    assert_eq!(snapshot.annotations, app.annotations);
+
+    let restored_annotations = snapshot.annotations.netlist_annotations();
+    let after = crate::engine::netlist::build_canonical_connectivity_with_annotations(
+        &snapshot.components,
+        &snapshot.wires,
+        &restored_annotations,
+    );
+    assert_eq!(before.pin_nets, after.pin_nets);
+    assert_eq!(before.junction_id_nets, after.junction_id_nets);
+    assert_eq!(before.junction_nets, after.junction_nets);
+    assert_eq!(before.wire_segment_nets, after.wire_segment_nets);
+    assert_eq!(
+        after.net_for_junction_id(JunctionId(50)),
+        Some(after.netlist.wire_nets[&100])
+    );
+    assert_eq!(after.netlist.wire_nets[&100], after.netlist.wire_nets[&101]);
+    assert_eq!(after.netlist.no_connects.len(), 1);
+}
+
+#[test]
 fn legacy_wire_endpoint_migration_preserves_canonical_connectivity() {
     let mut app = CircuitApp::new();
     app.load_led_demo();
@@ -350,10 +405,90 @@ fn saved_circuit_round_trips_multiple_pages() {
     assert_eq!(snapshot.components[0].kind, ComponentKind::Esp32);
     assert!(
         snapshot.pages[0]
-            .1
+            .components
             .iter()
             .any(|component| component.kind == ComponentKind::Led)
     );
+}
+
+#[test]
+fn page_switch_and_save_preserve_annotations_per_page() {
+    let mut app = CircuitApp::new();
+    app.annotations.junction_dots.push(JunctionDot {
+        id: JunctionId(10),
+        position: Pos2::new(100.0, 100.0),
+    });
+    app.add_page();
+    app.annotations.no_connect_markers.push(NoConnectDot {
+        id: 20,
+        position: Pos2::new(200.0, 200.0),
+    });
+    app.save_current_page();
+
+    app.switch_page(0);
+    assert_eq!(app.annotations.junction_dots[0].id, JunctionId(10));
+    assert!(app.annotations.no_connect_markers.is_empty());
+    app.switch_page(1);
+    assert!(app.annotations.junction_dots.is_empty());
+    assert_eq!(app.annotations.no_connect_markers[0].id, 20);
+
+    let json = serde_json::to_string(&SavedCircuit::from_app(&app)).unwrap();
+    let (snapshot, notes) = serde_json::from_str::<SavedCircuit>(&json)
+        .unwrap()
+        .into_snapshot()
+        .unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(
+        snapshot.pages[0].annotations.junction_dots[0].id,
+        JunctionId(10)
+    );
+    assert_eq!(snapshot.pages[1].annotations.no_connect_markers[0].id, 20);
+}
+
+#[test]
+fn legacy_single_page_annotations_load_without_schema_change() {
+    let saved = SavedCircuit {
+        schema_version: 4,
+        next_id: 2,
+        counters: Counters::default(),
+        components: Vec::new(),
+        wires: Vec::new(),
+        junction_dots: vec![SavedJunctionDot {
+            id: 1,
+            x: 25.0,
+            y: 50.0,
+        }],
+        no_connect_markers: vec![SavedNoConnectMarker {
+            id: 2,
+            x: 75.0,
+            y: 100.0,
+        }],
+        pages: Vec::new(),
+        current_page: 0,
+    };
+
+    let (snapshot, notes) = saved.into_snapshot().unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(snapshot.annotations.junction_dots[0].id, JunctionId(1));
+    assert_eq!(snapshot.annotations.no_connect_markers[0].id, 2);
+    assert_eq!(snapshot.pages[0].annotations, snapshot.annotations);
+    assert_eq!(snapshot.next_id, 3);
+}
+
+#[test]
+fn annotation_changes_are_undoable_entity_deltas() {
+    let mut app = CircuitApp::new();
+    app.record_history();
+    app.annotations.junction_dots.push(JunctionDot {
+        id: JunctionId(10),
+        position: Pos2::new(100.0, 100.0),
+    });
+    app.mark_dirty();
+
+    app.undo();
+    assert!(app.annotations.junction_dots.is_empty());
+    app.redo();
+    assert_eq!(app.annotations.junction_dots[0].id, JunctionId(10));
 }
 
 #[test]

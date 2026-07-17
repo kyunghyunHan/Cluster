@@ -374,6 +374,18 @@ fn build_canonical_connectivity_with_page_scopes(
                 .map(|net_id| (ConnectivityPoint::from(*position), net_id))
         })
         .collect();
+    let junction_id_nets = annotations
+        .junction_endpoints
+        .iter()
+        .filter_map(|(&junction_id, position)| {
+            let node = nodes.node_for(*position);
+            let root = nets.find(node);
+            root_to_id
+                .get(&root)
+                .copied()
+                .map(|net_id| (junction_id, net_id))
+        })
+        .collect();
     let mut wire_segment_nets = HashMap::new();
     for wire in wires {
         for (segment_index, segment) in wire.points.windows(2).enumerate() {
@@ -389,6 +401,7 @@ fn build_canonical_connectivity_with_page_scopes(
     CanonicalConnectivity {
         netlist,
         pin_nets,
+        junction_id_nets,
         junction_nets,
         wire_segment_nets,
         diagnostics,

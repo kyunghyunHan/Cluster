@@ -5,7 +5,9 @@ use crate::commands::document::DocumentCommand;
 use crate::commands::selection::SelectionCommand;
 use crate::commands::wiring::WiringCommand;
 use crate::engine::validation::ErcAutoFix;
-use crate::engine::{mna, netlist::build_canonical_connectivity, simulation as simulation_engine};
+use crate::engine::{
+    mna, netlist::build_canonical_connectivity_with_annotations, simulation as simulation_engine,
+};
 use crate::model::cad::{CadProjectData, Point2};
 use crate::model::*;
 use crate::pcb::board::{Board, BoardOutline};
@@ -1471,20 +1473,23 @@ impl crate::CircuitApp {
         let wires = self.document.wires.clone();
         let next_id = self.document.next_id;
         let counters = self.document.counters.clone();
+        let annotations = self.document.annotations.clone();
         if let Some(page) = self.document.pages.get_mut(current_page) {
-            page.1 = components;
-            page.2 = wires;
-            page.3 = next_id;
-            page.4 = counters;
+            page.components = components;
+            page.wires = wires;
+            page.next_id = next_id;
+            page.counters = counters;
+            page.annotations = annotations;
         }
     }
 
     pub(crate) fn load_page_state(&mut self, idx: usize) {
-        let (_, components, wires, next_id, counters) = self.document.pages[idx].clone();
-        self.document.components = components;
-        self.document.wires = wires;
-        self.document.next_id = next_id;
-        self.document.counters = counters;
+        let page = self.document.pages[idx].clone();
+        self.document.components = page.components;
+        self.document.wires = page.wires;
+        self.document.next_id = page.next_id;
+        self.document.counters = page.counters;
+        self.document.annotations = page.annotations;
         self.editor.selected = None;
         self.editor.multi_selected.clear();
         self.editor.draft_wire.clear();
@@ -1503,20 +1508,14 @@ impl crate::CircuitApp {
         self.save_current_page();
         self.current_page = idx;
         self.load_page_state(idx);
-        self.status = format!("Switched to {}", self.pages[idx].0);
+        self.status = format!("Switched to {}", self.pages[idx].name);
     }
 
     pub(crate) fn add_page(&mut self) {
         self.save_current_page();
         self.record_history();
         let n = self.pages.len() + 1;
-        self.pages.push((
-            format!("Page {n}"),
-            Vec::new(),
-            Vec::new(),
-            1,
-            Counters::default(),
-        ));
+        self.pages.push(ProjectPage::empty(format!("Page {n}")));
         let new_idx = self.pages.len() - 1;
         self.current_page = new_idx;
         self.load_page_state(new_idx);
@@ -1730,7 +1729,12 @@ impl crate::CircuitApp {
         }
         self.performance.netlist_cache_hit = false;
         let started = std::time::Instant::now();
-        let connectivity = build_canonical_connectivity(&self.components, &self.wires);
+        let annotations = self.annotations.netlist_annotations();
+        let connectivity = build_canonical_connectivity_with_annotations(
+            &self.components,
+            &self.wires,
+            &annotations,
+        );
         self.performance.netlist_ms = started.elapsed().as_secs_f64() * 1_000.0;
         self.analysis.cached_connectivity =
             Some((self.analysis.circuit_revision, connectivity.clone()));
@@ -1773,30 +1777,40 @@ impl crate::CircuitApp {
         self.last_autorecover_revision = self.analysis.circuit_revision;
     }
 
-    #[allow(clippy::type_complexity)] // Compatibility boundary for schema-v4 pages.
-    pub(crate) fn effective_pages(
-        &self,
-    ) -> Vec<(String, Vec<Component>, Vec<Wire>, u64, Counters)> {
+    pub(crate) fn effective_project_pages(&self) -> Vec<ProjectPage> {
         let mut pages = if self.pages.is_empty() {
-            vec![(
-                "Page 1".to_string(),
-                self.components.clone(),
-                self.wires.clone(),
-                self.next_id,
-                self.counters.clone(),
-            )]
+            vec![ProjectPage::empty("Page 1".to_string())]
         } else {
             self.pages.clone()
         };
 
         let page_index = self.current_page.min(pages.len().saturating_sub(1));
         if let Some(page) = pages.get_mut(page_index) {
-            page.1 = self.components.clone();
-            page.2 = self.wires.clone();
-            page.3 = self.next_id;
-            page.4 = self.counters.clone();
+            page.components = self.components.clone();
+            page.wires = self.wires.clone();
+            page.next_id = self.next_id;
+            page.counters = self.counters.clone();
+            page.annotations = self.annotations.clone();
         }
         pages
+    }
+
+    #[allow(clippy::type_complexity)] // Export compatibility boundary.
+    pub(crate) fn effective_pages(
+        &self,
+    ) -> Vec<(String, Vec<Component>, Vec<Wire>, u64, Counters)> {
+        self.effective_project_pages()
+            .into_iter()
+            .map(|page| {
+                (
+                    page.name,
+                    page.components,
+                    page.wires,
+                    page.next_id,
+                    page.counters,
+                )
+            })
+            .collect()
     }
 }
 
@@ -1846,26 +1860,30 @@ fn write_with_backup_path(path: &Path, content: &str) -> Result<(), String> {
 impl SavedCircuit {
     pub(crate) fn from_app(app: &crate::CircuitApp) -> Self {
         let pages = app
-            .effective_pages()
+            .effective_project_pages()
             .into_iter()
-            .map(|(name, components, wires, next_id, counters)| SavedPage {
-                name,
-                next_id,
-                counters,
-                components: saved_components_from(&components),
-                wires: saved_wires_from(&wires),
-                junction_dots: Vec::new(),
-                no_connect_markers: Vec::new(),
+            .map(|page| {
+                let (junction_dots, no_connect_markers) = saved_annotations_from(&page.annotations);
+                SavedPage {
+                    name: page.name,
+                    next_id: page.next_id,
+                    counters: page.counters,
+                    components: saved_components_from(&page.components),
+                    wires: saved_wires_from(&page.wires),
+                    junction_dots,
+                    no_connect_markers,
+                }
             })
             .collect::<Vec<_>>();
+        let (junction_dots, no_connect_markers) = saved_annotations_from(&app.annotations);
         Self {
             schema_version: 4,
             next_id: app.next_id,
             counters: app.counters.clone(),
             components: saved_components_from(&app.components),
             wires: saved_wires_from(&app.wires),
-            junction_dots: Vec::new(),
-            no_connect_markers: Vec::new(),
+            junction_dots,
+            no_connect_markers,
             pages,
             current_page: app.current_page,
         }
@@ -1883,18 +1901,19 @@ impl SavedCircuit {
 
         let mut pages = Vec::new();
         if self.pages.is_empty() {
+            let annotations = repair_saved_annotations(
+                self.junction_dots,
+                self.no_connect_markers,
+                "Page 1",
+                &mut load_notes,
+            );
             let page = repair_saved_page(
                 "Page 1".to_string(),
                 self.components,
                 self.wires,
                 self.next_id,
                 self.counters,
-                &mut load_notes,
-            );
-            validate_saved_annotations(
-                self.junction_dots,
-                self.no_connect_markers,
-                "Page 1",
+                annotations,
                 &mut load_notes,
             );
             pages.push(page);
@@ -1906,7 +1925,7 @@ impl SavedCircuit {
                 } else {
                     page.name
                 };
-                validate_saved_annotations(
+                let annotations = repair_saved_annotations(
                     page.junction_dots,
                     page.no_connect_markers,
                     &name,
@@ -1918,29 +1937,25 @@ impl SavedCircuit {
                     page.wires,
                     page.next_id,
                     page.counters,
+                    annotations,
                     &mut load_notes,
                 ));
             }
         }
 
         if pages.is_empty() {
-            pages.push((
-                "Page 1".to_string(),
-                Vec::new(),
-                Vec::new(),
-                1,
-                Counters::default(),
-            ));
+            pages.push(ProjectPage::empty("Page 1".to_string()));
         }
 
         let current_page = current_page.min(pages.len().saturating_sub(1));
-        let (_, components, wires, next_id, counters) = pages[current_page].clone();
+        let current = pages[current_page].clone();
         Ok((
             CircuitSnapshot {
-                components,
-                wires,
-                next_id,
-                counters,
+                components: current.components,
+                wires: current.wires,
+                next_id: current.next_id,
+                counters: current.counters,
+                annotations: current.annotations,
                 pages,
                 current_page,
                 board: Board::new_two_layer(80.0, 50.0),
@@ -1985,14 +2000,51 @@ fn saved_wires_from(wires: &[Wire]) -> Vec<SavedWire> {
         .collect()
 }
 
+fn saved_annotations_from(
+    annotations: &SchematicAnnotations,
+) -> (Vec<SavedJunctionDot>, Vec<SavedNoConnectMarker>) {
+    let junction_dots = annotations
+        .junction_dots
+        .iter()
+        .map(|dot| SavedJunctionDot {
+            id: dot.id.0,
+            x: dot.position.x,
+            y: dot.position.y,
+        })
+        .collect();
+    let no_connect_markers = annotations
+        .no_connect_markers
+        .iter()
+        .map(|marker| SavedNoConnectMarker {
+            id: marker.id,
+            x: marker.position.x,
+            y: marker.position.y,
+        })
+        .collect();
+    (junction_dots, no_connect_markers)
+}
+
 fn repair_saved_page(
     name: String,
     saved_components: Vec<SavedComponent>,
     saved_wires: Vec<SavedWire>,
     saved_next_id: u64,
     saved_counters: Counters,
+    annotations: SchematicAnnotations,
     load_notes: &mut Vec<String>,
-) -> (String, Vec<Component>, Vec<Wire>, u64, Counters) {
+) -> ProjectPage {
+    let annotation_max_id = annotations
+        .junction_dots
+        .iter()
+        .map(|dot| dot.id.0)
+        .chain(
+            annotations
+                .no_connect_markers
+                .iter()
+                .map(|marker| marker.id),
+        )
+        .max()
+        .unwrap_or(0);
     let mut used_ids = HashSet::new();
     let mut repair_id = saved_components
         .iter()
@@ -2000,6 +2052,7 @@ fn repair_saved_page(
         .chain(saved_wires.iter().map(|wire| wire.id))
         .max()
         .unwrap_or(0)
+        .max(annotation_max_id)
         .max(saved_next_id)
         + 1;
 
@@ -2098,8 +2151,17 @@ fn repair_saved_page(
         .chain(wires.iter().map(|wire| wire.id))
         .max()
         .unwrap_or(0);
-    let next_id = saved_next_id.max(max_id + 1).max(repair_id);
-    (name, components, wires, next_id, saved_counters)
+    let next_id = saved_next_id
+        .max(max_id.max(annotation_max_id) + 1)
+        .max(repair_id);
+    ProjectPage {
+        name,
+        components,
+        wires,
+        next_id,
+        counters: saved_counters,
+        annotations,
+    }
 }
 
 fn infer_legacy_endpoint(
@@ -2137,20 +2199,50 @@ fn infer_legacy_endpoint(
     }
 }
 
-fn validate_saved_annotations(
+fn repair_saved_annotations(
     junction_dots: Vec<SavedJunctionDot>,
     no_connect_markers: Vec<SavedNoConnectMarker>,
     page_name: &str,
     load_notes: &mut Vec<String>,
-) {
-    let invalid_junctions = junction_dots
-        .iter()
-        .filter(|dot| dot.id == 0 || !dot.x.is_finite() || !dot.y.is_finite())
-        .count();
-    let invalid_no_connects = no_connect_markers
-        .iter()
-        .filter(|marker| marker.id == 0 || !marker.x.is_finite() || !marker.y.is_finite())
-        .count();
+) -> SchematicAnnotations {
+    let mut junction_ids = HashSet::new();
+    let mut invalid_junctions = 0;
+    let junction_dots = junction_dots
+        .into_iter()
+        .filter_map(|dot| {
+            if dot.id == 0
+                || !dot.x.is_finite()
+                || !dot.y.is_finite()
+                || !junction_ids.insert(dot.id)
+            {
+                invalid_junctions += 1;
+                return None;
+            }
+            Some(JunctionDot {
+                id: JunctionId(dot.id),
+                position: Pos2::new(dot.x, dot.y),
+            })
+        })
+        .collect();
+    let mut no_connect_ids = HashSet::new();
+    let mut invalid_no_connects = 0;
+    let no_connect_markers = no_connect_markers
+        .into_iter()
+        .filter_map(|marker| {
+            if marker.id == 0
+                || !marker.x.is_finite()
+                || !marker.y.is_finite()
+                || !no_connect_ids.insert(marker.id)
+            {
+                invalid_no_connects += 1;
+                return None;
+            }
+            Some(NoConnectDot {
+                id: marker.id,
+                position: Pos2::new(marker.x, marker.y),
+            })
+        })
+        .collect();
     if invalid_junctions > 0 {
         load_notes.push(format!(
             "Dropped {invalid_junctions} invalid junction marker(s) on {page_name}."
@@ -2160,5 +2252,9 @@ fn validate_saved_annotations(
         load_notes.push(format!(
             "Dropped {invalid_no_connects} invalid no-connect marker(s) on {page_name}."
         ));
+    }
+    SchematicAnnotations {
+        junction_dots,
+        no_connect_markers,
     }
 }

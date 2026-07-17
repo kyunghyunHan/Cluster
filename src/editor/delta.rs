@@ -1,4 +1,6 @@
-use crate::model::{CircuitSnapshot, Component, Counters, ProjectDocument, Wire};
+use crate::model::{
+    CircuitSnapshot, Component, Counters, ProjectDocument, ProjectPage, SchematicAnnotations, Wire,
+};
 use crate::pcb::board::Board;
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
@@ -20,7 +22,7 @@ struct ListDelta<T> {
 struct DocumentMetadata {
     next_id: u64,
     counters: Counters,
-    pages: Vec<crate::model::project::LegacyPageState>,
+    pages: Vec<ProjectPage>,
     current_page: usize,
 }
 
@@ -29,6 +31,7 @@ struct DocumentMetadata {
 pub(crate) struct DocumentDelta {
     components: Vec<ListDelta<Component>>,
     wires: Vec<ListDelta<Wire>>,
+    annotations: Option<(SchematicAnnotations, SchematicAnnotations)>,
     metadata: Option<(DocumentMetadata, DocumentMetadata)>,
     board: Option<(Board, Board)>,
 }
@@ -59,6 +62,8 @@ impl DocumentDelta {
         Self {
             components: diff_list(&before.components, &after.components, |value| value.id),
             wires: diff_list(&before.wires, &after.wires, |value| value.id),
+            annotations: (before.annotations != after.annotations)
+                .then(|| (before.annotations.clone(), after.annotations.clone())),
             metadata: (before_metadata != after_metadata)
                 .then_some((before_metadata, after_metadata)),
             board: (before.board != after.board)
@@ -74,6 +79,9 @@ impl DocumentDelta {
             |value| value.id,
         );
         apply_list(&mut document.wires, &self.wires, forward, |value| value.id);
+        if let Some((before, after)) = &self.annotations {
+            document.annotations = if forward { after } else { before }.clone();
+        }
         if let Some((before, after)) = &self.metadata {
             let metadata = if forward { after } else { before };
             document.next_id = metadata.next_id;
@@ -99,6 +107,7 @@ impl UndoableCommand for DocumentDelta {
     fn merge_with(&mut self, newer: &Self) -> bool {
         merge_list(&mut self.components, &newer.components);
         merge_list(&mut self.wires, &newer.wires);
+        merge_pair(&mut self.annotations, &newer.annotations);
         merge_pair(&mut self.metadata, &newer.metadata);
         merge_pair(&mut self.board, &newer.board);
         true
@@ -128,6 +137,13 @@ impl UndoableCommand for DocumentDelta {
             + self.wires.capacity() * size_of::<ListDelta<Wire>>()
             + component_strings
             + wire_points
+            + self.annotations.as_ref().map_or(0, |(before, after)| {
+                (before.junction_dots.capacity()
+                    + before.no_connect_markers.capacity()
+                    + after.junction_dots.capacity()
+                    + after.no_connect_markers.capacity())
+                    * size_of::<egui::Pos2>()
+            })
             + self.board.as_ref().map_or(0, |(before, after)| {
                 approximate_board_cost(before) + approximate_board_cost(after)
             })
@@ -136,6 +152,7 @@ impl UndoableCommand for DocumentDelta {
     fn is_empty(&self) -> bool {
         self.components.is_empty()
             && self.wires.is_empty()
+            && self.annotations.is_none()
             && self.metadata.is_none()
             && self.board.is_none()
     }

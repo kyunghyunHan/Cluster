@@ -191,7 +191,7 @@ Notes:
 우선순위 높은 순서:
 1. Breadboard View: 일부 완료 - ESP32/Arduino/STM32 + OLED/Sensor I2C 예제의 VCC/GND/SDA/SCL 점퍼 체크, schematic net 강조, 누락 점퍼 자동 schematic 배선 추가 지원. 향후 실제 점퍼 편집, 전원 레일, 핀 하이라이트 확장
 2. CAD/PCB 데이터 모델: 일부 완료 - SymbolInstance, Footprint, NetClass, Board, Track, Via, 기본 DRC, Gerber/Excellon scaffold, bottom dock Update PCB/footprint auto-place/PCB preview+DRC marker/board fit/ratsnest route helper/selectable DRC rows/project folder save-load/DRC-gated fabrication export 추가. 향후 기존 Component를 SymbolInstance로 점진 이전
-3. Schematic netlist 안정화: 일부 완료 - deterministic net name/id 생성, global GND merge, explicit junction/no-connect annotation 모델, crossing/T-junction/pin-to-wire/multi-page label 회귀 테스트 추가. 향후 UI 저장/편집, local/global label scope 확장
+3. Schematic netlist 안정화: 일부 완료 - deterministic net name/id 생성, global GND merge, explicit junction/no-connect annotation의 페이지별 저장/복원, crossing/T-junction/pin-to-wire/multi-page label 회귀 테스트 추가. 향후 junction/no-connect UI 편집, local/global label scope 확장
 4. 초보자 ERC 강화: 일부 완료 - GPIO 전류 초과, LED 저항 누락, 모터/릴레이 직접 구동, 공통 GND, 입력 전용 GPIO, ADC 과전압, I2C/SPI/UART 배선 실수, ERC repair suggestion/Auto fix UI scaffold, I2C pull-up/relay flyback diode 자동 배선 repair, 배선 중 PinRole 기반 호환/의심 목적지 Smart Wiring 안내 추가. 향후 전압 범위 metadata를 이용한 더 정밀한 배선 안내와 안전한 자동 repair 확장
 5. PCB editor MVP: 일부 완료 - bottom dock Update PCB, footprint auto-place, compact PCB preview, preview DRC marker, board fit, unrouted ratsnest route helper, fabrication export, footprint/ratsnest/selectable DRC 요약 지원. 향후 interactive footprint 배치, manual routing 편집, via, top/bottom copper, board outline
 6. DRC panel: 일부 완료 - track width/clearance/via/annular ring/edge clearance/open outline/outside footprint/unrouted ratsnest 검사 scaffold, PCB dock DRC row 선택 및 preview marker 추가. 향후 pad/silkscreen violation 클릭 이동 UI 연결
@@ -204,6 +204,7 @@ Notes:
 - `ProjectDocument`/`EditorState`/`WorkspaceState`/`AnalysisState` 소유권 경계를 사용한다.
 - editor command는 제한된 `CommandContext`와 typed `ChangeSet`을 사용하며 중앙 dispatcher가 cache/dirty/autosave/repaint를 처리한다. undo/redo는 16 MiB 제한의 entity delta를 저장한다.
 - canonical connectivity의 endpoint/spatial-index/intersection/junction/geometry/label/union-find/diagnostics 단계가 분리되었고 입력 배열 순서와 무관한 exact net mapping을 테스트한다.
+- `ProjectPage`가 junction/no-connect annotation을 소유하며 schema v4 JSON과 다중 페이지/undo/자동복구 왕복에서 이를 보존한다. canonical 결과는 좌표와 typed `JunctionId` 양쪽의 exact net mapping을 제공한다.
 - ERC rule registry는 rule disable/severity override와 certainty를 지원하며 annotation/no-connect/ground rule이 domain module로 분리되었다.
 - custom part schema v2는 v1 파일을 유지하면서 구조화 metadata와 footprint 검증을 지원하고 symlink/1 MiB 초과 입력을 거부한다.
 - 저장은 같은 디렉터리의 임시 파일을 sync/rename하고 3세대 backup을 유지한다.

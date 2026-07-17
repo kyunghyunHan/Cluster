@@ -4,11 +4,31 @@
 //! selections, tools, dialogs, caches, and simulation results. Persistence
 //! continues through the schema-versioned `SavedCircuit` compatibility DTO.
 
-use super::{Component, Counters, Wire};
+use super::{Component, Counters, SchematicAnnotations, Wire};
 use crate::pcb::board::Board;
 
-#[allow(clippy::type_complexity)] // Replaced by ProjectPage in the next schema-neutral step.
-pub(crate) type LegacyPageState = (String, Vec<Component>, Vec<Wire>, u64, Counters);
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProjectPage {
+    pub(crate) name: String,
+    pub(crate) components: Vec<Component>,
+    pub(crate) wires: Vec<Wire>,
+    pub(crate) next_id: u64,
+    pub(crate) counters: Counters,
+    pub(crate) annotations: SchematicAnnotations,
+}
+
+impl ProjectPage {
+    pub(crate) fn empty(name: String) -> Self {
+        Self {
+            name,
+            components: Vec::new(),
+            wires: Vec::new(),
+            next_id: 1,
+            counters: Counters::default(),
+            annotations: SchematicAnnotations::default(),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectDocument {
@@ -16,7 +36,8 @@ pub(crate) struct ProjectDocument {
     pub(crate) wires: Vec<Wire>,
     pub(crate) next_id: u64,
     pub(crate) counters: Counters,
-    pub(crate) pages: Vec<LegacyPageState>,
+    pub(crate) annotations: SchematicAnnotations,
+    pub(crate) pages: Vec<ProjectPage>,
     pub(crate) current_page: usize,
     pub(crate) board: Board,
 }
@@ -28,13 +49,8 @@ impl Default for ProjectDocument {
             wires: Vec::new(),
             next_id: 1,
             counters: Counters::default(),
-            pages: vec![(
-                "Page 1".to_string(),
-                Vec::new(),
-                Vec::new(),
-                1,
-                Counters::default(),
-            )],
+            annotations: SchematicAnnotations::default(),
+            pages: vec![ProjectPage::empty("Page 1".to_string())],
             current_page: 0,
             board: Board::new_two_layer(80.0, 50.0),
         }
