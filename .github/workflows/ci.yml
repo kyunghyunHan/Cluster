@@ -6,8 +6,8 @@ on:
   pull_request:
 
 jobs:
-  rust:
-    name: Rust checks
+  quality:
+    name: Format, Clippy, and docs
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -24,14 +24,36 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
-      - name: Check
-        run: cargo check --all-targets
-
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Documentation
+        run: cargo doc --no-deps
+
+  platform:
+    name: Build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.os }}
+
+      - name: Check all targets
+        run: cargo check --all-targets --all-features
 
       - name: Test
         run: cargo test --all-targets
 
       - name: Release build
-        run: cargo build --release
+        run: cargo build --release --all-features

@@ -51,6 +51,9 @@ pub(crate) enum ConnectivityDiagnostic {
         second_segment: usize,
         position: ConnectivityPoint,
     },
+    OrphanJunction {
+        position: ConnectivityPoint,
+    },
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

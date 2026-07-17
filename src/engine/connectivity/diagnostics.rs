@@ -52,3 +52,24 @@ pub(in crate::engine) fn crossing_diagnostics(
         })
         .collect()
 }
+
+pub(in crate::engine) fn orphan_junction_diagnostics(
+    wires: &[Wire],
+    explicit_junctions: &[Pos2],
+) -> Vec<ConnectivityDiagnostic> {
+    let index = SegmentSpatialIndex::new(wires);
+    explicit_junctions
+        .iter()
+        .copied()
+        .filter(|&position| {
+            !index.candidates(position).into_iter().any(|candidate| {
+                let segment = &wires[candidate.wire_index].points
+                    [candidate.segment_index..=candidate.segment_index + 1];
+                crate::model::point_touches_wire_segment(position, segment[0], segment[1])
+            })
+        })
+        .map(|position| ConnectivityDiagnostic::OrphanJunction {
+            position: ConnectivityPoint::from(position),
+        })
+        .collect()
+}

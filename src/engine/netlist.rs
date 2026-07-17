@@ -1,4 +1,6 @@
-use super::connectivity::diagnostics::{crossing_diagnostics, geometry_diagnostics};
+use super::connectivity::diagnostics::{
+    crossing_diagnostics, geometry_diagnostics, orphan_junction_diagnostics,
+};
 use super::connectivity::endpoint_index::EndpointIndex;
 use super::connectivity::geometry::{normalized_wire_segments, wire_endpoint_contact_points};
 use super::connectivity::junctions::resolve_contacts;
@@ -59,6 +61,7 @@ fn build_canonical_connectivity_with_page_scopes(
     // spans become diagnostics while valid polylines retain source identity.
     let mut diagnostics = geometry_diagnostics(wires);
     diagnostics.extend(crossing_diagnostics(wires, &explicit_junctions));
+    diagnostics.extend(orphan_junction_diagnostics(wires, &explicit_junctions));
     let mut nodes = ConnectivityNodes::default();
     let mut nets = ConnectivityUnionFind::default();
     let endpoints = EndpointIndex::new(components);
@@ -604,6 +607,38 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn unresolved_endpoint_and_orphan_junction_are_diagnostics_not_panics() {
+        let orphan = Pos2::new(500.0, 500.0);
+        let wire = Wire::with_endpoints(
+            10,
+            vec![Pos2::new(0.0, 0.0), Pos2::new(20.0, 0.0)],
+            WireEndpoint::Junction(999.into()),
+            WireEndpoint::FreePoint(Pos2::new(20.0, 0.0)),
+        );
+        let annotations = NetlistAnnotations {
+            junctions: vec![orphan],
+            ..Default::default()
+        };
+
+        let connectivity =
+            build_canonical_connectivity_with_annotations(&[], &[wire], &annotations);
+
+        assert!(connectivity.diagnostics.contains(
+            &ConnectivityDiagnostic::UnresolvedJunctionEndpoint {
+                wire_id: 10,
+                junction_id: 999.into(),
+            }
+        ));
+        assert!(
+            connectivity
+                .diagnostics
+                .contains(&ConnectivityDiagnostic::OrphanJunction {
+                    position: ConnectivityPoint::from(orphan),
+                })
+        );
     }
 
     #[test]

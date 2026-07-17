@@ -297,7 +297,9 @@ static PIN_NAME_INTERNER: LazyLock<Mutex<HashSet<&'static str>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 pub(crate) fn intern_pin_name(name: &str) -> &'static str {
-    let mut interner = PIN_NAME_INTERNER.lock().expect("pin name interner");
+    let mut interner = PIN_NAME_INTERNER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(existing) = interner.get(name) {
         return existing;
     }
@@ -314,14 +316,14 @@ static CUSTOM_PARTS: LazyLock<RwLock<HashMap<String, CustomPartDef>>> =
 pub(crate) fn register_custom_part(def: CustomPartDef) {
     CUSTOM_PARTS
         .write()
-        .expect("custom part registry")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(def.id.clone(), def);
 }
 
 pub(crate) fn custom_part(id: &str) -> Option<CustomPartDef> {
     CUSTOM_PARTS
         .read()
-        .expect("custom part registry")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(id)
         .cloned()
 }
@@ -330,7 +332,7 @@ pub(crate) fn custom_part(id: &str) -> Option<CustomPartDef> {
 pub(crate) fn custom_part_list() -> Vec<(String, String)> {
     let mut list: Vec<(String, String)> = CUSTOM_PARTS
         .read()
-        .expect("custom part registry")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .values()
         .map(|def| (def.id.clone(), def.name.clone()))
         .collect();
@@ -343,6 +345,7 @@ pub(crate) fn custom_part_list() -> Vec<(String, String)> {
 /// human-readable note per skipped file. A missing directory loads zero parts
 /// without an error so first launch stays quiet.
 pub(crate) fn load_custom_parts_dir(dir: &Path) -> (usize, Vec<String>) {
+    const MAX_CUSTOM_PART_BYTES: u64 = 1024 * 1024;
     let mut notes = Vec::new();
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -368,6 +371,24 @@ pub(crate) fn load_custom_parts_dir(dir: &Path) -> (usize, Vec<String>) {
             .and_then(|name| name.to_str())
             .unwrap_or("part file")
             .to_string();
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                notes.push(format!("{display}: {error}"));
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            notes.push(format!("{display}: only regular JSON files are allowed"));
+            continue;
+        }
+        if metadata.len() > MAX_CUSTOM_PART_BYTES {
+            notes.push(format!(
+                "{display}: file is too large (maximum {} KiB)",
+                MAX_CUSTOM_PART_BYTES / 1024
+            ));
+            continue;
+        }
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) => {
@@ -439,7 +460,9 @@ pub(crate) fn sample_part_json() -> String {
         }),
         documentation: None,
     };
-    serde_json::to_string_pretty(&sample).expect("sample part serializes")
+    serde_json::to_string_pretty(&sample).unwrap_or_else(|_| {
+        r#"{"schema_version":2,"id":"user:bme280","name":"BME280 Sensor","pins":[]}"#.to_string()
+    })
 }
 
 #[cfg(test)]
@@ -583,6 +606,24 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert!(notes[0].starts_with("bad.json"));
         assert!(custom_part("user:bme280").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_custom_parts_dir_rejects_oversized_input_before_parsing() {
+        let dir = std::env::temp_dir().join(format!(
+            "cluster_parts_large_test_{}",
+            std::process::id() as u64 + 9_113
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("large.json"), vec![b' '; 1024 * 1024 + 1]).unwrap();
+
+        let (loaded, notes) = load_custom_parts_dir(&dir);
+
+        assert_eq!(loaded, 0);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("too large"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

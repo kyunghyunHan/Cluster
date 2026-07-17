@@ -1,8 +1,7 @@
 /// Parse a human-readable SI value string into an `f32`.
 ///
-/// Recognises SI multipliers (p, n, u, m, k, Meg) and a `unit_hint` to
-/// disambiguate ambiguous suffixes (e.g. `"m"` means milli for volts but
-/// mega for ohms in some notations).
+/// Recognises SI multipliers (p, n, u, m, k, M, Meg). Uppercase `M` and
+/// `Meg` mean mega; lowercase `m` always means milli, matching SPICE.
 ///
 /// # Examples
 /// ```
@@ -10,12 +9,15 @@
 /// assert_eq!(parse_metric_value("100nF", "f"),  Some(100e-9));
 /// assert_eq!(parse_metric_value("3.3V", "v"),   Some(3.3));
 /// ```
-pub(crate) fn parse_metric_value(value: &str, unit_hint: &str) -> Option<f32> {
+pub(crate) fn parse_metric_value(value: &str, _unit_hint: &str) -> Option<f32> {
     let normalized = value
         .trim()
-        .to_lowercase()
         .replace('\u{03a9}', "ohm")
-        .replace('\u{00b5}', "u");
+        .replace('\u{00b5}', "u")
+        .replace(char::is_whitespace, "");
+    if let Some(parsed) = parse_embedded_multiplier(&normalized) {
+        return parsed;
+    }
     let number_end = metric_number_end(&normalized);
     if number_end == 0 {
         return None;
@@ -25,25 +27,56 @@ pub(crate) fn parse_metric_value(value: &str, unit_hint: &str) -> Option<f32> {
         return None;
     }
     let suffix = normalized.get(number_end..)?.trim();
-    let multiplier = if suffix.starts_with('m') && unit_hint == "v" {
-        0.001
-    } else if suffix.starts_with('k') {
-        1_000.0
-    } else if suffix.starts_with("meg") || (suffix.starts_with('m') && unit_hint == "ohm") {
+    let suffix_lower = suffix.to_ascii_lowercase();
+    let multiplier = if suffix_lower.starts_with("meg") || suffix.starts_with('M') {
         1_000_000.0
+    } else if suffix.starts_with(['k', 'K']) {
+        1_000.0
     } else if suffix.starts_with('m') {
         0.001
-    } else if suffix.starts_with('u') {
+    } else if suffix.starts_with(['u', 'U']) {
         0.000_001
-    } else if suffix.starts_with('n') {
+    } else if suffix.starts_with(['n', 'N']) {
         0.000_000_001
-    } else if suffix.starts_with('p') {
+    } else if suffix.starts_with(['p', 'P']) {
         0.000_000_000_001
     } else {
         1.0
     };
     let value = number * multiplier;
     value.is_finite().then_some(value)
+}
+
+fn parse_embedded_multiplier(value: &str) -> Option<Option<f32>> {
+    for (index, prefix) in value.char_indices() {
+        let multiplier = match prefix {
+            'p' | 'P' => 1e-12,
+            'n' | 'N' => 1e-9,
+            'u' | 'U' => 1e-6,
+            'm' => 1e-3,
+            'k' | 'K' => 1e3,
+            'M' => 1e6,
+            _ => continue,
+        };
+        let left = value.get(..index)?;
+        let after_prefix = value.get(index + prefix.len_utf8()..)?;
+        let fractional_end = after_prefix
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(after_prefix.len());
+        if left.is_empty() || fractional_end == 0 {
+            continue;
+        }
+        let right = after_prefix.get(..fractional_end)?;
+        if !left.chars().enumerate().all(|(position, character)| {
+            character.is_ascii_digit() || (position == 0 && matches!(character, '+' | '-'))
+        }) {
+            continue;
+        }
+        let number = format!("{left}.{right}").parse::<f32>().ok()?;
+        let parsed = number * multiplier;
+        return Some(parsed.is_finite().then_some(parsed));
+    }
+    None
 }
 
 fn metric_number_end(value: &str) -> usize {
@@ -123,5 +156,19 @@ mod tests {
     #[test]
     fn rejects_non_finite_metric_values() {
         assert_eq!(parse_metric_value("1e1000V", "v"), None);
+    }
+
+    #[test]
+    fn parses_common_editor_and_spice_multiplier_forms() {
+        assert_eq!(parse_metric_value("1 kΩ", "ohm"), Some(1_000.0));
+        assert_eq!(parse_metric_value("4u7", "f"), Some(4.7e-6));
+        assert_eq!(parse_metric_value("4.7µF", "f"), Some(4.7e-6));
+        assert_eq!(parse_metric_value("1Meg", "ohm"), Some(1_000_000.0));
+        assert_eq!(parse_metric_value("1M", "ohm"), Some(1_000_000.0));
+        assert_eq!(parse_metric_value("1m", "ohm"), Some(0.001));
+        let current = parse_metric_value("2.2mA", "a").expect("valid current");
+        assert!((current - 0.0022).abs() < 1e-8);
+        assert_eq!(parse_metric_value("100Hz", "hz"), Some(100.0));
+        assert_eq!(parse_metric_value("1ms", "s"), Some(0.001));
     }
 }

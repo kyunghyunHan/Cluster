@@ -6,7 +6,6 @@
 pub(crate) mod component;
 mod context;
 pub(crate) mod document;
-pub(crate) mod lessons;
 pub(crate) mod pcb;
 pub(crate) mod properties;
 pub(crate) mod selection;
@@ -15,7 +14,6 @@ pub(crate) mod wiring;
 use component::ComponentCommand;
 use context::{CommandContext, CommandOutcome, CommandPostAction};
 use document::DocumentCommand;
-use lessons::LessonCommand;
 use pcb::PcbCommand;
 use properties::PropertiesCommand;
 use selection::SelectionCommand;
@@ -101,7 +99,6 @@ pub(crate) enum EditorCommand {
     Properties(PropertiesCommand),
     Document(DocumentCommand),
     Pcb(PcbCommand),
-    Lesson(LessonCommand),
 }
 
 impl EditorCommand {
@@ -133,7 +130,6 @@ impl EditorCommand {
             Self::Pcb(PcbCommand::AddVia(_)) => "Place PCB via",
             Self::Pcb(PcbCommand::RemoveVia { .. }) => "Remove PCB via",
             Self::Pcb(PcbCommand::SetOutline(_)) => "Edit board outline",
-            Self::Lesson(LessonCommand::Noop) => "Apply lesson action",
         }
     }
 
@@ -162,7 +158,6 @@ impl EditorCommand {
             Self::Properties(command) => command.apply(context),
             Self::Document(command) => command.apply(context),
             Self::Pcb(command) => command.apply(context),
-            Self::Lesson(command) => command.apply(context),
         }
     }
 }

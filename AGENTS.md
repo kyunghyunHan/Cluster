@@ -202,9 +202,10 @@ Notes:
 
 현재 구조 안정화 상태:
 - `ProjectDocument`/`EditorState`/`WorkspaceState`/`AnalysisState` 소유권 경계를 사용한다.
-- editor command는 typed `ChangeSet`을 반환하며 중앙 dispatcher가 cache/dirty/autosave/repaint를 처리한다.
-- canonical connectivity의 geometry/label/union-find/diagnostics 단계와 ERC rule registry가 분리되었다.
-- custom part schema v2는 v1 파일을 유지하면서 구조화 metadata와 footprint 검증을 지원한다.
+- editor command는 제한된 `CommandContext`와 typed `ChangeSet`을 사용하며 중앙 dispatcher가 cache/dirty/autosave/repaint를 처리한다. undo/redo는 16 MiB 제한의 entity delta를 저장한다.
+- canonical connectivity의 endpoint/spatial-index/intersection/junction/geometry/label/union-find/diagnostics 단계가 분리되었고 입력 배열 순서와 무관한 exact net mapping을 테스트한다.
+- ERC rule registry는 rule disable/severity override와 certainty를 지원하며 annotation/no-connect/ground rule이 domain module로 분리되었다.
+- custom part schema v2는 v1 파일을 유지하면서 구조화 metadata와 footprint 검증을 지원하고 symlink/1 MiB 초과 입력을 거부한다.
 - 저장은 같은 디렉터리의 임시 파일을 sync/rename하고 3세대 backup을 유지한다.
 
 ## Definition Of Done

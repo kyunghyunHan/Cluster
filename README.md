@@ -42,7 +42,7 @@ Cluster is **easier than KiCad**, **smarter than Fritzing**, and **focused on re
 - CAD data model groundwork for symbols, footprints, net classes, board layers, tracks, vias, and DRC
 - Multi-page schematics
 - Component labels, values, and rotation
-- Undo/redo (80-step history)
+- Memory-bounded delta undo/redo (drag gestures commit as one edit)
 - Copy/paste and group selection
 - Find, align, and distribute components
 
@@ -215,6 +215,8 @@ does not infer application behavior for arbitrary modules.
 - Custom part JSON supports schema v2 structured tags, voltage ranges, interface maps,
   footprint/pad maps, simulation metadata, and documentation; schema v1 symbol-only files remain
   compatible.
+- Custom-part loading skips symlinks, malformed files, and files larger than
+  1 MiB; one bad part does not stop the application.
 
 ---
 
@@ -225,18 +227,16 @@ does not infer application behavior for arbitrary modules.
 
 ### Build from source
 ```bash
-git clone https://github.com/your-username/Cluster
+git clone https://github.com/kyunghyunHan/Cluster
 cd Cluster
 cargo run --release
 ```
 
 Release binaries appear in `target/release/Cluster`.
 
-### Download a release
-
-Tagged builds are packaged for Linux, macOS, and Windows under
-[GitHub Releases](../../releases/latest). Release archives contain the binary,
-README, and MIT license.
+CI builds and tests the source on Linux, macOS, and Windows. Automated tagged
+release packaging is not configured yet; until it is, build the binary locally
+with the command above.
 
 ---
 
@@ -292,11 +292,14 @@ src/
     custom_part.rs      # User part JSON schema, registry, cluster_parts/ loader
     pin.rs              # PinRole, CircuitPin, NetlistPin
     wire.rs             # Wire, explicit endpoints, connectivity IDs
+    ids.rs              # Serialization-compatible runtime typed IDs
     net.rs              # Net, CircuitNetlist
     circuit.rs          # Counters, snapshots, save/load types
   engine/
-    netlist.rs          # Netlist builder (endpoint contacts + explicit junctions)
-    validation.rs       # ERC rules engine (10+ rules)
+    connectivity/       # Endpoint/spatial indices, intersections, junctions, union-find
+    netlist.rs          # Canonical deterministic net generation and regression fixtures
+    erc/                # Rule context, registry, settings, and extracted rule modules
+    validation.rs       # Remaining ERC rules and structured issue metadata
     simulation.rs       # Simulation result wrapper
     mna/                # Modified Nodal Analysis DC solver
   ui/
@@ -355,8 +358,9 @@ mathematically impossible, such as an ideal-source conflict.
 - [x] Phase 1 CAD model groundwork: SymbolInstance, Footprint, NetClass, Board, Track, Via, DRC, Gerber/Excellon scaffolding
 - [x] First PCB bottom dock workflow: Update PCB, generated footprints, preview with DRC markers, selectable DRC rows, auto-place, board fit, ratsnest route helper, DRC-gated fabrication export
 - [x] ERC auto-fix wiring for I2C pull-ups and relay flyback diodes
-- [ ] Stabilize schematic netlist for PCB: explicit junctions, no-connect markers, local/global net labels, multi-page net merge
-- [ ] Pin-type ERC: output-output conflict, power input not driven, unconnected input, floating net, MCU overvoltage, I2C/SPI/UART mismatch
+- [x] Canonical deterministic netlist: typed pin/junction endpoints, explicit X-junctions, T-junctions, no-connect markers, scoped labels, and multi-page merge
+- [ ] Complete junction/no-connect authoring and persistence UI across every page
+- [x] Pin-type ERC: output-output conflict, power input not driven, unconnected input, floating net, MCU overvoltage, I2C/SPI/UART mismatch
 - [ ] PCB editor MVP: interactive footprint placement, manual track editing, vias, two-layer board
 - [ ] DRC panel with fuller clickable track/pad/via/edge/silkscreen navigation
 - [ ] Gerber RS-274X, Excellon drill, pick-and-place CSV, and further strengthened BOM export
