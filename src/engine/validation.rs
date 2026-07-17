@@ -6,8 +6,24 @@ use std::collections::{HashMap, HashSet, VecDeque};
 pub(crate) enum ErcSeverity {
     Error,
     Warning,
-    #[allow(dead_code)]
     Info,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ErcCertainty {
+    Definite,
+    Likely,
+    Advisory,
+}
+
+impl ErcCertainty {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Definite => "Definite",
+            Self::Likely => "Likely",
+            Self::Advisory => "Advisory",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -344,6 +360,27 @@ impl ErcViolation {
         }
     }
 
+    pub(crate) fn certainty(&self) -> ErcCertainty {
+        match self.rule {
+            ErcRule::PowerShort
+            | ErcRule::NoConnectWired
+            | ErcRule::OutputConflict
+            | ErcRule::GpioDirectLoad
+            | ErcRule::GpioOvervoltage5v
+            | ErcRule::Rail5vTo3v3
+            | ErcRule::PowerRailConflict
+            | ErcRule::AdcOvervoltage
+            | ErcRule::DuplicateReference => ErcCertainty::Definite,
+            ErcRule::LedSeriesResistorMissing
+            | ErcRule::RelayFlybackMissing
+            | ErcRule::I2cPullupMissing
+            | ErcRule::LedReversed
+            | ErcRule::DiodeReversed
+            | ErcRule::MissingDecouplingCapacitor => ErcCertainty::Likely,
+            _ => ErcCertainty::Advisory,
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn fix_suggestion(&self) -> Option<&'static str> {
         self.fix_hint()
@@ -367,19 +404,25 @@ impl ErcViolation {
 }
 
 pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolation> {
-    use crate::engine::erc::{ErcContext, ErcRegistry, FunctionRule};
+    use crate::engine::erc::{ErcContext, ErcRegistry, ErcSettings, FunctionRule};
 
     let mut registry = ErcRegistry::default();
     registry.register(FunctionRule::new(
         "annotation.duplicate_reference",
-        check_duplicate_references,
+        crate::engine::erc::rules::annotation::check_duplicate_references,
     ));
     registry.register(FunctionRule::new(
         "net.duplicate_named",
-        check_duplicate_named_nets,
+        crate::engine::erc::rules::annotation::check_duplicate_named_nets,
     ));
-    registry.register(FunctionRule::new("pin.no_connect", check_no_connect_pins));
-    registry.register(FunctionRule::new("power.ground", check_missing_gnd));
+    registry.register(FunctionRule::new(
+        "pin.no_connect",
+        crate::engine::erc::rules::annotation::check_no_connect_pins,
+    ));
+    registry.register(FunctionRule::new(
+        "power.ground",
+        crate::engine::erc::rules::power::check_missing_ground,
+    ));
     registry.register(FunctionRule::new("power.short", check_power_gnd_short));
     registry.register(FunctionRule::new(
         "led.series_resistor",
@@ -464,7 +507,7 @@ pub(crate) fn validate_beginner_rules(netlist: &CircuitNetlist) -> Vec<ErcViolat
         "power.decoupling",
         check_missing_decoupling_caps,
     ));
-    registry.run(&ErcContext { netlist })
+    registry.run_with_settings(&ErcContext { netlist }, &ErcSettings::default())
 }
 
 /// ERC rules that require solved DC operating-point results.
@@ -484,110 +527,6 @@ pub(crate) fn validate_dc_rules(
 }
 
 // ─── Individual rule implementations ────────────────────────────────────────
-
-fn check_duplicate_references(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
-    let mut refs: HashMap<&str, HashSet<u64>> = HashMap::new();
-    for pin in &netlist.pins {
-        if matches!(
-            pin.component_kind,
-            ComponentKind::NetLabel | ComponentKind::TextNote
-        ) {
-            continue;
-        }
-        refs.entry(pin.component_label.as_str())
-            .or_default()
-            .insert(pin.component_id);
-    }
-    for (reference, ids) in refs {
-        if reference.trim().is_empty() || ids.len() <= 1 {
-            continue;
-        }
-        v.push(ErcViolation {
-            rule: ErcRule::DuplicateReference,
-            severity: ErcSeverity::Error,
-            component_id: ids.iter().copied().min(),
-            wire_id: None,
-            message: format!(
-                "Duplicate reference {reference}: {} components share the same designator. Rename or re-annotate the schematic.",
-                ids.len()
-            ),
-        });
-    }
-}
-
-fn check_duplicate_named_nets(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
-    let mut names: HashMap<String, Vec<usize>> = HashMap::new();
-    for net in &netlist.nets {
-        if net.name.starts_with("NET_") {
-            continue;
-        }
-        names
-            .entry(net.name.trim().to_ascii_uppercase())
-            .or_default()
-            .push(net.id);
-    }
-    for (name, ids) in names {
-        if name.is_empty() || ids.len() <= 1 {
-            continue;
-        }
-        v.push(ErcViolation {
-            rule: ErcRule::DuplicateNamedNet,
-            severity: ErcSeverity::Error,
-            component_id: None,
-            wire_id: None,
-            message: format!(
-                "Duplicate net name {name}: the same named net exists on {} disconnected islands. Add a wire/junction or rename one label.",
-                ids.len()
-            ),
-        });
-    }
-}
-
-fn check_no_connect_pins(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
-    for pin in netlist
-        .pins
-        .iter()
-        .filter(|pin| pin.no_connect && pin.connected_by_wire)
-    {
-        v.push(ErcViolation {
-            rule: ErcRule::NoConnectWired,
-            severity: ErcSeverity::Error,
-            component_id: Some(pin.component_id),
-            wire_id: None,
-            message: format!(
-                "{} pin {} is marked no-connect but is wired to {}. Remove the wire or remove the no-connect marker.",
-                pin.component_label,
-                pin.pin_name,
-                netlist
-                    .nets
-                    .iter()
-                    .find(|net| net.id == pin.net_id)
-                    .map(|net| net.name.as_str())
-                    .unwrap_or("the net")
-            ),
-        });
-    }
-}
-
-fn check_missing_gnd(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
-    if netlist.pins.is_empty() {
-        return;
-    }
-    let has_gnd = netlist.nets.iter().any(|net| net.name == "GND")
-        || netlist.pins.iter().any(|pin| {
-            pin.electrical_type == ElectricalType::Ground
-                || pin.component_kind == ComponentKind::Ground
-        });
-    if !has_gnd {
-        v.push(ErcViolation {
-            rule: ErcRule::MissingGround,
-            severity: ErcSeverity::Error,
-            component_id: None,
-            wire_id: None,
-            message: "No GND reference found. Add a Ground symbol to your circuit.".to_string(),
-        });
-    }
-}
 
 fn check_power_gnd_short(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
     for net in &netlist.nets {

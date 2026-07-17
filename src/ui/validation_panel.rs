@@ -113,7 +113,8 @@ fn render_violation_row(
             }
         }
         resp.on_hover_text(format!(
-            "{rule_id}\nTarget: {target}\n\nWhy this matters: {}",
+            "{rule_id}\nCertainty: {}\nTarget: {target}\n\nWhy this matters: {}",
+            violation.certainty().label(),
             violation.explanation()
         ));
 
