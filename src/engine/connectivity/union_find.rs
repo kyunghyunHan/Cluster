@@ -1,22 +1,40 @@
 use egui::Pos2;
+use std::collections::HashMap;
 
 #[derive(Default)]
 pub(in crate::engine) struct ConnectivityNodes {
     pub(in crate::engine) positions: Vec<Pos2>,
+    buckets: HashMap<(i32, i32), Vec<usize>>,
 }
 
 impl ConnectivityNodes {
     pub(in crate::engine) fn node_for(&mut self, position: Pos2) -> usize {
-        if let Some(index) = self
-            .positions
-            .iter()
-            .position(|existing| existing.distance(position) <= 1.0)
-        {
+        let origin = point_bucket(position);
+        let mut matching = Vec::new();
+        for x in (origin.0 - 1)..=(origin.0 + 1) {
+            for y in (origin.1 - 1)..=(origin.1 + 1) {
+                matching.extend(
+                    self.buckets
+                        .get(&(x, y))
+                        .into_iter()
+                        .flatten()
+                        .copied()
+                        .filter(|&index| self.positions[index].distance(position) <= 1.0),
+                );
+            }
+        }
+        if let Some(index) = matching.into_iter().min() {
             return index;
         }
         self.positions.push(position);
-        self.positions.len() - 1
+        let index = self.positions.len() - 1;
+        self.buckets.entry(origin).or_default().push(index);
+        index
     }
+}
+
+fn point_bucket(position: Pos2) -> (i32, i32) {
+    (position.x.floor() as i32, position.y.floor() as i32)
 }
 
 #[derive(Default)]

@@ -3,6 +3,7 @@ pub(crate) mod circuit;
 pub(crate) mod component;
 pub(crate) mod custom_part;
 pub(crate) mod graph;
+pub(crate) mod ids;
 pub(crate) mod library;
 pub(crate) mod net;
 pub(crate) mod pin;
@@ -19,6 +20,7 @@ pub(crate) use custom_part::{
     CUSTOM_PARTS_DIR, custom_part, custom_part_list, load_custom_parts_dir, sample_part_json,
 };
 pub(crate) use graph::{CanonicalConnectivity, ConnectivityDiagnostic, ConnectivityPoint, NetId};
+pub(crate) use ids::JunctionId;
 pub(crate) use net::{
     CircuitNetlist, Net, NetLabelScope, NetlistAnnotations, NoConnectMarker, WireNetSegment,
 };

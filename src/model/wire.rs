@@ -1,8 +1,7 @@
-use crate::model::PinRef;
+use crate::model::{JunctionId, PinRef};
 use egui::Pos2;
 use serde::{Deserialize, Serialize};
 
-pub(crate) type JunctionId = u64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct WireSegmentId {
     pub(crate) wire_id: u64,
@@ -83,7 +82,7 @@ impl WireEndpoint {
                 pin_name: pin.pin_name.clone(),
             },
             Self::Junction(junction_id) => SavedWireEndpoint::Junction {
-                junction_id: *junction_id,
+                junction_id: junction_id.0,
             },
             Self::FreePoint(pos) => SavedWireEndpoint::FreePoint { x: pos.x, y: pos.y },
         }
@@ -98,7 +97,7 @@ impl WireEndpoint {
                 component_id,
                 pin_name,
             }),
-            SavedWireEndpoint::Junction { junction_id } => Self::Junction(junction_id),
+            SavedWireEndpoint::Junction { junction_id } => Self::Junction(junction_id.into()),
             SavedWireEndpoint::FreePoint { x, y } => Self::FreePoint(Pos2::new(x, y)),
         }
     }

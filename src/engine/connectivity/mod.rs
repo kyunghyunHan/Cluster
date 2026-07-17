@@ -4,6 +4,10 @@
 //! Downstream features consume `CanonicalConnectivity`, never these stages.
 
 pub(in crate::engine) mod diagnostics;
+pub(in crate::engine) mod endpoint_index;
 pub(in crate::engine) mod geometry;
+pub(in crate::engine) mod intersections;
+pub(in crate::engine) mod junctions;
 pub(in crate::engine) mod labels;
+pub(in crate::engine) mod spatial_index;
 pub(in crate::engine) mod union_find;

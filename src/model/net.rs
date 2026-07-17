@@ -62,6 +62,9 @@ pub(crate) struct NoConnectMarker {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NetlistAnnotations {
     pub(crate) junctions: Vec<Pos2>,
+    /// Stable junction identity for typed wire endpoints. The legacy
+    /// position-only list remains supported.
+    pub(crate) junction_endpoints: HashMap<super::JunctionId, Pos2>,
     pub(crate) no_connects: Vec<Pos2>,
     pub(crate) net_label_scopes: HashMap<u64, NetLabelScope>,
 }

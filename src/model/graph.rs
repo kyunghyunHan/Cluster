@@ -4,7 +4,7 @@
 //! It is never serialized; all downstream electrical consumers share one
 //! revision-cached instance.
 
-use super::{CircuitNetlist, PinRef, WireSegmentId};
+use super::{CircuitNetlist, JunctionId, PinRef, WireSegmentId};
 use egui::Pos2;
 use std::collections::HashMap;
 
@@ -27,10 +27,30 @@ impl From<Pos2> for ConnectivityPoint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ConnectivityDiagnostic {
-    DegenerateWire { wire_id: u64 },
-    UnresolvedPinEndpoint { wire_id: u64, pin: PinRef },
-    FloatingWire { wire_id: u64 },
-    DuplicateLabel { normalized_name: String },
+    DegenerateWire {
+        wire_id: u64,
+    },
+    UnresolvedPinEndpoint {
+        wire_id: u64,
+        pin: PinRef,
+    },
+    UnresolvedJunctionEndpoint {
+        wire_id: u64,
+        junction_id: JunctionId,
+    },
+    FloatingWire {
+        wire_id: u64,
+    },
+    DuplicateLabel {
+        normalized_name: String,
+    },
+    AmbiguousCrossing {
+        first_wire_id: u64,
+        first_segment: usize,
+        second_wire_id: u64,
+        second_segment: usize,
+        position: ConnectivityPoint,
+    },
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

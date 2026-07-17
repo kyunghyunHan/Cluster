@@ -1,5 +1,7 @@
-use super::connectivity::diagnostics::geometry_diagnostics;
+use super::connectivity::diagnostics::{crossing_diagnostics, geometry_diagnostics};
+use super::connectivity::endpoint_index::EndpointIndex;
 use super::connectivity::geometry::{normalized_wire_segments, wire_endpoint_contact_points};
+use super::connectivity::junctions::resolve_contacts;
 use super::connectivity::labels::merge_key as label_merge_key;
 use super::connectivity::union_find::{ConnectivityNodes, ConnectivityUnionFind};
 use crate::model::*;
@@ -41,11 +43,25 @@ fn build_canonical_connectivity_with_page_scopes(
     annotations: &NetlistAnnotations,
     component_pages: &HashMap<u64, usize>,
 ) -> CanonicalConnectivity {
+    // Canonical construction never depends on caller collection order.
+    let mut ordered_components = components.to_vec();
+    ordered_components.sort_by_key(|component| component.id);
+    let components = ordered_components.as_slice();
+    let mut ordered_wires = wires.to_vec();
+    ordered_wires.sort_by_key(|wire| wire.id);
+    let wires = ordered_wires.as_slice();
+    let mut explicit_junctions = annotations.junctions.clone();
+    explicit_junctions.extend(annotations.junction_endpoints.values().copied());
+    explicit_junctions.sort_by_key(|position| ConnectivityPoint::from(*position));
+    explicit_junctions.dedup_by(|left, right| left.distance(*right) <= 1.0);
+
     // Stage 1: geometry normalization. Saved geometry is not mutated; invalid
     // spans become diagnostics while valid polylines retain source identity.
     let mut diagnostics = geometry_diagnostics(wires);
+    diagnostics.extend(crossing_diagnostics(wires, &explicit_junctions));
     let mut nodes = ConnectivityNodes::default();
     let mut nets = ConnectivityUnionFind::default();
+    let endpoints = EndpointIndex::new(components);
 
     for wire in wires {
         for point in &wire.points {
@@ -84,53 +100,51 @@ fn build_canonical_connectivity_with_page_scopes(
             (&wire.end, wire.points.last().copied()),
         ];
         for (endpoint, geometry_position) in endpoint_rows {
-            let WireEndpoint::Pin(pin_ref) = endpoint else {
-                continue;
-            };
-            let pin_position = components
-                .iter()
-                .find(|component| component.id == pin_ref.component_id)
-                .and_then(|component| {
-                    component_pin_defs(component)
-                        .into_iter()
-                        .find(|pin| pin.label == pin_ref.pin_name)
-                        .map(|pin| pin.pos)
-                });
-            match (geometry_position, pin_position) {
-                (Some(geometry_position), Some(pin_position)) => {
-                    let geometry_node = nodes.node_for(geometry_position);
-                    let pin_node = nodes.node_for(pin_position);
-                    nets.union(geometry_node, pin_node);
+            match endpoint {
+                WireEndpoint::Pin(pin_ref) => {
+                    let pin_position = endpoints.pin_position(pin_ref);
+                    match (geometry_position, pin_position) {
+                        (Some(geometry_position), Some(pin_position)) => {
+                            let geometry_node = nodes.node_for(geometry_position);
+                            let pin_node = nodes.node_for(pin_position);
+                            nets.union(geometry_node, pin_node);
+                        }
+                        _ => diagnostics.push(ConnectivityDiagnostic::UnresolvedPinEndpoint {
+                            wire_id: wire.id,
+                            pin: pin_ref.clone(),
+                        }),
+                    }
                 }
-                _ => diagnostics.push(ConnectivityDiagnostic::UnresolvedPinEndpoint {
-                    wire_id: wire.id,
-                    pin: pin_ref.clone(),
-                }),
+                WireEndpoint::Junction(junction_id) => {
+                    let junction_position =
+                        annotations.junction_endpoints.get(junction_id).copied();
+                    match (geometry_position, junction_position) {
+                        (Some(geometry_position), Some(junction_position)) => {
+                            let geometry_node = nodes.node_for(geometry_position);
+                            let junction_node = nodes.node_for(junction_position);
+                            nets.union(geometry_node, junction_node);
+                        }
+                        _ => diagnostics.push(ConnectivityDiagnostic::UnresolvedJunctionEndpoint {
+                            wire_id: wire.id,
+                            junction_id: *junction_id,
+                        }),
+                    }
+                }
+                WireEndpoint::FreePoint(_) => {}
             }
         }
     }
 
     // Stage 3: junction resolution. Endpoints on segment interiors form T
     // junctions; an ordinary crossing only joins when explicitly annotated.
-    for contact in wire_endpoint_contact_points(wires)
-        .into_iter()
-        .chain(annotations.junctions.iter().copied())
-    {
-        let contact_node = nodes.node_for(contact);
-        nets.ensure(contact_node);
-        for wire in wires {
-            for segment in wire.points.windows(2) {
-                if point_touches_wire_segment(contact, segment[0], segment[1]) {
-                    let a = nodes.node_for(segment[0]);
-                    let b = nodes.node_for(segment[1]);
-                    nets.ensure(a);
-                    nets.ensure(b);
-                    nets.union(contact_node, a);
-                    nets.union(contact_node, b);
-                }
-            }
-        }
-    }
+    resolve_contacts(
+        wires,
+        wire_endpoint_contact_points(wires)
+            .into_iter()
+            .chain(explicit_junctions.iter().copied()),
+        &mut nodes,
+        &mut nets,
+    );
 
     // Stages 4-5: label resolution and page/global merge.
     let mut label_nodes: HashMap<String, Vec<usize>> = HashMap::new();
@@ -308,7 +322,7 @@ fn build_canonical_connectivity_with_page_scopes(
         }
     }
 
-    let wire_segments = normalized_wire_segments(wires, &annotations.junctions)
+    let wire_segments = normalized_wire_segments(wires, &explicit_junctions)
         .into_iter()
         .filter_map(|segment| {
             let root = nets.find(nodes.node_for(segment.points[0]));
@@ -329,7 +343,7 @@ fn build_canonical_connectivity_with_page_scopes(
         wire_segments,
         floating_wires,
         isolated_wires,
-        explicit_junctions: annotations.junctions.clone(),
+        explicit_junctions: explicit_junctions.clone(),
         no_connects,
     };
 
@@ -346,8 +360,7 @@ fn build_canonical_connectivity_with_page_scopes(
             )
         })
         .collect();
-    let junction_nets = annotations
-        .junctions
+    let junction_nets = explicit_junctions
         .iter()
         .filter_map(|position| {
             let node = nodes.node_for(*position);
@@ -533,6 +546,67 @@ mod tests {
     }
 
     #[test]
+    fn typed_pin_and_junction_endpoints_share_exact_net_mappings() {
+        let left = comp(
+            1,
+            ComponentKind::Resistor,
+            Pos2::new(60.0, 100.0),
+            "R1",
+            "1k",
+        );
+        let right = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(340.0, 100.0),
+            "R2",
+            "1k",
+        );
+        let left_pin = pin_position(&left, "B");
+        let right_pin = pin_position(&right, "A");
+        let junction_a = Pos2::new(160.0, 100.0);
+        let junction_b = Pos2::new(240.0, 100.0);
+        let wires = vec![
+            Wire::with_endpoints(
+                10,
+                vec![left_pin, junction_a],
+                WireEndpoint::Pin(pin_ref(1, "B")),
+                WireEndpoint::Junction(100.into()),
+            ),
+            Wire::with_endpoints(
+                11,
+                vec![junction_a, junction_b],
+                WireEndpoint::Junction(100.into()),
+                WireEndpoint::Junction(200.into()),
+            ),
+            Wire::with_endpoints(
+                12,
+                vec![junction_b, right_pin],
+                WireEndpoint::Junction(200.into()),
+                WireEndpoint::Pin(pin_ref(2, "A")),
+            ),
+        ];
+        let annotations = NetlistAnnotations {
+            junction_endpoints: [(100.into(), junction_a), (200.into(), junction_b)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+
+        let connectivity =
+            build_canonical_connectivity_with_annotations(&[left, right], &wires, &annotations);
+        let expected = connectivity.net_for_pin(&pin_ref(1, "B")).unwrap();
+        assert_eq!(connectivity.net_for_pin(&pin_ref(2, "A")), Some(expected));
+        assert_eq!(connectivity.net_for_junction(junction_a), Some(expected));
+        assert_eq!(connectivity.net_for_junction(junction_b), Some(expected));
+        for wire_id in 10..=12 {
+            assert_eq!(
+                connectivity.net_for_segment(WireSegmentId::new(wire_id, 0)),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn canonical_crossing_and_explicit_junction_have_exact_segment_maps() {
         let horizontal = wire(1, vec![Pos2::new(0.0, 0.0), Pos2::new(100.0, 0.0)]);
         let vertical = wire(2, vec![Pos2::new(50.0, -50.0), Pos2::new(50.0, 50.0)]);
@@ -541,6 +615,14 @@ mod tests {
             without.net_for_segment(WireSegmentId::new(1, 0)),
             without.net_for_segment(WireSegmentId::new(2, 0))
         );
+        assert!(without.diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            ConnectivityDiagnostic::AmbiguousCrossing {
+                first_wire_id: 1,
+                second_wire_id: 2,
+                ..
+            }
+        )));
 
         let junction = Pos2::new(50.0, 0.0);
         let annotations = NetlistAnnotations {
@@ -561,6 +643,10 @@ mod tests {
             with.net_for_segment(WireSegmentId::new(2, 0)),
             Some(expected)
         );
+        assert!(!with.diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            ConnectivityDiagnostic::AmbiguousCrossing { .. }
+        )));
     }
 
     #[test]
@@ -645,15 +731,48 @@ mod tests {
 
     #[test]
     fn canonical_generation_is_deterministic_for_all_exact_maps() {
+        let components = vec![
+            comp(
+                20,
+                ComponentKind::Resistor,
+                Pos2::new(200.0, 100.0),
+                "R2",
+                "2k",
+            ),
+            comp(
+                10,
+                ComponentKind::Resistor,
+                Pos2::new(100.0, 100.0),
+                "R1",
+                "1k",
+            ),
+        ];
         let wires = vec![
             wire(7, vec![Pos2::new(0.0, 0.0), Pos2::new(80.0, 0.0)]),
             wire(8, vec![Pos2::new(40.0, -40.0), Pos2::new(40.0, 0.0)]),
         ];
-        let first = build_canonical_connectivity(&[], &wires);
-        let second = build_canonical_connectivity(&[], &wires);
+        let first = build_canonical_connectivity(&components, &wires);
+        let second = build_canonical_connectivity(
+            &components.iter().cloned().rev().collect::<Vec<_>>(),
+            &wires.iter().cloned().rev().collect::<Vec<_>>(),
+        );
         assert_eq!(
             connectivity_signature(&first),
             connectivity_signature(&second)
+        );
+        assert_eq!(
+            first
+                .netlist
+                .nets
+                .iter()
+                .map(|net| (net.id, net.name.clone(), net.connected_pins.clone()))
+                .collect::<Vec<_>>(),
+            second
+                .netlist
+                .nets
+                .iter()
+                .map(|net| (net.id, net.name.clone(), net.connected_pins.clone()))
+                .collect::<Vec<_>>()
         );
         assert_eq!(first.diagnostics, second.diagnostics);
     }
@@ -975,6 +1094,7 @@ mod tests {
         let vertical = wire(2, vec![Pos2::new(100.0, 0.0), Pos2::new(100.0, 200.0)]);
         let annotations = NetlistAnnotations {
             junctions: vec![Pos2::new(100.0, 100.0)],
+            junction_endpoints: HashMap::new(),
             no_connects: Vec::new(),
             net_label_scopes: HashMap::new(),
         };
@@ -1013,6 +1133,7 @@ mod tests {
             .pos;
         let annotations = NetlistAnnotations {
             junctions: Vec::new(),
+            junction_endpoints: HashMap::new(),
             no_connects: vec![pin_a],
             net_label_scopes: HashMap::new(),
         };
