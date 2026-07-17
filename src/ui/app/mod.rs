@@ -201,16 +201,25 @@ pub(crate) struct PcbUiState {
 }
 
 pub(crate) struct HistoryEntry {
-    pub(crate) snapshot: CircuitSnapshot,
+    pub(crate) delta: crate::editor::delta::DocumentDelta,
     pub(crate) description: &'static str,
     pub(crate) merge_key: Option<crate::commands::CommandMergeKey>,
     pub(crate) created_at: std::time::Instant,
+    pub(crate) memory_cost: usize,
+}
+
+pub(crate) struct PendingHistory {
+    pub(crate) snapshot: CircuitSnapshot,
+    pub(crate) description: &'static str,
+    pub(crate) merge_key: Option<crate::commands::CommandMergeKey>,
 }
 
 #[derive(Default)]
 pub(crate) struct HistoryState {
-    pub(crate) undo: Vec<HistoryEntry>,
-    pub(crate) redo: Vec<HistoryEntry>,
+    pub(crate) undo: std::collections::VecDeque<HistoryEntry>,
+    pub(crate) redo: std::collections::VecDeque<HistoryEntry>,
+    pub(crate) pending: Option<PendingHistory>,
+    pub(crate) undo_memory_bytes: usize,
     pub(crate) dirty: bool,
 }
 
@@ -2683,6 +2692,9 @@ impl eframe::App for CircuitApp {
 
             let primary_down = ctx.input(|i| i.pointer.primary_down());
             if !primary_down {
+                if self.editor.drag.is_some() {
+                    self.finish_history_transaction();
+                }
                 self.editor.drag = None;
                 if let Some(start) = self.editor.rect_select_start.take()
                     && let Some(end) = self.canvas.cursor_world_pos

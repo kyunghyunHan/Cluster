@@ -72,7 +72,7 @@ pub(crate) enum ComponentKind {
     Custom,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Component {
     pub(crate) id: u64,
     pub(crate) kind: ComponentKind,

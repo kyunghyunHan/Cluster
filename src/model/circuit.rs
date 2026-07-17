@@ -3,7 +3,7 @@ use super::wire::{SavedWireEndpoint, Wire};
 use egui::Vec2;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Counters {
     pub(crate) resistor: usize,
     pub(crate) capacitor: usize,

@@ -18,7 +18,7 @@ impl WireSegmentId {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Wire {
     pub(crate) id: u64,
     pub(crate) points: Vec<Pos2>,

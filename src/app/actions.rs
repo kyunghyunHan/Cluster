@@ -1019,6 +1019,7 @@ impl crate::CircuitApp {
         self.record_history();
         self.restore_snapshot(snapshot);
         self.document.board = board;
+        self.finish_history_transaction();
         self.analysis.pcb_cad = Some(cad.clone());
         self.pcb_ui.last_sync_revision = self.analysis.circuit_revision;
         self.pcb_ui.selected_drc_index = None;
@@ -1616,6 +1617,7 @@ impl crate::CircuitApp {
             Ok((snapshot, load_notes)) => {
                 self.record_history();
                 self.restore_snapshot(snapshot);
+                self.finish_history_transaction();
                 if recovery {
                     self.mark_dirty();
                 } else {

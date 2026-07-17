@@ -175,23 +175,8 @@ impl crate::CircuitApp {
         let outcome = command.apply(&mut CommandContext::new(self));
         let changes = outcome.changes;
         if changes.document_changed {
-            let merges_with_previous = merge_key.is_some()
-                && self.editor.history.undo.last().is_some_and(|entry| {
-                    entry.merge_key == merge_key
-                        && entry.created_at.elapsed() <= std::time::Duration::from_millis(750)
-                });
-            if !merges_with_previous {
-                self.editor.history.undo.push(crate::ui::app::HistoryEntry {
-                    snapshot,
-                    description,
-                    merge_key,
-                    created_at: std::time::Instant::now(),
-                });
-            }
-            if self.editor.history.undo.len() > 80 {
-                self.editor.history.undo.remove(0);
-            }
-            self.editor.history.redo.clear();
+            let delta = crate::editor::delta::DocumentDelta::between(&snapshot, &self.snapshot());
+            self.push_history_delta(delta, description, merge_key);
         }
         self.dispatch_changes(changes);
         self.apply_command_outcome(outcome);
