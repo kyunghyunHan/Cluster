@@ -21,9 +21,9 @@ pub(crate) use ui::app::{
 };
 
 fn main() -> eframe::Result<()> {
-    let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some("--export-demo-svg") {
-        let Some(path) = args.next() else {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.first().map(String::as_str) == Some("--export-demo-svg") {
+        let Some(path) = args.get(1) else {
             eprintln!("Usage: Cluster --export-demo-svg <path>");
             std::process::exit(2);
         };
@@ -35,13 +35,23 @@ fn main() -> eframe::Result<()> {
             eprintln!("Failed to create {}: {error}", parent.display());
             std::process::exit(1);
         }
-        if let Err(error) = std::fs::write(&path, circuit_to_svg(&app.components, &app.wires)) {
+        if let Err(error) = std::fs::write(path, circuit_to_svg(&app.components, &app.wires)) {
             eprintln!("Failed to export {path}: {error}");
             std::process::exit(1);
         }
         println!("Exported {path}");
         return Ok(());
     }
+    let option = |name: &str| {
+        args.iter()
+            .position(|argument| argument == name)
+            .and_then(|index| args.get(index + 1))
+            .cloned()
+    };
+    let startup_demo = option("--demo");
+    let startup_workspace = option("--workspace");
+    let startup_panel = option("--panel");
+    let startup_capture = option("--capture");
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -54,6 +64,44 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Cluster Circuits",
         options,
-        Box::new(|_cc| Ok(Box::new(CircuitApp::new()))),
+        Box::new(move |_cc| {
+            let mut app = CircuitApp::new();
+            match startup_demo.as_deref() {
+                Some("esp32-oled") => app.load_esp32_oled_demo(),
+                Some("switch-led") => app.load_switch_led_demo(),
+                Some("short") => app.load_short_circuit_lesson_demo(),
+                Some("open") => app.load_open_switch_led_demo(),
+                Some("motor-driver") => app.load_motor_driver_demo(),
+                Some(_) | None => {}
+            }
+            match startup_panel.as_deref() {
+                Some("erc") => {
+                    app.workspace_state.bottom_dock_tab =
+                        crate::ui::bottom_dock::BottomDockTab::Erc;
+                }
+                Some("simulation") => {
+                    app.workspace_state.bottom_dock_tab =
+                        crate::ui::bottom_dock::BottomDockTab::Simulation;
+                }
+                Some("breadboard") => {
+                    app.workspace_state.bottom_dock_tab =
+                        crate::ui::bottom_dock::BottomDockTab::Breadboard;
+                }
+                Some("pcb") => {
+                    app.workspace_state.bottom_dock_tab =
+                        crate::ui::bottom_dock::BottomDockTab::Pcb;
+                }
+                Some(_) | None => {}
+            }
+            if startup_workspace.as_deref() == Some("pcb") {
+                app.update_pcb_from_schematic();
+                app.auto_place_pcb_footprints();
+                app.workspace_state.workspace = crate::ui::app::Workspace::Pcb;
+                app.workspace_state.bottom_dock_open = false;
+                app.workspace_state.bottom_dock_tab = crate::ui::bottom_dock::BottomDockTab::Pcb;
+            }
+            app.automated_capture_path = startup_capture;
+            Ok(Box::new(app))
+        }),
     )
 }

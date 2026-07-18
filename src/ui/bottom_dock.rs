@@ -526,6 +526,8 @@ fn detail_list(ui: &mut egui::Ui, title: &str, rows: &[String]) {
 
 fn render_simulation_tab(ui: &mut egui::Ui, simulation: &Simulation) {
     ui.horizontal_wrapped(|ui| {
+        metric(ui, "Backend", "Internal MNA");
+        metric(ui, "Analysis", "DC operating point");
         metric(ui, "Status", &simulation.summary);
         metric(ui, "Confidence", simulation_status_label(simulation.status));
         if let Some(voltage) = simulation.voltage {
@@ -545,6 +547,13 @@ fn render_simulation_tab(ui: &mut egui::Ui, simulation: &Simulation) {
             metric(ui, "Transient", "RC/PWM preview");
         }
     });
+    ui.label(
+        egui::RichText::new(
+            "Educational approximation. MCU, OLED, sensor, and other module symbols are not behaviorally simulated.",
+        )
+        .size(10.5)
+        .color(theme::TEXT_MUTED),
+    );
     if !simulation.explanation.is_empty() {
         ui.label(
             egui::RichText::new(&simulation.explanation)

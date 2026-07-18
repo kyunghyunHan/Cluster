@@ -16,6 +16,10 @@
 
 use std::collections::HashMap;
 use std::io::Write as IoWrite;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::model::{CircuitNetlist, Component, ComponentKind, Wire};
 
@@ -33,6 +37,8 @@ pub(crate) struct NgspiceResult {
     pub(crate) unsupported: Vec<NgspiceUnsupported>,
     /// Raw operating-point text section from ngspice stdout.
     pub(crate) raw_output: String,
+    pub(crate) stderr: String,
+    pub(crate) document_revision: u64,
 }
 
 /// A component that was excluded from the ngspice netlist.
@@ -56,6 +62,8 @@ pub(crate) enum NgspiceError {
     IoError(std::io::Error),
     /// No operating-point data was found in the output.
     NoResults,
+    Cancelled,
+    TimedOut(Duration),
 }
 
 impl std::fmt::Display for NgspiceError {
@@ -72,7 +80,44 @@ impl std::fmt::Display for NgspiceError {
             NgspiceError::NoResults => {
                 write!(f, "ngspice ran but produced no operating-point results")
             }
+            NgspiceError::Cancelled => write!(f, "ngspice simulation was cancelled"),
+            NgspiceError::TimedOut(duration) => {
+                write!(
+                    f,
+                    "ngspice exceeded the {:.1}s timeout",
+                    duration.as_secs_f32()
+                )
+            }
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NgspiceConfig {
+    pub(crate) executable: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+impl Default for NgspiceConfig {
+    fn default() -> Self {
+        Self {
+            executable: PathBuf::from("ngspice"),
+            timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CancellationToken(Arc<AtomicBool>);
+
+impl CancellationToken {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
     }
 }
 
@@ -340,27 +385,70 @@ pub(crate) fn export_ngspice_netlist(
 /// after the run.
 #[allow(dead_code)]
 pub(crate) fn run_ngspice(netlist_text: &str) -> Result<NgspiceResult, NgspiceError> {
-    if !is_ngspice_available() {
-        return Err(NgspiceError::NotInstalled);
-    }
+    run_ngspice_configured(
+        netlist_text,
+        0,
+        &NgspiceConfig::default(),
+        &CancellationToken::default(),
+    )
+}
 
-    let tmp_dir = std::env::temp_dir();
-    let cir_path = tmp_dir.join("cluster_ngspice_tmp.cir");
-    let out_path = tmp_dir.join("cluster_ngspice_tmp.out");
+pub(crate) fn run_ngspice_configured(
+    netlist_text: &str,
+    document_revision: u64,
+    config: &NgspiceConfig,
+    cancellation: &CancellationToken,
+) -> Result<NgspiceResult, NgspiceError> {
+    if cancellation.is_cancelled() {
+        return Err(NgspiceError::Cancelled);
+    }
+    static RUN_ID: AtomicU64 = AtomicU64::new(1);
+    let run_id = RUN_ID.fetch_add(1, Ordering::Relaxed);
+    let work_dir =
+        std::env::temp_dir().join(format!("cluster-ngspice-{}-{run_id}", std::process::id()));
+    std::fs::create_dir(&work_dir)?;
+    let cleanup = WorkDirGuard(work_dir.clone());
+    let cir_path = work_dir.join("input.cir");
+    let out_path = work_dir.join("results.out");
 
     {
         let mut f = std::fs::File::create(&cir_path)?;
         f.write_all(netlist_text.as_bytes())?;
+        f.sync_all()?;
     }
 
-    let output = std::process::Command::new("ngspice")
-        .args([
-            "-b",
-            "-o",
-            out_path.to_str().unwrap_or(""),
-            cir_path.to_str().unwrap_or(""),
-        ])
-        .output()?;
+    let mut child = std::process::Command::new(&config.executable)
+        .args(["-b", "-o"])
+        .arg(&out_path)
+        .arg(&cir_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                NgspiceError::NotInstalled
+            } else {
+                NgspiceError::IoError(error)
+            }
+        })?;
+    let started = Instant::now();
+    loop {
+        if cancellation.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(NgspiceError::Cancelled);
+        }
+        if started.elapsed() >= config.timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(NgspiceError::TimedOut(config.timeout));
+        }
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -368,15 +456,24 @@ pub(crate) fn run_ngspice(netlist_text: &str) -> Result<NgspiceResult, NgspiceEr
     // Read output file if it exists
     let out_text = std::fs::read_to_string(&out_path).unwrap_or_default();
 
-    let _ = std::fs::remove_file(&cir_path);
-    let _ = std::fs::remove_file(&out_path);
-
     if !output.status.success() && out_text.is_empty() && stdout.is_empty() {
         return Err(NgspiceError::SimulationFailed(stderr));
     }
 
     let combined = format!("{stdout}\n{out_text}");
-    parse_operating_point(&combined).ok_or(NgspiceError::NoResults)
+    let mut result = parse_operating_point(&combined).ok_or(NgspiceError::NoResults)?;
+    result.stderr = stderr;
+    result.document_revision = document_revision;
+    drop(cleanup);
+    Ok(result)
+}
+
+struct WorkDirGuard(PathBuf);
+
+impl Drop for WorkDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Parse node voltages and branch currents from ngspice `.op` output text.
@@ -572,5 +669,19 @@ mod tests {
         assert_eq!(spice_node_name("VCC"), "VCC");
         assert_eq!(spice_node_name("NET+3V3"), "NET_3V3");
         assert_eq!(spice_node_name("123abc"), "N_123abc");
+    }
+
+    #[test]
+    fn cancelled_run_does_not_start_a_process_or_create_files() {
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let config = NgspiceConfig {
+            executable: std::path::PathBuf::from("definitely-not-an-installed-ngspice"),
+            timeout: Duration::from_secs(1),
+        };
+        assert!(matches!(
+            run_ngspice_configured(".end", 42, &config, &cancellation),
+            Err(NgspiceError::Cancelled)
+        ));
     }
 }

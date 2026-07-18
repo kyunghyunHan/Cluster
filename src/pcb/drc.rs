@@ -36,6 +36,17 @@ pub(crate) fn run_drc(board: &Board) -> Vec<DrcViolation> {
                 object_id: Some(track.id),
             });
         }
+        if !point_inside_board_bounds(board, track.start)
+            || !point_inside_board_bounds(board, track.end)
+        {
+            violations.push(DrcViolation {
+                severity: DrcSeverity::Error,
+                title: "Copper outside board".to_string(),
+                message: format!("Track {} extends outside Edge.Cuts.", track.id),
+                location: Some(midpoint(track.start, track.end)),
+                object_id: Some(track.id),
+            });
+        }
         let edge_distance = distance_to_board_edge(board, track.start)
             .min(distance_to_board_edge(board, track.end));
         if edge_distance < rules.board_edge_clearance_mm {
@@ -106,16 +117,23 @@ pub(crate) fn run_drc(board: &Board) -> Vec<DrcViolation> {
 
     for (i, a) in board.tracks.iter().enumerate() {
         for b in board.tracks.iter().skip(i + 1) {
-            if a.layer == b.layer
-                && a.net_id != b.net_id
-                && segment_distance(a.start, a.end, b.start, b.end) < rules.default_clearance_mm
-            {
+            if a.layer != b.layer || a.net_id == b.net_id {
+                continue;
+            }
+            let distance = segment_distance(a.start, a.end, b.start, b.end);
+            let required = rules.default_clearance_mm + (a.width_mm + b.width_mm) * 0.5;
+            if distance < required {
+                let short = distance <= f32::EPSILON;
                 violations.push(DrcViolation {
                     severity: DrcSeverity::Error,
-                    title: "Clearance violation".to_string(),
+                    title: if short {
+                        "Different-net copper short".to_string()
+                    } else {
+                        "Clearance violation".to_string()
+                    },
                     message: format!(
-                        "Tracks {} and {} are closer than {:.2} mm.",
-                        a.id, b.id, rules.default_clearance_mm
+                        "Tracks {} and {} have {:.2} mm centerline spacing; {:.2} mm is required including copper width.",
+                        a.id, b.id, distance, required
                     ),
                     location: Some(midpoint(a.start, a.end)),
                     object_id: Some(a.id),
@@ -124,7 +142,20 @@ pub(crate) fn run_drc(board: &Board) -> Vec<DrcViolation> {
         }
     }
 
+    let mut references = std::collections::HashMap::<&str, u64>::new();
     for footprint in &board.footprints {
+        if let Some(previous_id) = references.insert(&footprint.reference, footprint.id) {
+            violations.push(DrcViolation {
+                severity: DrcSeverity::Error,
+                title: "Duplicate footprint reference".to_string(),
+                message: format!(
+                    "{} is used by footprints {} and {}.",
+                    footprint.reference, previous_id, footprint.id
+                ),
+                location: Some(footprint.position),
+                object_id: Some(footprint.id),
+            });
+        }
         if !point_inside_board_bounds(board, footprint.position) {
             violations.push(DrcViolation {
                 severity: DrcSeverity::Error,
@@ -139,31 +170,95 @@ pub(crate) fn run_drc(board: &Board) -> Vec<DrcViolation> {
         }
     }
 
+    for track in &board.tracks {
+        let start_connected = copper_endpoint_connected(board, track, track.start);
+        let end_connected = copper_endpoint_connected(board, track, track.end);
+        if !start_connected || !end_connected {
+            violations.push(DrcViolation {
+                severity: DrcSeverity::Warning,
+                title: "Dangling track".to_string(),
+                message: format!(
+                    "Track {} has {} unconnected endpoint(s).",
+                    track.id,
+                    usize::from(!start_connected) + usize::from(!end_connected)
+                ),
+                location: Some(if !start_connected {
+                    track.start
+                } else {
+                    track.end
+                }),
+                object_id: Some(track.id),
+            });
+        }
+    }
+
+    for via in &board.vias {
+        if !board.tracks.iter().any(|track| {
+            track.net_id == via.net_id
+                && point_segment_distance(via.position, track.start, track.end)
+                    <= via.diameter_mm * 0.5
+        }) {
+            violations.push(DrcViolation {
+                severity: DrcSeverity::Warning,
+                title: "Dangling via".to_string(),
+                message: format!("Via {} is not connected to same-net copper.", via.id),
+                location: Some(via.position),
+                object_id: Some(via.id),
+            });
+        }
+    }
+
     violations
 }
 
 pub(crate) fn run_drc_with_nets(board: &Board, nets: &[CadNet]) -> Vec<DrcViolation> {
     let mut violations = run_drc(board);
     for ratsnest in board.ratsnest_edges(nets) {
-        let net_has_copper = board
-            .tracks
+        let from = board
+            .footprints
             .iter()
-            .any(|track| track.net_id == ratsnest.net_id)
-            || board.vias.iter().any(|via| via.net_id == ratsnest.net_id);
-        if !net_has_copper {
-            violations.push(DrcViolation {
-                severity: DrcSeverity::Warning,
-                title: "Unrouted ratsnest".to_string(),
-                message: format!(
-                    "Net {} still has an unrouted connection between footprints {} and {}.",
-                    ratsnest.net_id, ratsnest.from_footprint_id, ratsnest.to_footprint_id
-                ),
-                location: None,
-                object_id: Some(ratsnest.from_footprint_id),
-            });
-        }
+            .find(|footprint| footprint.id == ratsnest.from_footprint_id);
+        let to = board
+            .footprints
+            .iter()
+            .find(|footprint| footprint.id == ratsnest.to_footprint_id);
+        violations.push(DrcViolation {
+            severity: DrcSeverity::Warning,
+            title: "Unrouted ratsnest".to_string(),
+            message: format!(
+                "Net {} still has an unrouted connection between footprints {} and {}.",
+                ratsnest.net_id, ratsnest.from_footprint_id, ratsnest.to_footprint_id
+            ),
+            location: from
+                .zip(to)
+                .map(|(from, to)| midpoint(from.position, to.position)),
+            object_id: Some(ratsnest.from_footprint_id),
+        });
     }
     violations
+}
+
+fn copper_endpoint_connected(
+    board: &Board,
+    current: &crate::pcb::track::TrackSegment,
+    point: Point2,
+) -> bool {
+    const CONTACT_MM: f32 = 0.05;
+    board.footprints.iter().any(|footprint| {
+        footprint.placed
+            && ((footprint.position.x - point.x).powi(2) + (footprint.position.y - point.y).powi(2))
+                .sqrt()
+                <= CONTACT_MM
+    }) || board.vias.iter().any(|via| {
+        via.net_id == current.net_id
+            && ((via.position.x - point.x).powi(2) + (via.position.y - point.y).powi(2)).sqrt()
+                <= via.diameter_mm * 0.5
+    }) || board.tracks.iter().any(|track| {
+        track.id != current.id
+            && track.net_id == current.net_id
+            && track.layer == current.layer
+            && (point_segment_distance(point, track.start, track.end) <= CONTACT_MM)
+    })
 }
 
 fn midpoint(a: Point2, b: Point2) -> Point2 {
@@ -314,6 +409,7 @@ mod tests {
             footprint_id: "R_THT_Axial".to_string(),
             position: Point2::new(5.0, 5.0),
             rotation_deg: 0.0,
+            flipped: false,
             placed: true,
         });
         board.footprints.push(BoardFootprint {
@@ -323,6 +419,7 @@ mod tests {
             footprint_id: "R_THT_Axial".to_string(),
             position: Point2::new(50.0, 5.0),
             rotation_deg: 0.0,
+            flipped: false,
             placed: true,
         });
         let nets = vec![CadNet {
@@ -354,5 +451,38 @@ mod tests {
                 .any(|v| v.title == "Footprint outside board")
         );
         assert!(violations.iter().any(|v| v.title == "Unrouted ratsnest"));
+    }
+
+    #[test]
+    fn drc_distinguishes_short_and_reports_dangling_copper() {
+        let mut board = Board::new_two_layer(40.0, 30.0);
+        board.tracks.push(TrackSegment {
+            id: 1,
+            net_id: 1,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(5.0, 5.0),
+            end: Point2::new(20.0, 5.0),
+            width_mm: 0.25,
+        });
+        board.tracks.push(TrackSegment {
+            id: 2,
+            net_id: 2,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(10.0, 1.0),
+            end: Point2::new(10.0, 10.0),
+            width_mm: 0.25,
+        });
+
+        let violations = run_drc(&board);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.title == "Different-net copper short")
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.title == "Dangling track")
+        );
     }
 }

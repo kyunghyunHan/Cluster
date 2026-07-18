@@ -198,6 +198,7 @@ pub(crate) struct PcbUiState {
     pub(crate) ratsnest_count: usize,
     pub(crate) last_sync_revision: u64,
     pub(crate) selected_drc_index: Option<usize>,
+    pub(crate) workspace: crate::ui::pcb_workspace::PcbWorkspaceState,
 }
 
 pub(crate) struct HistoryEntry {
@@ -339,6 +340,8 @@ pub(crate) struct CircuitApp {
     pub(crate) context_menu: Option<(egui::Pos2, u64)>,
     // ── PNG screenshot pending ────────────────────────────────────────────
     pub(crate) screenshot_pending: bool,
+    pub(crate) automated_capture_path: Option<String>,
+    pub(crate) automated_capture_requested: bool,
     pub(crate) performance: PerformanceStats,
 }
 
@@ -413,6 +416,8 @@ impl CircuitApp {
             inline_edit: None,
             context_menu: None,
             screenshot_pending: false,
+            automated_capture_path: None,
+            automated_capture_requested: false,
             performance: PerformanceStats::default(),
         }
     }
@@ -507,6 +512,11 @@ impl CircuitApp {
 
 impl eframe::App for CircuitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.automated_capture_path.is_some() && !self.automated_capture_requested {
+            self.automated_capture_requested = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            self.screenshot_pending = true;
+        }
         if std::mem::take(&mut self.workspace_state.repaint_requested) {
             ctx.request_repaint();
         }
@@ -518,23 +528,31 @@ impl eframe::App for CircuitApp {
 
         // ── Handle screenshot events ──────────────────────────────────────
         if self.screenshot_pending {
-            ctx.input(|i| {
-                for event in &i.events {
-                    if let egui::Event::Screenshot { image, .. } = event {
-                        let path = "cluster_circuit.png";
-                        let pixels: Vec<u8> = image
-                            .pixels
-                            .iter()
-                            .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
-                            .collect();
-                        match write_png(path, image.width(), image.height(), &pixels) {
-                            Ok(()) => self.status = format!("Saved {path}."),
-                            Err(e) => self.status = format!("PNG export failed: {e}"),
-                        }
-                        self.screenshot_pending = false;
-                    }
-                }
+            let screenshot = ctx.input(|input| {
+                input.events.iter().find_map(|event| match event {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
             });
+            if let Some(image) = screenshot {
+                let path = self
+                    .automated_capture_path
+                    .as_deref()
+                    .unwrap_or("cluster_circuit.png");
+                let pixels: Vec<u8> = image
+                    .pixels
+                    .iter()
+                    .flat_map(|color| [color.r(), color.g(), color.b(), color.a()])
+                    .collect();
+                match write_png(path, image.width(), image.height(), &pixels) {
+                    Ok(()) => self.status = format!("Saved {path}."),
+                    Err(error) => self.status = format!("PNG export failed: {error}"),
+                }
+                self.screenshot_pending = false;
+                if self.automated_capture_path.is_some() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
         }
 
         let now = ctx.input(|input| input.time);
@@ -601,7 +619,7 @@ impl eframe::App for CircuitApp {
                             Workspace::Schematic => {}
                             Workspace::Breadboard => self.breadboard_ui.open = true,
                             Workspace::Pcb => {
-                                self.workspace_state.bottom_dock_open = true;
+                                self.workspace_state.bottom_dock_open = false;
                                 self.workspace_state.bottom_dock_tab = BottomDockTab::Pcb;
                             }
                             Workspace::Code => {
@@ -1531,6 +1549,29 @@ impl eframe::App for CircuitApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            if self.workspace_state.workspace == Workspace::Pcb {
+                let nets = self
+                    .analysis
+                    .pcb_cad
+                    .as_ref()
+                    .map(|cad| cad.nets.clone())
+                    .unwrap_or_default();
+                let commands = crate::ui::pcb_workspace::render_pcb_workspace(
+                    ui,
+                    &self.document.board,
+                    &nets,
+                    &mut self.pcb_ui.workspace,
+                );
+                for command in commands {
+                    self.execute_editor_command(crate::commands::EditorCommand::Pcb(command));
+                }
+                if self.analysis.dirty_flags.pcb_drc_dirty
+                    && let Some(cad) = self.analysis.pcb_cad.clone()
+                {
+                    self.refresh_pcb_analysis(&cad);
+                }
+                return;
+            }
             let available = ui.available_size();
             let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
             let rect = response.rect;
@@ -2632,7 +2673,7 @@ impl eframe::App for CircuitApp {
                                             },
                                         ),
                                     )
-                                    .document_changed;
+                                    .persistence_changed;
                             }
                         } else if let Some(index) = self.components.iter().position(|c| c.id == id)
                         {
@@ -2660,7 +2701,7 @@ impl eframe::App for CircuitApp {
                                         },
                                     ),
                                 )
-                                .document_changed;
+                                .persistence_changed;
                         }
                     }
                     DragState::WirePoint {
@@ -2684,7 +2725,7 @@ impl eframe::App for CircuitApp {
                                     },
                                 ),
                             )
-                            .document_changed;
+                            .persistence_changed;
                     }
                 }
                 let _ = data_changed;

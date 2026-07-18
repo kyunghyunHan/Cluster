@@ -7,6 +7,7 @@ pub(crate) mod current_flow;
 pub(crate) mod inspector;
 pub(crate) mod left_palette;
 pub(crate) mod palette;
+pub(crate) mod pcb_workspace;
 pub(crate) mod right_inspector;
 pub(crate) mod status_bar;
 pub(crate) mod theme;

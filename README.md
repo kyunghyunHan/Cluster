@@ -105,26 +105,27 @@ file in a `cluster_parts/` folder next to where you run Cluster:
 - **Peripherals**: OLED display, DC motor, Servo, Sensor, Motor driver, 7-segment display
 - **Misc**: Crystal, Transformer, Fuse, Lamp, Breadboard, Net label
 
-### PCB / Manufacturing Direction
+### PCB / Manufacturing
 
-Cluster now has the first internal data model needed for PCB work:
+Cluster has a dedicated two-layer PCB workspace backed by persistent board data:
 
 - Schematic `SymbolInstance` data separate from physical `Footprint` data
 - `NetClass` rules for clearance, track width, via diameter, and drill
 - `Board` data with outline, layers, footprints, tracks, vias, zones, and design rules
-- Initial DRC checks for minimum track width and via sizes
-- Gerber/Excellon string generators for future file export
+- Independent PCB pan, zoom, grid, selection, and F.Cu/B.Cu visibility
+- Multi-select and box-select footprints; drag, rotate, and flip them
+- Manual 45°/90° track routing, via placement, copper selection/deletion, and undo/redo
+- Copper-island ratsnest calculation: an airwire disappears only after copper really connects it
+- Explicit schematic-to-PCB ECO reporting that preserves manual placement and keeps removed parts
+  as orphans instead of silently deleting routed work
+- DRC for width/via size, board edge/outside copper, different-net shorts,
+  clearance, duplicate references, dangling tracks/vias, outline, and unrouted connections
+- Gerber/Excellon/BOM/CPL fabrication export, blocked while error-level DRC remains
 
-The bottom dock PCB tab can now run **Update PCB** from the current schematic,
-sync generated footprints, auto-place footprints, show a compact PCB preview
-with footprints/tracks/ratsnest lines, mark DRC locations in the preview, fit
-the board outline to placed content, add simple straight tracks from unrouted
-ratsnest edges, save/load a `project.cluster/` folder, export
-Gerber/Excellon/BOM/CPL fabrication files, and show selectable DRC
-error/warning rows. Fabrication export is blocked while PCB DRC errors remain.
-This is still short of the full PCB editor; the intended MVP remains
-interactive footprint placement, routed-track editing, vias, two copper layers,
-and richer DRC navigation.
+Use **Workspace → PCB** for editing. The compact bottom-dock preview remains a
+status and diagnostics summary. Current footprint geometry is intentionally
+simple and pad-level interactive editing, copper zones, solder-mask/silkscreen
+manufacturing checks, and a pre-apply ECO dialog remain incomplete.
 
 ### Validation (ERC)
 

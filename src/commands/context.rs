@@ -1,7 +1,7 @@
 use crate::app::{Selection, Tool};
-use crate::model::cad::Point2;
+use crate::model::cad::{CadNet, NetClass, Point2, SymbolInstance};
 use crate::model::{Component, ComponentKind, Counters, DragState, Wire, WireEndpoint};
-use crate::pcb::board::{Board, BoardOutline};
+use crate::pcb::board::{Board, BoardOutline, RemovedFootprintPolicy};
 use crate::pcb::track::TrackSegment;
 use crate::pcb::via::Via;
 use egui::Pos2;
@@ -134,6 +134,17 @@ impl<'a> CommandContext<'a> {
             })
     }
 
+    pub(crate) fn flip_footprint(&mut self, footprint_id: u64) -> bool {
+        self.board_mut()
+            .footprints
+            .iter_mut()
+            .find(|footprint| footprint.id == footprint_id)
+            .is_some_and(|footprint| {
+                footprint.flipped = !footprint.flipped;
+                true
+            })
+    }
+
     pub(crate) fn add_track(&mut self, track: TrackSegment) {
         self.board_mut().tracks.push(track);
     }
@@ -158,6 +169,42 @@ impl<'a> CommandContext<'a> {
 
     pub(crate) fn set_outline(&mut self, outline: BoardOutline) {
         self.board_mut().outline = outline;
+    }
+
+    pub(crate) fn edit_track(&mut self, updated: TrackSegment) -> bool {
+        self.board_mut()
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == updated.id)
+            .is_some_and(|track| {
+                *track = updated;
+                true
+            })
+    }
+
+    pub(crate) fn set_net_class(&mut self, updated: NetClass) -> bool {
+        if let Some(class) = self
+            .board_mut()
+            .net_classes
+            .iter_mut()
+            .find(|class| class.class_id == updated.class_id)
+        {
+            *class = updated;
+        } else {
+            self.board_mut().net_classes.push(updated);
+        }
+        true
+    }
+
+    pub(crate) fn apply_eco(
+        &mut self,
+        symbols: &[SymbolInstance],
+        nets: &[CadNet],
+        policy: RemovedFootprintPolicy,
+    ) -> bool {
+        let before = self.board_mut().clone();
+        self.board_mut().apply_eco(symbols, nets, policy);
+        *self.board_mut() != before
     }
 }
 

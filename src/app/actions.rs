@@ -2,6 +2,7 @@ use crate::app::{AlignDir, Selection};
 use crate::commands::EditorCommand;
 use crate::commands::component::ComponentCommand;
 use crate::commands::document::DocumentCommand;
+use crate::commands::pcb::PcbCommand;
 use crate::commands::selection::SelectionCommand;
 use crate::commands::wiring::WiringCommand;
 use crate::engine::validation::ErcAutoFix;
@@ -10,7 +11,7 @@ use crate::engine::{
 };
 use crate::model::cad::{CadProjectData, Point2};
 use crate::model::*;
-use crate::pcb::board::{Board, BoardOutline};
+use crate::pcb::board::{Board, BoardOutline, RemovedFootprintPolicy};
 use crate::pcb::drc::{DrcSeverity, run_drc_with_nets};
 use crate::pcb::layer::BoardLayer;
 use crate::pcb::track::TrackSegment;
@@ -718,9 +719,12 @@ impl crate::CircuitApp {
     pub(crate) fn update_pcb_from_schematic(&mut self) {
         let netlist = self.current_netlist();
         let cad = CadProjectData::from_schematic(&self.components, &netlist);
-        self.document
-            .board
-            .update_from_schematic(&cad.symbols, &cad.nets);
+        let report = self.document.board.eco_report(&cad.symbols, &cad.nets);
+        self.execute_editor_command(EditorCommand::Pcb(PcbCommand::ApplyEco {
+            symbols: cad.symbols.clone(),
+            nets: cad.nets.clone(),
+            removed_policy: RemovedFootprintPolicy::KeepAsOrphan,
+        }));
         self.refresh_pcb_analysis(&cad);
         self.analysis.pcb_cad = Some(cad);
         self.pcb_ui.last_sync_revision = self.analysis.circuit_revision;
@@ -729,8 +733,12 @@ impl crate::CircuitApp {
 
         let summary = self.pcb_dock_summary();
         self.status = format!(
-            "PCB updated: {} footprint(s), {} ratsnest edge(s), {} DRC error(s).",
-            summary.footprint_count, summary.ratsnest_count, summary.drc_errors
+            "PCB updated (ECO): +{} / {} orphaned, {} footprint(s), {} unrouted, {} DRC error(s).",
+            report.added_symbols.len(),
+            report.removed_footprints.len(),
+            summary.footprint_count,
+            summary.ratsnest_count,
+            summary.drc_errors
         );
     }
 
@@ -1100,7 +1108,7 @@ impl crate::CircuitApp {
         }
     }
 
-    fn refresh_pcb_analysis(&mut self, cad: &CadProjectData) {
+    pub(crate) fn refresh_pcb_analysis(&mut self, cad: &CadProjectData) {
         self.pcb_ui.ratsnest_count = self.unrouted_pcb_ratsnest(cad).len();
         self.analysis.pcb_drc = run_drc_with_nets(&self.document.board, &cad.nets);
         self.analysis.dirty_flags.pcb_drc_dirty = false;

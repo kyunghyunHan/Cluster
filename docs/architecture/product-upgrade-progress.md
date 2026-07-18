@@ -1,6 +1,6 @@
 # Product upgrade progress
 
-Updated: 2026-07-17.
+Updated: 2026-07-20.
 
 This document records implemented boundaries and deliberately does not describe later product
 phases as complete.
@@ -69,3 +69,20 @@ Baseline before this slice is recorded in `product-upgrade-baseline.md`. After t
 - `cargo doc --no-deps`: pass.
 - `cargo audit`: not run because the `cargo-audit` subcommand is not installed in this
   environment.
+
+## 2026-07-20 PCB workflow increment
+
+- Added the dedicated PCB workspace with independent view state, layer/net
+  controls, footprint selection/drag/rotate/flip, manual 45°/90° route state,
+  via placement, copper deletion, and command-backed undo/redo.
+- Replaced visual footprint-chain ratsnest logic with copper-connected islands.
+- Made schematic-to-PCB synchronization an undoable ECO that preserves layout
+  and keeps removed components as orphans by default.
+- Expanded DRC for different-net shorts, outside copper, duplicate references,
+  and dangling tracks/vias.
+- Hardened ngspice execution with unique directories, timeout, cancellation,
+  stderr, executable configuration, and revision tagging.
+- Added reproducible real-window captures under `docs/media/`.
+
+The remaining limitations and current validation results are recorded in
+`product-grade-upgrade-2026-07-20.md`.
