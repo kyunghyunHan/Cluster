@@ -201,6 +201,7 @@ Notes:
 10. 고급 시뮬레이션: internal beginner DC 유지 + 선택적 ngspice export/run/import
 
 현재 구조 안정화 상태:
+- 성능 기준선은 commit `97e851f`에서 deterministic Criterion fixture로 기록되었고, `benches/performance.rs`가 schematic/PCB/undo 핵심 경로를 재현한다. 현재 `DocumentRevisions`와 `Arc` 기반 connectivity/netlist/simulation cache가 적용되어 visual-only/PCB-only 변경이 schematic 분석 캐시를 무효화하지 않는다. 대규모 전체 spatial index 및 worker 전환은 아직 미완료이며 benchmark 전후 수치를 함께 기록해야 한다.
 - `ProjectDocument`/`EditorState`/`WorkspaceState`/`AnalysisState` 소유권 경계를 사용한다.
 - editor command는 제한된 `CommandContext`와 typed `ChangeSet`을 사용하며 중앙 dispatcher가 cache/dirty/autosave/repaint를 처리한다. undo/redo는 16 MiB 제한의 entity delta를 저장한다.
 - canonical connectivity의 endpoint/spatial-index/intersection/junction/geometry/label/union-find/diagnostics 단계가 분리되었고 입력 배열 순서와 무관한 exact net mapping을 테스트한다.

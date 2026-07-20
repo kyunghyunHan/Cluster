@@ -51,14 +51,14 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn invalidate_connectivity_cache(&mut self) {
-        self.analysis.circuit_revision = self.analysis.circuit_revision.saturating_add(1);
         self.analysis.cached_connectivity = None;
+        self.analysis.cached_netlist = None;
+        self.analysis.cached_connected_pins = None;
         self.invalidate_simulation_cache();
     }
 
     pub(crate) fn invalidate_simulation_cache(&mut self) {
         self.analysis.cached_simulation = None;
-        self.analysis.cached_connected_pins = None;
     }
 
     /// Compatibility boundary for non-command inputs such as custom-part
@@ -173,7 +173,7 @@ impl crate::CircuitApp {
         entry.delta.undo(&mut self.document);
         self.reset_editor_after_history_navigation();
         self.editor.history.redo.push_back(entry);
-        self.dispatch_changes(crate::commands::ChangeSet::schematic());
+        self.dispatch_changes(crate::commands::ChangeSet::restored_document());
         self.status = format!("Undo: {description}.");
     }
 
@@ -192,7 +192,7 @@ impl crate::CircuitApp {
             .undo_memory_bytes
             .saturating_add(entry.memory_cost);
         self.editor.history.undo.push_back(entry);
-        self.dispatch_changes(crate::commands::ChangeSet::schematic());
+        self.dispatch_changes(crate::commands::ChangeSet::restored_document());
         self.status = format!("Redo: {description}.");
     }
 

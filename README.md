@@ -352,6 +352,33 @@ mathematically impossible, such as an ideal-source conflict.
 
 ---
 
+## Performance baseline
+
+The repository includes deterministic Criterion fixtures and benchmarks in
+`benches/performance.rs`. They cover 100/500/1,000-component schematics,
+connectivity, ERC, MNA, hit testing, viewport queries, current-flow generation,
+serialization, PCB DRC/ratsnest, and snapshot-vs-delta history costs. Run them
+with `cargo bench --bench performance`.
+
+Baseline captured on commit `97e851f` (Apple Silicon/macOS, warm build):
+
+| Benchmark | Median |
+| --- | ---: |
+| connectivity small / medium / large | 3.25 ms / 52.0 ms / 242.7 ms |
+| ERC small / medium / large | 6.56 ms / 178 ms / 1.06 s |
+
+These are repeatable workload baselines, not release acceptance claims. The
+large fixture intentionally remains a useful stress case while spatial-index
+and dependency-keyed cache work is measured. Criterion output is the source of
+truth for subsequent before/after comparisons.
+
+The analysis layer now uses typed document revisions and `Arc`-backed cached
+connectivity, netlists, simulations, and connected-pin projections. Visual-only
+changes do not invalidate schematic or simulation caches; PCB-only persistence
+changes do not advance the schematic analysis revision. The performance overlay
+shows rendered/total objects, analysis durations, and cache hit state in debug
+builds.
+
 ## Roadmap
 
 - [x] Beginner ESP32/Arduino example gallery in the palette

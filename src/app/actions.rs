@@ -953,7 +953,7 @@ impl crate::CircuitApp {
         match self.save_project_folder_to("project.cluster") {
             Ok(()) => {
                 self.editor.history.dirty = false;
-                self.last_autorecover_revision = self.analysis.circuit_revision;
+                self.last_autorecover_revision = self.analysis.revisions.persistence;
                 self.status =
                     "Saved project.cluster with schematic, PCB, and CAD data.".to_string();
             }
@@ -1030,14 +1030,13 @@ impl crate::CircuitApp {
         self.restore_snapshot(snapshot);
         self.document.board = board;
         self.finish_history_transaction();
+        self.dispatch_changes(crate::commands::ChangeSet::restored_document());
         self.analysis.pcb_cad = Some(cad.clone());
         self.pcb_ui.last_sync_revision = self.analysis.circuit_revision;
         self.pcb_ui.selected_drc_index = None;
         self.refresh_pcb_analysis(&cad);
         self.editor.history.dirty = false;
-        self.analysis.cached_simulation = None;
-        self.analysis.cached_connectivity = None;
-        self.last_autorecover_revision = self.analysis.circuit_revision;
+        self.last_autorecover_revision = self.analysis.revisions.persistence;
         self.analysis.dirty_flags.geometry_dirty = false;
         self.analysis.dirty_flags.connectivity_dirty = false;
         self.analysis.dirty_flags.validation_dirty = false;
@@ -1438,7 +1437,7 @@ impl crate::CircuitApp {
         match self.write_circuit_json(&path) {
             Ok(()) => {
                 self.editor.history.dirty = false;
-                self.last_autorecover_revision = self.analysis.circuit_revision;
+                self.last_autorecover_revision = self.analysis.revisions.persistence;
                 self.status = format!("Saved {}.", path.display());
             }
             Err(err) => {
@@ -1596,7 +1595,7 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn backup_dirty_work(&mut self, reason: &str) {
-        if !self.editor.history.dirty || (self.components.is_empty() && self.wires.is_empty()) {
+        if !self.editor.history.dirty {
             return;
         }
         self.save_current_page();
@@ -1625,14 +1624,12 @@ impl crate::CircuitApp {
                 self.record_history();
                 self.restore_snapshot(snapshot);
                 self.finish_history_transaction();
+                self.dispatch_changes(crate::commands::ChangeSet::restored_document());
                 if recovery {
-                    self.mark_dirty();
+                    self.editor.history.dirty = true;
                 } else {
                     self.editor.history.dirty = false;
-                    self.analysis.circuit_revision =
-                        self.analysis.circuit_revision.saturating_add(1);
-                    self.analysis.cached_simulation = None;
-                    self.last_autorecover_revision = self.analysis.circuit_revision;
+                    self.last_autorecover_revision = self.analysis.revisions.persistence;
                 }
                 self.status = if load_notes.is_empty() {
                     format!("Loaded {}.", path.display())
@@ -1653,17 +1650,27 @@ impl crate::CircuitApp {
 
     // ── Cache accessors ──────────────────────────────────────────────────────
 
-    pub(crate) fn current_simulation(&mut self) -> crate::engine::simulation::Simulation {
+    pub(crate) fn current_simulation(
+        &mut self,
+    ) -> std::sync::Arc<crate::engine::simulation::Simulation> {
         if !self.simulate {
             self.simulation_run_state = crate::ui::app::SimulationRunState::Stopped;
-            return crate::engine::simulation::Simulation::default();
+            return std::sync::Arc::new(crate::engine::simulation::Simulation::default());
         }
         let ac_key = self.simulation_ui.ac_freq_hz.to_bits();
-        if let Some((revision, cached_ac_key, simulation)) = &self.analysis.cached_simulation
-            && *revision == self.analysis.circuit_revision
+        let revision = crate::ui::app::SimulationRevisionKey {
+            connectivity: self.analysis.revisions.schematic_connectivity,
+            topology: self.analysis.revisions.simulation_topology,
+            parameters: self.analysis.revisions.simulation_parameters,
+            electrical: self.analysis.revisions.electrical_parameters,
+        };
+        if let Some((cached_revision, cached_ac_key, simulation)) = &self.analysis.cached_simulation
+            && *cached_revision == revision
             && *cached_ac_key == ac_key
         {
             self.performance.simulation_cache_hit = true;
+            self.performance.simulation_cache_hits =
+                self.performance.simulation_cache_hits.saturating_add(1);
             self.simulation_run_state = match simulation.status {
                 crate::engine::simulation::SimulationStatus::Ok => {
                     crate::ui::app::SimulationRunState::Valid
@@ -1675,9 +1682,11 @@ impl crate::CircuitApp {
                     crate::ui::app::SimulationRunState::Failed
                 }
             };
-            return simulation.clone();
+            return std::sync::Arc::clone(simulation);
         }
         self.performance.simulation_cache_hit = false;
+        self.performance.simulation_cache_misses =
+            self.performance.simulation_cache_misses.saturating_add(1);
         self.simulation_run_state = crate::ui::app::SimulationRunState::Solving;
         let connectivity = self.current_connectivity();
         let mna_started = std::time::Instant::now();
@@ -1705,8 +1714,9 @@ impl crate::CircuitApp {
             &connectivity.netlist,
         );
         self.performance.erc_ms = erc_started.elapsed().as_secs_f64() * 1_000.0;
+        let simulation = std::sync::Arc::new(simulation);
         self.analysis.cached_simulation =
-            Some((self.analysis.circuit_revision, ac_key, simulation.clone()));
+            Some((revision, ac_key, std::sync::Arc::clone(&simulation)));
         self.analysis.simulation_revision = self.analysis.simulation_revision.saturating_add(1);
         self.analysis.dirty_flags.validation_dirty = false;
         self.analysis.dirty_flags.simulation_dirty = false;
@@ -1724,18 +1734,32 @@ impl crate::CircuitApp {
         simulation
     }
 
-    pub(crate) fn current_netlist(&mut self) -> CircuitNetlist {
-        self.current_connectivity().netlist
+    pub(crate) fn current_netlist(&mut self) -> std::sync::Arc<CircuitNetlist> {
+        let revision = self.analysis.revisions.schematic_connectivity;
+        if let Some((cached_revision, netlist)) = &self.analysis.cached_netlist
+            && *cached_revision == revision
+        {
+            return std::sync::Arc::clone(netlist);
+        }
+        let connectivity = self.current_connectivity();
+        let netlist = std::sync::Arc::new(connectivity.netlist.clone());
+        self.analysis.cached_netlist = Some((revision, std::sync::Arc::clone(&netlist)));
+        netlist
     }
 
-    pub(crate) fn current_connectivity(&mut self) -> CanonicalConnectivity {
+    pub(crate) fn current_connectivity(&mut self) -> std::sync::Arc<CanonicalConnectivity> {
+        let revision = self.analysis.revisions.schematic_connectivity;
         if let Some((revision, connectivity)) = &self.analysis.cached_connectivity
-            && *revision == self.analysis.circuit_revision
+            && *revision == self.analysis.revisions.schematic_connectivity
         {
             self.performance.netlist_cache_hit = true;
-            return connectivity.clone();
+            self.performance.netlist_cache_hits =
+                self.performance.netlist_cache_hits.saturating_add(1);
+            return std::sync::Arc::clone(connectivity);
         }
         self.performance.netlist_cache_hit = false;
+        self.performance.netlist_cache_misses =
+            self.performance.netlist_cache_misses.saturating_add(1);
         let started = std::time::Instant::now();
         let annotations = self.annotations.netlist_annotations();
         let connectivity = build_canonical_connectivity_with_annotations(
@@ -1744,34 +1768,37 @@ impl crate::CircuitApp {
             &annotations,
         );
         self.performance.netlist_ms = started.elapsed().as_secs_f64() * 1_000.0;
-        self.analysis.cached_connectivity =
-            Some((self.analysis.circuit_revision, connectivity.clone()));
+        let connectivity = std::sync::Arc::new(connectivity);
+        self.analysis.cached_connectivity = Some((revision, std::sync::Arc::clone(&connectivity)));
+        self.analysis.cached_netlist =
+            Some((revision, std::sync::Arc::new(connectivity.netlist.clone())));
         self.analysis.dirty_flags.connectivity_dirty = false;
         connectivity
     }
 
-    pub(crate) fn current_connected_pins(&mut self) -> Vec<(i32, i32)> {
+    pub(crate) fn current_connected_pins(&mut self) -> std::sync::Arc<Vec<(i32, i32)>> {
+        let revision = self.analysis.revisions.schematic_connectivity;
         if let Some((revision, pins)) = &self.analysis.cached_connected_pins
-            && *revision == self.analysis.circuit_revision
+            && *revision == self.analysis.revisions.schematic_connectivity
         {
-            return pins.clone();
+            return std::sync::Arc::clone(pins);
         }
         let pins = self
             .current_connectivity()
             .netlist
             .pins
-            .into_iter()
+            .iter()
             .filter(|pin| pin.connected_by_wire)
             .map(|pin| (pin.position.x.round() as i32, pin.position.y.round() as i32))
             .collect::<Vec<_>>();
-        self.analysis.cached_connected_pins = Some((self.analysis.circuit_revision, pins.clone()));
+        let pins = std::sync::Arc::new(pins);
+        self.analysis.cached_connected_pins = Some((revision, std::sync::Arc::clone(&pins)));
         pins
     }
 
     pub(crate) fn flush_autorecover_if_needed(&mut self) {
         if !self.editor.history.dirty
-            || self.last_autorecover_revision == self.analysis.circuit_revision
-            || (self.components.is_empty() && self.wires.is_empty())
+            || self.last_autorecover_revision == self.analysis.revisions.persistence
         {
             return;
         }
@@ -1782,7 +1809,7 @@ impl crate::CircuitApp {
             self.status = format!("Auto backup failed: {err}");
             return;
         }
-        self.last_autorecover_revision = self.analysis.circuit_revision;
+        self.last_autorecover_revision = self.analysis.revisions.persistence;
     }
 
     pub(crate) fn effective_project_pages(&self) -> Vec<ProjectPage> {

@@ -63,6 +63,21 @@ impl ChangeSet {
         }
     }
 
+    pub(crate) const fn restored_document() -> Self {
+        Self {
+            persistence_changed: true,
+            schematic_geometry_changed: true,
+            schematic_connectivity_changed: true,
+            electrical_values_changed: true,
+            simulation_topology_changed: true,
+            simulation_parameters_changed: true,
+            pcb_sync_changed: true,
+            pcb_geometry_changed: true,
+            pcb_rules_changed: true,
+            visual_only: false,
+        }
+    }
+
     pub(crate) const fn none() -> Self {
         Self {
             persistence_changed: false,
@@ -213,8 +228,48 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn dispatch_changes(&mut self, changes: ChangeSet) {
+        let revisions = &mut self.analysis.revisions;
         if changes.persistence_changed {
+            revisions.persistence = revisions.persistence.saturating_add(1);
+            // `circuit_revision` is the schematic/analysis revision used by
+            // schematic-to-PCB sync and simulation caches. PCB-only edits are
+            // persisted, but must not make the schematic appear changed.
+            if changes.schematic_geometry_changed
+                || changes.schematic_connectivity_changed
+                || changes.electrical_values_changed
+                || changes.simulation_topology_changed
+                || changes.simulation_parameters_changed
+            {
+                self.analysis.circuit_revision = revisions.persistence;
+            }
             self.editor.history.dirty = true;
+        }
+        if changes.schematic_geometry_changed {
+            revisions.schematic_geometry = revisions.schematic_geometry.saturating_add(1);
+        }
+        if changes.schematic_connectivity_changed {
+            revisions.schematic_connectivity = revisions.schematic_connectivity.saturating_add(1);
+        }
+        if changes.electrical_values_changed {
+            revisions.electrical_parameters = revisions.electrical_parameters.saturating_add(1);
+        }
+        if changes.simulation_topology_changed {
+            revisions.simulation_topology = revisions.simulation_topology.saturating_add(1);
+        }
+        if changes.simulation_parameters_changed {
+            revisions.simulation_parameters = revisions.simulation_parameters.saturating_add(1);
+        }
+        if changes.pcb_sync_changed {
+            revisions.board_topology = revisions.board_topology.saturating_add(1);
+        }
+        if changes.pcb_geometry_changed {
+            revisions.board_geometry = revisions.board_geometry.saturating_add(1);
+        }
+        if changes.pcb_rules_changed {
+            revisions.board_rules = revisions.board_rules.saturating_add(1);
+        }
+        if changes.visual_only {
+            revisions.visual = revisions.visual.saturating_add(1);
         }
         self.analysis.dirty_flags.geometry_dirty |= changes.schematic_geometry_changed;
         self.analysis.dirty_flags.connectivity_dirty |= changes.schematic_connectivity_changed;
@@ -280,6 +335,36 @@ mod tests {
     }
 
     #[test]
+    fn property_change_reuses_connectivity_projections() {
+        let mut app = crate::CircuitApp::new();
+        let connectivity = app.current_connectivity();
+        let connected_pins = app.current_connected_pins();
+        let _simulation = app.current_simulation();
+        assert!(app.analysis.cached_simulation.is_some());
+
+        app.dispatch_changes(ChangeSet::properties());
+
+        let cached_connectivity = &app
+            .analysis
+            .cached_connectivity
+            .as_ref()
+            .expect("connectivity cache should survive property-only changes")
+            .1;
+        let cached_connected_pins = &app
+            .analysis
+            .cached_connected_pins
+            .as_ref()
+            .expect("connected-pin cache should survive property-only changes")
+            .1;
+        assert!(std::sync::Arc::ptr_eq(&connectivity, cached_connectivity));
+        assert!(std::sync::Arc::ptr_eq(
+            &connected_pins,
+            cached_connected_pins
+        ));
+        assert!(app.analysis.cached_simulation.is_none());
+    }
+
+    #[test]
     fn pcb_primitive_command_is_undoable_and_invalidates_drc_only() {
         use crate::model::cad::Point2;
         use crate::pcb::layer::BoardLayer;
@@ -287,6 +372,7 @@ mod tests {
 
         let mut app = crate::CircuitApp::new();
         let revision = app.analysis.circuit_revision;
+        let persistence_revision = app.analysis.revisions.persistence;
         let changes =
             app.execute_editor_command(EditorCommand::Pcb(PcbCommand::AddTrack(TrackSegment {
                 id: 1,
@@ -302,10 +388,19 @@ mod tests {
         assert!(changes.pcb_geometry_changed);
         assert!(!changes.schematic_connectivity_changed);
         assert_eq!(app.analysis.circuit_revision, revision);
+        assert!(app.analysis.revisions.persistence > persistence_revision);
         assert!(app.analysis.dirty_flags.pcb_drc_dirty);
 
+        app.analysis.pcb_drc.push(crate::pcb::drc::DrcViolation {
+            severity: crate::pcb::drc::DrcSeverity::Error,
+            title: "Stale DRC".to_string(),
+            message: "Must be cleared by history navigation.".to_string(),
+            location: None,
+            object_id: None,
+        });
         app.undo();
         assert!(app.document.board.tracks.is_empty());
+        assert!(app.analysis.pcb_drc.is_empty());
         app.redo();
         assert_eq!(app.document.board.tracks.len(), 1);
     }

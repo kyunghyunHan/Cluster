@@ -42,6 +42,7 @@ use crate::ui::validation_panel::ValidationPanelAction;
 use eframe::egui;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 pub(crate) fn application_data_dir() -> std::path::PathBuf {
     #[cfg(target_os = "windows")]
@@ -270,25 +271,50 @@ pub(crate) struct DirtyFlags {
     pub(crate) pcb_drc_dirty: bool,
 }
 
+type ConnectedPinsCache = Option<(u64, Arc<Vec<(i32, i32)>>)>;
+
 /// Derived analysis data. None of these fields are serialized as user data.
 pub(crate) struct AnalysisState {
     pub(crate) circuit_revision: u64,
+    pub(crate) revisions: DocumentRevisions,
     pub(crate) dirty_flags: DirtyFlags,
-    pub(crate) cached_connectivity: Option<(u64, CanonicalConnectivity)>,
-    pub(crate) cached_simulation: Option<(u64, u32, Simulation)>,
+    pub(crate) cached_connectivity: Option<(u64, Arc<CanonicalConnectivity>)>,
+    pub(crate) cached_netlist: Option<(u64, Arc<CircuitNetlist>)>,
+    pub(crate) cached_simulation: Option<(SimulationRevisionKey, u32, Arc<Simulation>)>,
     pub(crate) simulation_revision: u64,
-    pub(crate) cached_connected_pins: Option<(u64, Vec<(i32, i32)>)>,
+    pub(crate) cached_connected_pins: ConnectedPinsCache,
     pub(crate) current_flow_cache: CurrentFlowCache,
     pub(crate) pcb_cad: Option<crate::model::cad::CadProjectData>,
     pub(crate) pcb_drc: Vec<crate::pcb::drc::DrcViolation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SimulationRevisionKey {
+    pub(crate) connectivity: u64,
+    pub(crate) topology: u64,
+    pub(crate) parameters: u64,
+    pub(crate) electrical: u64,
 }
 
 impl Default for AnalysisState {
     fn default() -> Self {
         Self {
             circuit_revision: 1,
+            revisions: DocumentRevisions {
+                persistence: 1,
+                schematic_geometry: 1,
+                schematic_connectivity: 1,
+                electrical_parameters: 1,
+                simulation_topology: 1,
+                simulation_parameters: 1,
+                board_topology: 1,
+                board_geometry: 1,
+                board_rules: 1,
+                visual: 1,
+            },
             dirty_flags: DirtyFlags::default(),
             cached_connectivity: None,
+            cached_netlist: None,
             cached_simulation: None,
             simulation_revision: 0,
             cached_connected_pins: None,
@@ -346,12 +372,51 @@ pub(crate) struct CircuitApp {
 }
 
 #[derive(Debug, Default)]
+pub(crate) struct MetricSummary {
+    pub(crate) latest_ms: f64,
+    pub(crate) samples: VecDeque<f64>,
+    pub(crate) invocations: u64,
+}
+
+impl MetricSummary {
+    const WINDOW: usize = 120;
+
+    pub(crate) fn record(&mut self, duration_ms: f64) {
+        self.latest_ms = duration_ms;
+        self.invocations = self.invocations.saturating_add(1);
+        if self.samples.len() == Self::WINDOW {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(duration_ms);
+    }
+
+    pub(crate) fn percentile(&self, percentile: f64) -> f64 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        let mut sorted = self.samples.iter().copied().collect::<Vec<_>>();
+        sorted.sort_by(f64::total_cmp);
+        let index = ((sorted.len() - 1) as f64 * percentile).round() as usize;
+        sorted[index.min(sorted.len() - 1)]
+    }
+
+    pub(crate) fn maximum(&self) -> f64 {
+        self.samples.iter().copied().fold(0.0, f64::max)
+    }
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct PerformanceStats {
+    pub(crate) frame: MetricSummary,
     pub(crate) mna_ms: f64,
     pub(crate) erc_ms: f64,
     pub(crate) netlist_ms: f64,
     pub(crate) simulation_cache_hit: bool,
+    pub(crate) simulation_cache_hits: u64,
+    pub(crate) simulation_cache_misses: u64,
     pub(crate) netlist_cache_hit: bool,
+    pub(crate) netlist_cache_hits: u64,
+    pub(crate) netlist_cache_misses: u64,
     pub(crate) flow_cache_hit: bool,
     pub(crate) rendered_components: usize,
     pub(crate) rendered_wire_segments: usize,
@@ -512,6 +577,7 @@ impl CircuitApp {
 
 impl eframe::App for CircuitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let frame_started = std::time::Instant::now();
         if self.automated_capture_path.is_some() && !self.automated_capture_requested {
             self.automated_capture_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
@@ -1756,7 +1822,7 @@ impl eframe::App for CircuitApp {
 
             let flow_rebuilt = self.analysis.current_flow_cache.rebuild_if_needed(
                 FlowCacheKey {
-                    geometry_revision: self.analysis.circuit_revision,
+                    geometry_revision: self.analysis.revisions.schematic_geometry,
                     simulation_revision: self.analysis.simulation_revision,
                 },
                 &self.document.wires,
@@ -1906,7 +1972,12 @@ impl eframe::App for CircuitApp {
             if cfg!(debug_assertions) && self.workspace_state.show_performance_overlay {
                 let fps = ctx.input(|input| 1.0 / input.stable_dt.max(1.0 / 240.0));
                 let lines = [
-                    format!("FPS {fps:.0}  ·  rev {}", self.analysis.circuit_revision),
+                    format!(
+                        "FPS {fps:.0}  ·  frame {:.2}/{:.2}/{:.2} ms (p50/p95/max)",
+                        self.performance.frame.percentile(0.5),
+                        self.performance.frame.percentile(0.95),
+                        self.performance.frame.maximum()
+                    ),
                     format!(
                         "Components {}/{}  ·  wire segments {}/{}",
                         self.performance.rendered_components,
@@ -1947,7 +2018,7 @@ impl eframe::App for CircuitApp {
                     ),
                 ];
                 let overlay =
-                    Rect::from_min_size(rect.min + Vec2::new(10.0, 10.0), Vec2::new(330.0, 82.0));
+                    Rect::from_min_size(rect.min + Vec2::new(10.0, 10.0), Vec2::new(390.0, 96.0));
                 painter.rect_filled(
                     overlay,
                     3.0,
@@ -3485,6 +3556,9 @@ impl eframe::App for CircuitApp {
                     }
                 });
         }
+        self.performance
+            .frame
+            .record(frame_started.elapsed().as_secs_f64() * 1_000.0);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

@@ -7,6 +7,20 @@
 use super::{Component, Counters, SchematicAnnotations, Wire};
 use crate::pcb::board::Board;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DocumentRevisions {
+    pub persistence: u64,
+    pub schematic_geometry: u64,
+    pub schematic_connectivity: u64,
+    pub electrical_parameters: u64,
+    pub simulation_topology: u64,
+    pub simulation_parameters: u64,
+    pub board_topology: u64,
+    pub board_geometry: u64,
+    pub board_rules: u64,
+    pub visual: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ProjectPage {
     pub(crate) name: String,
