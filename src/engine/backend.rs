@@ -4,7 +4,7 @@
 use crate::engine::mna;
 use crate::engine::ngspice::{
     CancellationToken, NgspiceConfig, NgspiceError, NgspiceResult, export_ngspice_netlist,
-    run_ngspice_configured,
+    export_ngspice_transient_netlist, run_ngspice_configured, run_ngspice_transient_configured,
 };
 use crate::engine::transient::{TransientResult, solve_transient_with_netlist};
 use crate::model::{CircuitNetlist, Component, Wire};
@@ -86,10 +86,16 @@ impl SimulationBackend for InternalMnaBackend {
         if cancellation.is_cancelled() {
             return Err(SimulationBackendError::Cancelled);
         }
-        mna::solve_dc_detailed(circuit.components, circuit.wires)
+        mna::solve_dc_detailed_with_cancellation(circuit.components, circuit.wires, cancellation)
             .map(Box::new)
             .map(OperatingPointResult::Internal)
-            .map_err(SimulationBackendError::Internal)
+            .map_err(|error| {
+                if error == mna::SimulationError::Cancelled {
+                    SimulationBackendError::Cancelled
+                } else {
+                    SimulationBackendError::Internal(error)
+                }
+            })
     }
 
     fn transient(
@@ -144,13 +150,24 @@ impl SimulationBackend for NgSpiceBackend {
 
     fn transient(
         &self,
-        _circuit: &SimulationCircuit<'_>,
-        _request: &TransientRequest,
-        _cancellation: &CancellationToken,
+        circuit: &SimulationCircuit<'_>,
+        request: &TransientRequest,
+        cancellation: &CancellationToken,
     ) -> Result<TransientResult, SimulationBackendError> {
-        Err(SimulationBackendError::UnsupportedAnalysis(
-            "ngspice transient import is not connected yet",
-        ))
+        let (netlist, _unsupported) = export_ngspice_transient_netlist(
+            circuit.components,
+            circuit.wires,
+            circuit.netlist,
+            request.duration_s,
+            request.maximum_samples,
+        );
+        run_ngspice_transient_configured(
+            &netlist,
+            circuit.document_revision,
+            &self.config,
+            cancellation,
+        )
+        .map_err(SimulationBackendError::NgSpice)
     }
 }
 

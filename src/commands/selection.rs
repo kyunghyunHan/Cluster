@@ -1,7 +1,7 @@
+use crate::Component;
 use crate::app::{AlignDir, Selection};
 use crate::commands::ChangeSet;
 use crate::commands::context::{CommandContext, CommandOutcome};
-use crate::{Component, component_pins};
 use egui::Vec2;
 
 pub(crate) enum SelectionCommand {
@@ -19,9 +19,7 @@ impl SelectionCommand {
                 if !context.multi_selected().is_empty() {
                     let selected = context.multi_selected().clone();
                     let count = selected.len();
-                    context
-                        .components_mut()
-                        .retain(|component| !selected.contains(&component.id));
+                    context.remove_components(&selected);
                     context.clear_multi_selected();
                     context.set_selected(None);
                     CommandOutcome::new(ChangeSet::schematic())
@@ -29,15 +27,20 @@ impl SelectionCommand {
                 } else {
                     match context.take_selected() {
                         Some(Selection::Component(id)) => {
-                            context
-                                .components_mut()
-                                .retain(|component| component.id != id);
-                            CommandOutcome::new(ChangeSet::schematic())
-                                .with_status("Component deleted.")
+                            if context.remove_component(id) {
+                                CommandOutcome::new(ChangeSet::schematic())
+                                    .with_status("Component deleted.")
+                            } else {
+                                CommandOutcome::unchanged()
+                            }
                         }
                         Some(Selection::Wire(id)) => {
-                            context.wires_mut().retain(|wire| wire.id != id);
-                            CommandOutcome::new(ChangeSet::schematic()).with_status("Wire deleted.")
+                            if context.remove_wire(id) {
+                                CommandOutcome::new(ChangeSet::schematic())
+                                    .with_status("Wire deleted.")
+                            } else {
+                                CommandOutcome::unchanged()
+                            }
                         }
                         None => {
                             CommandOutcome::unchanged().with_status("Nothing selected to delete.")
@@ -49,30 +52,8 @@ impl SelectionCommand {
                 let Some(Selection::Component(id)) = context.selected() else {
                     return CommandOutcome::unchanged();
                 };
-                let Some(index) = context
-                    .components()
-                    .iter()
-                    .position(|component| component.id == id)
-                else {
+                if !context.rotate_component(id) {
                     return CommandOutcome::unchanged();
-                };
-                let old_pins = component_pins(&context.components()[index]);
-                context.components_mut()[index].rotation =
-                    (context.components()[index].rotation + 90) % 360;
-                let new_pins = component_pins(&context.components()[index]);
-                crate::move_attached_wire_endpoints(context.wires_mut(), &old_pins, &new_pins);
-                for wire in context.wires_mut() {
-                    if wire.points.len() > 2 {
-                        let first = wire.points[0];
-                        let Some(&last) = wire.points.last() else {
-                            continue;
-                        };
-                        if old_pins.iter().any(|pin| first.distance(*pin) <= 20.0)
-                            || old_pins.iter().any(|pin| last.distance(*pin) <= 20.0)
-                        {
-                            crate::tidy_wire_points(wire);
-                        }
-                    }
                 }
                 CommandOutcome::new(ChangeSet::schematic())
                     .with_status("Rotated and kept attached wires on pins.")
@@ -105,7 +86,7 @@ impl SelectionCommand {
                     duplicate.pos += offset;
                     duplicate.label = context.next_label(duplicate.kind);
                     new_ids.push(duplicate.id);
-                    context.components_mut().push(duplicate);
+                    context.insert_component(duplicate);
                 }
                 if new_ids.len() == 1 {
                     context.set_selected(Some(Selection::Component(new_ids[0])));
@@ -154,17 +135,12 @@ impl SelectionCommand {
                             / positions.len() as f32
                     }
                 };
-                for component in context.components_mut() {
-                    if ids.contains(&component.id) {
-                        match direction {
-                            AlignDir::Left | AlignDir::Right | AlignDir::CenterH => {
-                                component.pos.x = target
-                            }
-                            AlignDir::Top | AlignDir::Bottom | AlignDir::CenterV => {
-                                component.pos.y = target
-                            }
-                        }
-                    }
+                let vertical = matches!(
+                    direction,
+                    AlignDir::Top | AlignDir::Bottom | AlignDir::CenterV
+                );
+                for id in &ids {
+                    context.set_component_axis_position(*id, vertical, target);
                 }
                 CommandOutcome::new(ChangeSet::schematic())
                     .with_status(format!("Aligned {} components.", positions.len()))
@@ -198,17 +174,7 @@ impl SelectionCommand {
                 };
                 let step = (last - first) / (ordered.len() as f32 - 1.0);
                 for (index, (id, _)) in ordered.iter().enumerate() {
-                    if let Some(component) = context
-                        .components_mut()
-                        .iter_mut()
-                        .find(|component| component.id == *id)
-                    {
-                        if vertical {
-                            component.pos.y = first + step * index as f32;
-                        } else {
-                            component.pos.x = first + step * index as f32;
-                        }
-                    }
+                    context.set_component_axis_position(*id, vertical, first + step * index as f32);
                 }
                 CommandOutcome::new(ChangeSet::schematic())
                     .with_status(format!("Distributed {} components.", ids.len()))

@@ -20,6 +20,7 @@ pub(crate) struct TopToolbarModel<'a> {
     pub(crate) grid: &'a mut f32,
     pub(crate) ac_freq_hz: &'a mut f32,
     pub(crate) current_flow: &'a mut CurrentFlowSettings,
+    pub(crate) simulation_backend: &'a mut crate::engine::backend::BackendKind,
     pub(crate) show_performance_overlay: &'a mut bool,
 }
 
@@ -181,6 +182,23 @@ pub(crate) fn render_top_toolbar(
         toolbar_menu(ui, "Simulation", |ui| {
             ui.checkbox(model.simulate, "Run simulation");
             ui.checkbox(&mut model.current_flow.enabled, "Current animation");
+            egui::ComboBox::from_id_salt("simulation_backend")
+                .selected_text(match model.simulation_backend {
+                    crate::engine::backend::BackendKind::InternalMna => "Internal MNA",
+                    crate::engine::backend::BackendKind::NgSpice => "ngspice",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        model.simulation_backend,
+                        crate::engine::backend::BackendKind::InternalMna,
+                        "Internal MNA",
+                    );
+                    ui.selectable_value(
+                        model.simulation_backend,
+                        crate::engine::backend::BackendKind::NgSpice,
+                        "ngspice transient",
+                    );
+                });
             ui.checkbox(&mut model.current_flow.show_tail, "Particle tail");
             ui.add(
                 egui::Slider::new(&mut model.current_flow.speed_multiplier, 0.25..=3.0)

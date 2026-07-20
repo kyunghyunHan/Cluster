@@ -166,6 +166,7 @@ pub(crate) struct SimulationUiState {
     pub(crate) show_oscilloscope: bool,
     pub(crate) ac_freq_hz: f32,
     pub(crate) current_flow: CurrentFlowSettings,
+    pub(crate) backend: crate::engine::backend::BackendKind,
     pub(crate) flow_started_at: Option<f64>,
     pub(crate) last_simulation_enabled: bool,
 }
@@ -178,6 +179,7 @@ impl Default for SimulationUiState {
             show_oscilloscope: false,
             ac_freq_hz: 1000.0,
             current_flow: CurrentFlowSettings::default(),
+            backend: crate::engine::backend::BackendKind::InternalMna,
             flow_started_at: None,
             last_simulation_enabled: true,
         }
@@ -227,37 +229,27 @@ pub(crate) struct HistoryState {
 
 /// Transient editing state and command history. This is never serialized into
 /// the project document.
+#[derive(Default)]
 pub(crate) struct EditorState {
-    pub(crate) tool: Tool,
+    pub(crate) document: crate::app::EditorDocumentState,
     pub(crate) pending_custom_part: Option<String>,
-    pub(crate) selected: Option<Selection>,
-    pub(crate) drag: Option<DragState>,
-    pub(crate) draft_wire: Vec<Pos2>,
-    pub(crate) wire_from_select: bool,
     pub(crate) clipboard: Vec<Component>,
     pub(crate) clipboard_wires: Vec<Wire>,
-    pub(crate) multi_selected: HashSet<u64>,
     pub(crate) rect_select_start: Option<Pos2>,
-    pub(crate) snap_target: Option<Pos2>,
     pub(crate) history: HistoryState,
 }
 
-impl Default for EditorState {
-    fn default() -> Self {
-        Self {
-            tool: Tool::Select,
-            pending_custom_part: None,
-            selected: None,
-            drag: None,
-            draft_wire: Vec::new(),
-            wire_from_select: false,
-            clipboard: Vec::new(),
-            clipboard_wires: Vec::new(),
-            multi_selected: HashSet::new(),
-            rect_select_start: None,
-            snap_target: None,
-            history: HistoryState::default(),
-        }
+impl std::ops::Deref for EditorState {
+    type Target = crate::app::EditorDocumentState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.document
+    }
+}
+
+impl std::ops::DerefMut for EditorState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.document
     }
 }
 
@@ -284,8 +276,14 @@ pub(crate) struct AnalysisState {
     pub(crate) simulation_revision: u64,
     pub(crate) cached_connected_pins: ConnectedPinsCache,
     pub(crate) current_flow_cache: CurrentFlowCache,
+    pub(crate) schematic_spatial_index: crate::ui::canvas::spatial_index::SchematicSpatialIndex,
+    pub(crate) schematic_spatial_revision: u64,
     pub(crate) pcb_cad: Option<crate::model::cad::CadProjectData>,
     pub(crate) pcb_drc: Vec<crate::pcb::drc::DrcViolation>,
+    pub(crate) pcb_ratsnest_by_net: std::collections::HashMap<usize, usize>,
+    pub(crate) worker: crate::engine::worker::BoundedAnalysisWorker,
+    pub(crate) pending_schematic: Option<(u64, SimulationRevisionKey, u32)>,
+    pub(crate) pending_full_drc_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,8 +317,14 @@ impl Default for AnalysisState {
             simulation_revision: 0,
             cached_connected_pins: None,
             current_flow_cache: CurrentFlowCache::default(),
+            schematic_spatial_index: Default::default(),
+            schematic_spatial_revision: 0,
             pcb_cad: None,
             pcb_drc: Vec::new(),
+            pcb_ratsnest_by_net: std::collections::HashMap::new(),
+            worker: crate::engine::worker::BoundedAnalysisWorker::new(),
+            pending_schematic: None,
+            pending_full_drc_revision: None,
         }
     }
 }
@@ -578,6 +582,7 @@ impl CircuitApp {
 impl eframe::App for CircuitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_started = std::time::Instant::now();
+        self.poll_analysis_worker();
         if self.automated_capture_path.is_some() && !self.automated_capture_requested {
             self.automated_capture_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
@@ -626,7 +631,7 @@ impl eframe::App for CircuitApp {
             self.simulation_ui.last_simulation_enabled = self.simulate;
             self.simulation_ui.flow_started_at = self.simulate.then_some(now);
         }
-        let simulation = self.current_simulation();
+        let simulation = self.simulation_for_frame();
         let toolbar_simulation_summary = format!(
             "{} · {}",
             self.simulation_run_state.label(),
@@ -654,6 +659,7 @@ impl eframe::App for CircuitApp {
                     grid: &mut self.grid,
                     ac_freq_hz: &mut self.simulation_ui.ac_freq_hz,
                     current_flow: &mut self.simulation_ui.current_flow,
+                    simulation_backend: &mut self.simulation_ui.backend,
                     show_performance_overlay: &mut self.workspace_state.show_performance_overlay,
                 },
             );
@@ -1634,7 +1640,7 @@ impl eframe::App for CircuitApp {
                 if self.analysis.dirty_flags.pcb_drc_dirty
                     && let Some(cad) = self.analysis.pcb_cad.clone()
                 {
-                    self.refresh_pcb_analysis(&cad);
+                    self.schedule_full_pcb_analysis(&cad);
                 }
                 return;
             }
@@ -1771,8 +1777,27 @@ impl eframe::App for CircuitApp {
                         .fold(0.0_f64, f64::max)
                 })
                 .unwrap_or(1.0);
+            if self.analysis.schematic_spatial_revision
+                != self.analysis.revisions.schematic_geometry
+            {
+                self.analysis
+                    .schematic_spatial_index
+                    .sync(&self.document.wires);
+                self.analysis.schematic_spatial_revision =
+                    self.analysis.revisions.schematic_geometry;
+            }
+            let world_padding = 24.0 / self.zoom.max(0.01);
+            let world_min = view.to_world(rect.min) - Vec2::splat(world_padding);
+            let world_max = view.to_world(rect.max) + Vec2::splat(world_padding);
+            let indexed_visible_wires = self
+                .analysis
+                .schematic_spatial_index
+                .query_rect(world_min, world_max);
             self.performance.rendered_wire_segments = 0;
             for wire in &self.document.wires {
+                if !indexed_visible_wires.contains(&wire.id) {
+                    continue;
+                }
                 let visible = wire
                     .points
                     .iter()
@@ -1863,7 +1888,7 @@ impl eframe::App for CircuitApp {
             self.performance.visible_flow_wires = flow_stats.visible_wire_count;
             if flow_stats.needs_repaint {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(
-                    1.0 / self.simulation_ui.current_flow.quality.fps() as f64,
+                    1.0 / self.simulation_ui.current_flow.quality.fps().min(30) as f64,
                 ));
             }
 

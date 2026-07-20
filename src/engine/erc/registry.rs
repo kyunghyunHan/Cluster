@@ -1,4 +1,4 @@
-use super::{ErcCheck, ErcContext};
+use super::{ErcCheck, ErcContext, ErcDependency};
 use crate::engine::validation::{ErcSeverity, ErcViolation};
 use std::collections::{HashMap, HashSet};
 
@@ -25,15 +25,33 @@ impl ErcRegistry {
         self.rules.push(Box::new(rule));
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn run_with_settings(
         &self,
         context: &ErcContext<'_>,
         settings: &ErcSettings,
     ) -> Vec<ErcViolation> {
+        self.run_dependencies(
+            context,
+            settings,
+            &[ErcDependency::Topology, ErcDependency::Values],
+        )
+    }
+
+    pub(crate) fn run_dependencies(
+        &self,
+        context: &ErcContext<'_>,
+        settings: &ErcSettings,
+        dependencies: &[ErcDependency],
+    ) -> Vec<ErcViolation> {
+        let dependencies = dependencies.iter().copied().collect::<HashSet<_>>();
         let mut violations = Vec::new();
         let mut ids = HashSet::new();
         for rule in &self.rules {
-            if !ids.insert(rule.id()) || settings.disabled_rules.contains(rule.id()) {
+            if !dependencies.contains(&rule.dependency())
+                || !ids.insert(rule.id())
+                || settings.disabled_rules.contains(rule.id())
+            {
                 continue;
             }
             let start = violations.len();

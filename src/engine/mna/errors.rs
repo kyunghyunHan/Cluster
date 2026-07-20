@@ -15,6 +15,7 @@ pub enum SimulationError {
     VoltageSourceLoop,
     ShortCircuit,
     UnsupportedComponent,
+    Cancelled,
 }
 
 impl std::fmt::Display for SimulationError {
@@ -27,6 +28,7 @@ impl std::fmt::Display for SimulationError {
             SimulationError::VoltageSourceLoop => "Ideal voltage source loop",
             SimulationError::ShortCircuit => "Ideal source short circuit",
             SimulationError::UnsupportedComponent => "Unsupported component model",
+            SimulationError::Cancelled => "Simulation cancelled",
         };
         f.write_str(message)
     }
@@ -57,6 +59,7 @@ impl SimulationError {
             SimulationError::UnsupportedComponent => {
                 "One or more parts need a SPICE model or are only checked by ERC in Cluster."
             }
+            SimulationError::Cancelled => "The result was discarded because a newer edit exists.",
         }
     }
 }

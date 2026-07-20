@@ -4,7 +4,7 @@
 //! production code allowed to mutate schematic collections directly.
 
 pub(crate) mod component;
-mod context;
+pub(crate) mod context;
 pub(crate) mod document;
 pub(crate) mod pcb;
 pub(crate) mod properties;
@@ -12,7 +12,7 @@ pub(crate) mod selection;
 pub(crate) mod wiring;
 
 use component::ComponentCommand;
-use context::{CommandContext, CommandOutcome, CommandPostAction};
+use context::{CommandContext, CommandOutcome};
 use document::DocumentCommand;
 use pcb::PcbCommand;
 use properties::PropertiesCommand;
@@ -117,6 +117,26 @@ pub(crate) enum EditorCommand {
 }
 
 impl EditorCommand {
+    pub(crate) fn pcb_local_analysis_impact(
+        &self,
+        board: &crate::pcb::board::Board,
+    ) -> Option<pcb::PcbAnalysisImpact> {
+        match self {
+            Self::Pcb(command) => command.local_analysis_impact(board),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn pcb_delta_scope(
+        &self,
+        board: &crate::pcb::board::Board,
+    ) -> Option<pcb::PcbDeltaScope> {
+        match self {
+            Self::Pcb(command) => Some(command.delta_scope(board)),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn description(&self) -> &'static str {
         match self {
             Self::Component(ComponentCommand::Place { .. }) => "Place component",
@@ -152,6 +172,7 @@ impl EditorCommand {
             Self::Pcb(PcbCommand::RemoveVia { .. }) => "Remove PCB via",
             Self::Pcb(PcbCommand::DeleteVias { .. }) => "Delete PCB vias",
             Self::Pcb(PcbCommand::SetOutline(_)) => "Edit board outline",
+            Self::Pcb(PcbCommand::SetGeometry { .. }) => "Fit board to geometry",
             Self::Pcb(PcbCommand::ChangeNetClass(_)) => "Change PCB net class",
             Self::Pcb(PcbCommand::ApplyEco { .. }) => "Apply schematic PCB changes",
         }
@@ -174,7 +195,7 @@ impl EditorCommand {
         }
     }
 
-    fn apply(self, context: &mut CommandContext<'_>) -> CommandOutcome {
+    pub(crate) fn apply(self, context: &mut CommandContext<'_>) -> CommandOutcome {
         match self {
             Self::Component(command) => command.apply(context),
             Self::Wiring(command) => command.apply(context),
@@ -183,272 +204,5 @@ impl EditorCommand {
             Self::Document(command) => command.apply(context),
             Self::Pcb(command) => command.apply(context),
         }
-    }
-}
-
-impl crate::CircuitApp {
-    pub(crate) fn execute_editor_command(&mut self, command: EditorCommand) -> ChangeSet {
-        let snapshot = self.snapshot();
-        let description = command.description();
-        let merge_key = command.merge_key();
-        let outcome = command.apply(&mut CommandContext::new(self));
-        let changes = outcome.changes;
-        if changes.persistence_changed {
-            let delta = crate::editor::delta::DocumentDelta::between(&snapshot, &self.snapshot());
-            self.push_history_delta(delta, description, merge_key);
-        }
-        self.dispatch_changes(changes);
-        self.apply_command_outcome(outcome);
-        changes
-    }
-
-    pub(crate) fn execute_continuous_editor_command(
-        &mut self,
-        command: EditorCommand,
-    ) -> ChangeSet {
-        let outcome = command.apply(&mut CommandContext::new(self));
-        let changes = outcome.changes;
-        self.dispatch_changes(changes);
-        self.apply_command_outcome(outcome);
-        changes
-    }
-
-    fn apply_command_outcome(&mut self, outcome: CommandOutcome) {
-        if let Some(status) = outcome.status {
-            self.status = status;
-        }
-        if outcome.post_action == CommandPostAction::ResetWorkspaceView {
-            self.hovered_net_wire = None;
-            self.highlighted_net_wires.clear();
-            self.inline_edit = None;
-            self.context_menu = None;
-            self.zoom = 1.0;
-            self.pan = egui::Vec2::ZERO;
-        }
-    }
-
-    pub(crate) fn dispatch_changes(&mut self, changes: ChangeSet) {
-        let revisions = &mut self.analysis.revisions;
-        if changes.persistence_changed {
-            revisions.persistence = revisions.persistence.saturating_add(1);
-            // `circuit_revision` is the schematic/analysis revision used by
-            // schematic-to-PCB sync and simulation caches. PCB-only edits are
-            // persisted, but must not make the schematic appear changed.
-            if changes.schematic_geometry_changed
-                || changes.schematic_connectivity_changed
-                || changes.electrical_values_changed
-                || changes.simulation_topology_changed
-                || changes.simulation_parameters_changed
-            {
-                self.analysis.circuit_revision = revisions.persistence;
-            }
-            self.editor.history.dirty = true;
-        }
-        if changes.schematic_geometry_changed {
-            revisions.schematic_geometry = revisions.schematic_geometry.saturating_add(1);
-        }
-        if changes.schematic_connectivity_changed {
-            revisions.schematic_connectivity = revisions.schematic_connectivity.saturating_add(1);
-        }
-        if changes.electrical_values_changed {
-            revisions.electrical_parameters = revisions.electrical_parameters.saturating_add(1);
-        }
-        if changes.simulation_topology_changed {
-            revisions.simulation_topology = revisions.simulation_topology.saturating_add(1);
-        }
-        if changes.simulation_parameters_changed {
-            revisions.simulation_parameters = revisions.simulation_parameters.saturating_add(1);
-        }
-        if changes.pcb_sync_changed {
-            revisions.board_topology = revisions.board_topology.saturating_add(1);
-        }
-        if changes.pcb_geometry_changed {
-            revisions.board_geometry = revisions.board_geometry.saturating_add(1);
-        }
-        if changes.pcb_rules_changed {
-            revisions.board_rules = revisions.board_rules.saturating_add(1);
-        }
-        if changes.visual_only {
-            revisions.visual = revisions.visual.saturating_add(1);
-        }
-        self.analysis.dirty_flags.geometry_dirty |= changes.schematic_geometry_changed;
-        self.analysis.dirty_flags.connectivity_dirty |= changes.schematic_connectivity_changed;
-        self.analysis.dirty_flags.validation_dirty |=
-            changes.schematic_connectivity_changed || changes.electrical_values_changed;
-        self.analysis.dirty_flags.simulation_dirty |=
-            changes.simulation_topology_changed || changes.simulation_parameters_changed;
-        self.analysis.dirty_flags.pcb_sync_dirty |= changes.pcb_sync_changed;
-        self.analysis.dirty_flags.pcb_drc_dirty |=
-            changes.pcb_geometry_changed || changes.pcb_rules_changed;
-        if changes.pcb_geometry_changed || changes.pcb_rules_changed {
-            self.analysis.pcb_drc.clear();
-        }
-        if changes.schematic_connectivity_changed {
-            self.invalidate_connectivity_cache();
-        } else if changes.simulation_topology_changed || changes.simulation_parameters_changed {
-            self.invalidate_simulation_cache();
-        }
-        if changes.simulation_topology_changed || changes.simulation_parameters_changed {
-            self.simulation_run_state = if self.simulate {
-                crate::ui::app::SimulationRunState::Dirty
-            } else {
-                crate::ui::app::SimulationRunState::Stopped
-            };
-        }
-        self.workspace_state.repaint_requested |= changes.needs_repaint();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ComponentKind;
-    use egui::Pos2;
-
-    #[test]
-    fn schematic_change_has_precise_invalidation_semantics() {
-        let dirty = ChangeSet::schematic();
-        assert!(dirty.persistence_changed);
-        assert!(dirty.schematic_geometry_changed);
-        assert!(dirty.schematic_connectivity_changed);
-        assert!(dirty.simulation_topology_changed);
-        assert!(dirty.pcb_sync_changed);
-        assert!(!dirty.pcb_geometry_changed);
-    }
-
-    #[test]
-    fn editor_command_owns_history_and_cache_invalidation() {
-        let mut app = crate::CircuitApp::new();
-        let revision = app.analysis.circuit_revision;
-        let dirty = app.execute_editor_command(EditorCommand::Component(
-            crate::commands::component::ComponentCommand::Place {
-                kind: ComponentKind::Resistor,
-                position: Pos2::new(100.0, 100.0),
-            },
-        ));
-
-        assert_eq!(app.components.len(), 1);
-        assert_eq!(app.editor.history.undo.len(), 1);
-        assert!(app.analysis.circuit_revision > revision);
-        assert!(app.analysis.cached_connectivity.is_none());
-        assert_eq!(dirty, ChangeSet::schematic());
-    }
-
-    #[test]
-    fn property_change_reuses_connectivity_projections() {
-        let mut app = crate::CircuitApp::new();
-        let connectivity = app.current_connectivity();
-        let connected_pins = app.current_connected_pins();
-        let _simulation = app.current_simulation();
-        assert!(app.analysis.cached_simulation.is_some());
-
-        app.dispatch_changes(ChangeSet::properties());
-
-        let cached_connectivity = &app
-            .analysis
-            .cached_connectivity
-            .as_ref()
-            .expect("connectivity cache should survive property-only changes")
-            .1;
-        let cached_connected_pins = &app
-            .analysis
-            .cached_connected_pins
-            .as_ref()
-            .expect("connected-pin cache should survive property-only changes")
-            .1;
-        assert!(std::sync::Arc::ptr_eq(&connectivity, cached_connectivity));
-        assert!(std::sync::Arc::ptr_eq(
-            &connected_pins,
-            cached_connected_pins
-        ));
-        assert!(app.analysis.cached_simulation.is_none());
-    }
-
-    #[test]
-    fn pcb_primitive_command_is_undoable_and_invalidates_drc_only() {
-        use crate::model::cad::Point2;
-        use crate::pcb::layer::BoardLayer;
-        use crate::pcb::track::TrackSegment;
-
-        let mut app = crate::CircuitApp::new();
-        let revision = app.analysis.circuit_revision;
-        let persistence_revision = app.analysis.revisions.persistence;
-        let changes =
-            app.execute_editor_command(EditorCommand::Pcb(PcbCommand::AddTrack(TrackSegment {
-                id: 1,
-                net_id: 0,
-                layer: BoardLayer::FrontCopper,
-                start: Point2::new(1.0, 1.0),
-                end: Point2::new(10.0, 1.0),
-                width_mm: 0.25,
-            })));
-
-        assert_eq!(app.document.board.tracks.len(), 1);
-        assert!(changes.persistence_changed);
-        assert!(changes.pcb_geometry_changed);
-        assert!(!changes.schematic_connectivity_changed);
-        assert_eq!(app.analysis.circuit_revision, revision);
-        assert!(app.analysis.revisions.persistence > persistence_revision);
-        assert!(app.analysis.dirty_flags.pcb_drc_dirty);
-
-        app.analysis.pcb_drc.push(crate::pcb::drc::DrcViolation {
-            severity: crate::pcb::drc::DrcSeverity::Error,
-            title: "Stale DRC".to_string(),
-            message: "Must be cleared by history navigation.".to_string(),
-            location: None,
-            object_id: None,
-        });
-        app.undo();
-        assert!(app.document.board.tracks.is_empty());
-        assert!(app.analysis.pcb_drc.is_empty());
-        app.redo();
-        assert_eq!(app.document.board.tracks.len(), 1);
-    }
-
-    #[test]
-    fn complete_route_with_via_is_one_undo_item() {
-        use crate::model::cad::Point2;
-        use crate::pcb::layer::BoardLayer;
-        use crate::pcb::track::TrackSegment;
-        use crate::pcb::via::Via;
-
-        let mut app = crate::CircuitApp::new();
-        app.execute_editor_command(EditorCommand::Pcb(PcbCommand::AddRoute {
-            tracks: vec![
-                TrackSegment {
-                    id: 1,
-                    net_id: 4,
-                    layer: BoardLayer::FrontCopper,
-                    start: Point2::new(5.0, 5.0),
-                    end: Point2::new(10.0, 5.0),
-                    width_mm: 0.25,
-                },
-                TrackSegment {
-                    id: 2,
-                    net_id: 4,
-                    layer: BoardLayer::BackCopper,
-                    start: Point2::new(10.0, 5.0),
-                    end: Point2::new(15.0, 10.0),
-                    width_mm: 0.25,
-                },
-            ],
-            vias: vec![Via {
-                id: 3,
-                net_id: 4,
-                position: Point2::new(10.0, 5.0),
-                diameter_mm: 0.6,
-                drill_mm: 0.3,
-            }],
-        }));
-
-        assert_eq!(app.editor.history.undo.len(), 1);
-        assert_eq!(app.document.board.tracks.len(), 2);
-        assert_eq!(app.document.board.vias.len(), 1);
-        app.undo();
-        assert!(app.document.board.tracks.is_empty());
-        assert!(app.document.board.vias.is_empty());
-        app.redo();
-        assert_eq!(app.document.board.tracks.len(), 2);
-        assert_eq!(app.document.board.vias.len(), 1);
     }
 }

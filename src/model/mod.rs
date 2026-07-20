@@ -37,3 +37,5 @@ pub(crate) use project::{ProjectDocument, ProjectPage};
 pub(crate) use wire::{
     Wire, WireEndpoint, WireSegmentId, distance_to_segment, point_touches_wire_segment,
 };
+mod allocator;
+pub(crate) use allocator::IdAllocator;

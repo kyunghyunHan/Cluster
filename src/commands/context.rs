@@ -1,197 +1,416 @@
-use crate::app::{Selection, Tool};
+use crate::app::{EditorDocumentState, Selection, Tool};
 use crate::model::cad::{CadNet, NetClass, Point2, SymbolInstance};
-use crate::model::{Component, ComponentKind, Counters, DragState, Wire, WireEndpoint};
-use crate::pcb::board::{Board, BoardOutline, RemovedFootprintPolicy};
+use crate::model::{
+    Component, ComponentKind, IdAllocator, PinRef, ProjectDocument, Wire, WireEndpoint,
+    component_pin_defs, component_pins, distance_to_segment,
+};
+use crate::pcb::board::{BoardOutline, RemovedFootprintPolicy};
 use crate::pcb::track::TrackSegment;
 use crate::pcb::via::Via;
-use egui::Pos2;
+use egui::{Pos2, Vec2};
 use std::collections::HashSet;
 
-/// The only application capability exposed to document commands.
+/// Narrow mutation boundary used by every document command.
 ///
-/// The wrapped application reference is deliberately private to this module.
-/// Command modules can use the narrow operations below, but cannot invalidate
-/// caches, open dialogs, alter view state, or reach persistence directly.
+/// It intentionally contains only persistent document data, command-visible
+/// editor state and the command-local allocator. No application, UI workspace,
+/// cache, persistence or analysis capability can be reached from here.
 pub(crate) struct CommandContext<'a> {
-    app: &'a mut crate::CircuitApp,
+    document: &'a mut ProjectDocument,
+    editor: &'a mut EditorDocumentState,
+    allocator: &'a mut IdAllocator,
 }
 
 impl<'a> CommandContext<'a> {
-    pub(super) fn new(app: &'a mut crate::CircuitApp) -> Self {
-        Self { app }
+    pub(crate) fn new(
+        document: &'a mut ProjectDocument,
+        editor: &'a mut EditorDocumentState,
+        allocator: &'a mut IdAllocator,
+    ) -> Self {
+        Self {
+            document,
+            editor,
+            allocator,
+        }
     }
 
     pub(crate) fn components(&self) -> &[Component] {
-        &self.app.document.components
-    }
-
-    pub(crate) fn components_mut(&mut self) -> &mut Vec<Component> {
-        &mut self.app.document.components
-    }
-
-    pub(crate) fn wires_mut(&mut self) -> &mut Vec<Wire> {
-        &mut self.app.document.wires
-    }
-
-    pub(crate) fn board_mut(&mut self) -> &mut Board {
-        &mut self.app.document.board
+        &self.document.components
     }
 
     pub(crate) fn next_id(&mut self) -> u64 {
-        self.app.next_id()
+        self.allocator.allocate_id()
     }
 
     pub(crate) fn next_label(&mut self, kind: ComponentKind) -> String {
-        self.app.next_label(kind)
+        self.allocator
+            .allocate_label(kind, &self.document.components)
     }
 
     pub(crate) fn next_custom_label(&self, part_id: Option<&str>) -> String {
-        self.app.next_custom_label(part_id)
+        self.allocator
+            .allocate_custom_label(part_id, &self.document.components)
     }
 
-    pub(crate) fn place_component(&mut self, kind: ComponentKind, position: Pos2) -> u64 {
-        self.app.place_component(kind, position)
+    pub(crate) fn place_component(
+        &mut self,
+        kind: ComponentKind,
+        position: Pos2,
+        value: String,
+        part_id: Option<String>,
+    ) -> u64 {
+        let label = if kind == ComponentKind::Custom {
+            self.next_custom_label(part_id.as_deref())
+        } else {
+            self.next_label(kind)
+        };
+        let id = self.next_id();
+        self.document.components.push(Component {
+            id,
+            kind,
+            pos: position,
+            rotation: 0,
+            label,
+            value,
+            part_id,
+        });
+        id
     }
 
-    pub(crate) fn place_custom_component(&mut self, part_id: &str, position: Pos2) -> u64 {
-        self.app.place_custom_component(part_id, position)
+    pub(crate) fn insert_component(&mut self, component: Component) {
+        self.document.components.push(component);
+    }
+
+    pub(crate) fn insert_wire(&mut self, wire: Wire) {
+        self.document.wires.push(wire);
+    }
+
+    pub(crate) fn remove_components(&mut self, ids: &HashSet<u64>) -> usize {
+        let before = self.document.components.len();
+        self.document
+            .components
+            .retain(|component| !ids.contains(&component.id));
+        before - self.document.components.len()
+    }
+
+    pub(crate) fn remove_component(&mut self, id: u64) -> bool {
+        let before = self.document.components.len();
+        self.document
+            .components
+            .retain(|component| component.id != id);
+        before != self.document.components.len()
+    }
+
+    pub(crate) fn remove_wire(&mut self, id: u64) -> bool {
+        let before = self.document.wires.len();
+        self.document.wires.retain(|wire| wire.id != id);
+        before != self.document.wires.len()
+    }
+
+    pub(crate) fn update_component(
+        &mut self,
+        id: u64,
+        update: impl FnOnce(&mut Component),
+    ) -> bool {
+        let Some(component) = self
+            .document
+            .components
+            .iter_mut()
+            .find(|component| component.id == id)
+        else {
+            return false;
+        };
+        update(component);
+        true
+    }
+
+    pub(crate) fn move_components(&mut self, ids: &HashSet<u64>, delta: Vec2) -> bool {
+        let old_pins = self
+            .document
+            .components
+            .iter()
+            .filter(|component| ids.contains(&component.id))
+            .flat_map(component_pins)
+            .collect::<Vec<_>>();
+        if old_pins.is_empty() && !self.document.components.iter().any(|c| ids.contains(&c.id)) {
+            return false;
+        }
+        for component in &mut self.document.components {
+            if ids.contains(&component.id) {
+                component.pos += delta;
+            }
+        }
+        let new_pins = self
+            .document
+            .components
+            .iter()
+            .filter(|component| ids.contains(&component.id))
+            .flat_map(component_pins)
+            .collect::<Vec<_>>();
+        self.move_attached_wires(&old_pins, &new_pins);
+        true
+    }
+
+    pub(crate) fn rotate_component(&mut self, id: u64) -> bool {
+        let Some(index) = self
+            .document
+            .components
+            .iter()
+            .position(|component| component.id == id)
+        else {
+            return false;
+        };
+        let old_pins = component_pins(&self.document.components[index]);
+        self.document.components[index].rotation =
+            (self.document.components[index].rotation + 90) % 360;
+        let new_pins = component_pins(&self.document.components[index]);
+        self.move_attached_wires(&old_pins, &new_pins);
+        true
+    }
+
+    fn move_attached_wires(&mut self, old_pins: &[Pos2], new_pins: &[Pos2]) {
+        crate::move_attached_wire_endpoints(&mut self.document.wires, old_pins, new_pins);
+        for wire in &mut self.document.wires {
+            if wire.points.len() <= 2 {
+                continue;
+            }
+            let first = wire.points[0];
+            let Some(&last) = wire.points.last() else {
+                continue;
+            };
+            if old_pins.iter().any(|pin| first.distance(*pin) <= 20.0)
+                || old_pins.iter().any(|pin| last.distance(*pin) <= 20.0)
+            {
+                crate::tidy_wire_points(wire);
+            }
+        }
+    }
+
+    pub(crate) fn set_component_axis_position(
+        &mut self,
+        id: u64,
+        vertical: bool,
+        value: f32,
+    ) -> bool {
+        self.update_component(id, |component| {
+            if vertical {
+                component.pos.y = value;
+            } else {
+                component.pos.x = value;
+            }
+        })
     }
 
     pub(crate) fn infer_wire_endpoint(&self, point: Pos2) -> WireEndpoint {
-        self.app.infer_wire_endpoint(point)
+        for component in &self.document.components {
+            for pin in component_pin_defs(component) {
+                if point.distance(pin.pos) <= 1.0 {
+                    return WireEndpoint::Pin(PinRef {
+                        component_id: component.id,
+                        pin_name: pin.label.to_string(),
+                    });
+                }
+            }
+        }
+        WireEndpoint::FreePoint(point)
     }
 
     pub(crate) fn split_wire_at_point(&mut self, point: Pos2) {
-        self.app.split_wire_at_point(point);
+        let split_target = self
+            .document
+            .wires
+            .iter()
+            .enumerate()
+            .find_map(|(wire_index, wire)| {
+                wire.points
+                    .windows(2)
+                    .enumerate()
+                    .find(|(_, pair)| {
+                        distance_to_segment(point, pair[0], pair[1]) < 2.5
+                            && point.distance(pair[0]) > 5.0
+                            && point.distance(pair[1]) > 5.0
+                    })
+                    .map(|(segment_index, _)| (wire_index, segment_index))
+            });
+        let Some((wire_index, segment_index)) = split_target else {
+            return;
+        };
+        let old_start = self.document.wires[wire_index].start.clone();
+        let old_end = self.document.wires[wire_index].end.clone();
+        let mut first = self.document.wires[wire_index].points[..=segment_index].to_vec();
+        first.push(point);
+        let mut second = vec![point];
+        second.extend_from_slice(&self.document.wires[wire_index].points[segment_index + 1..]);
+        self.document.wires[wire_index].points = crate::simplify_wire(first);
+        self.document.wires[wire_index].start = old_start;
+        self.document.wires[wire_index].end = WireEndpoint::FreePoint(point);
+        let id = self.next_id();
+        self.document.wires.push(Wire {
+            id,
+            points: crate::simplify_wire(second),
+            start: WireEndpoint::FreePoint(point),
+            end: old_end,
+        });
+    }
+
+    pub(crate) fn move_wire_control_point(
+        &mut self,
+        wire_id: u64,
+        point_index: usize,
+        position: Pos2,
+    ) -> bool {
+        let exists = self
+            .document
+            .wires
+            .iter()
+            .any(|wire| wire.id == wire_id && point_index < wire.points.len());
+        if !exists {
+            return false;
+        }
+        crate::ui::app::move_wire_control_point(
+            &mut self.document.wires,
+            wire_id,
+            point_index,
+            position,
+        );
+        true
+    }
+
+    pub(crate) fn insert_wire_control_point(&mut self, position: Pos2) -> Option<(u64, usize)> {
+        crate::ui::app::insert_wire_control_point(position, &mut self.document.wires)
+    }
+
+    pub(crate) fn tidy_wires(&mut self, wire_id: Option<u64>) -> usize {
+        let mut count = 0;
+        for wire in &mut self.document.wires {
+            if wire_id.is_none_or(|id| id == wire.id) {
+                crate::tidy_wire_points(wire);
+                count += 1;
+            }
+        }
+        count
     }
 
     pub(crate) fn selected(&self) -> Option<Selection> {
-        self.app.editor.selected
+        self.editor.selected
     }
 
     pub(crate) fn take_selected(&mut self) -> Option<Selection> {
-        self.app.editor.selected.take()
+        self.editor.selected.take()
     }
 
     pub(crate) fn set_selected(&mut self, selected: Option<Selection>) {
-        self.app.editor.selected = selected;
+        self.editor.selected = selected;
     }
 
     pub(crate) fn multi_selected(&self) -> &HashSet<u64> {
-        &self.app.editor.multi_selected
+        &self.editor.multi_selected
     }
 
     pub(crate) fn set_multi_selected(&mut self, selected: HashSet<u64>) {
-        self.app.editor.multi_selected = selected;
+        self.editor.multi_selected = selected;
     }
 
     pub(crate) fn clear_multi_selected(&mut self) {
-        self.app.editor.multi_selected.clear();
+        self.editor.multi_selected.clear();
     }
 
-    pub(crate) fn set_drag(&mut self, drag: Option<DragState>) {
-        self.app.editor.drag = drag;
+    pub(crate) fn set_drag(&mut self, drag: Option<crate::model::DragState>) {
+        self.editor.drag = drag;
     }
 
     pub(crate) fn grid(&self) -> f32 {
-        self.app.grid
+        self.editor.grid
     }
 
     pub(crate) fn reset_document_and_editor(&mut self) {
-        self.app.document.components.clear();
-        self.app.document.wires.clear();
-        self.app.document.counters = Counters::default();
-        self.app.document.next_id = 1;
-        self.app.editor.selected = None;
-        self.app.editor.multi_selected.clear();
-        self.app.editor.drag = None;
-        self.app.editor.draft_wire.clear();
-        self.app.editor.wire_from_select = false;
-        self.app.editor.snap_target = None;
-        self.app.editor.tool = Tool::Select;
+        self.document.components.clear();
+        self.document.wires.clear();
+        self.allocator.reset();
+        self.editor.selected = None;
+        self.editor.multi_selected.clear();
+        self.editor.drag = None;
+        self.editor.draft_wire.clear();
+        self.editor.wire_from_select = false;
+        self.editor.snap_target = None;
+        self.editor.tool = Tool::Select;
     }
 
     pub(crate) fn move_footprint(&mut self, footprint_id: u64, position: Point2) -> bool {
-        self.board_mut()
-            .footprints
-            .iter_mut()
-            .find(|footprint| footprint.id == footprint_id)
-            .is_some_and(|footprint| {
-                footprint.position = position;
-                footprint.placed = true;
-                true
-            })
+        self.document.board.move_footprint(footprint_id, position)
     }
 
     pub(crate) fn rotate_footprint(&mut self, footprint_id: u64, delta_deg: f32) -> bool {
-        self.board_mut()
-            .footprints
-            .iter_mut()
-            .find(|footprint| footprint.id == footprint_id)
-            .is_some_and(|footprint| {
-                footprint.rotation_deg = (footprint.rotation_deg + delta_deg).rem_euclid(360.0);
-                true
-            })
+        self.document
+            .board
+            .rotate_footprint(footprint_id, delta_deg)
     }
 
     pub(crate) fn flip_footprint(&mut self, footprint_id: u64) -> bool {
-        self.board_mut()
-            .footprints
-            .iter_mut()
-            .find(|footprint| footprint.id == footprint_id)
-            .is_some_and(|footprint| {
-                footprint.flipped = !footprint.flipped;
-                true
-            })
+        self.document.board.flip_footprint(footprint_id)
     }
 
     pub(crate) fn add_track(&mut self, track: TrackSegment) {
-        self.board_mut().tracks.push(track);
+        self.document.board.add_track(track);
     }
 
     pub(crate) fn remove_track(&mut self, track_id: u64) -> bool {
-        let board = self.board_mut();
-        let before = board.tracks.len();
-        board.tracks.retain(|track| track.id != track_id);
-        before != board.tracks.len()
+        self.document.board.remove_track(track_id).is_some()
     }
 
     pub(crate) fn add_via(&mut self, via: Via) {
-        self.board_mut().vias.push(via);
+        self.document.board.add_via(via);
     }
 
     pub(crate) fn remove_via(&mut self, via_id: u64) -> bool {
-        let board = self.board_mut();
-        let before = board.vias.len();
-        board.vias.retain(|via| via.id != via_id);
-        before != board.vias.len()
+        self.document.board.remove_via(via_id).is_some()
     }
 
     pub(crate) fn set_outline(&mut self, outline: BoardOutline) {
-        self.board_mut().outline = outline;
+        self.document.board.outline = outline;
+        self.document.board.rebuild_entity_index();
+    }
+
+    pub(crate) fn set_board_geometry(
+        &mut self,
+        footprint_positions: Vec<(u64, Point2)>,
+        tracks: Vec<TrackSegment>,
+        vias: Vec<Via>,
+        outline: BoardOutline,
+    ) -> bool {
+        let mut changed = false;
+        for (id, position) in footprint_positions {
+            changed |= self.document.board.move_footprint(id, position);
+        }
+        for updated in tracks {
+            changed |= self.document.board.edit_track(updated);
+        }
+        for updated in vias {
+            changed |= self.document.board.edit_via(updated);
+        }
+        changed |= self.document.board.outline != outline;
+        self.document.board.outline = outline;
+        if changed {
+            self.document.board.rebuild_entity_index();
+        }
+        changed
     }
 
     pub(crate) fn edit_track(&mut self, updated: TrackSegment) -> bool {
-        self.board_mut()
-            .tracks
-            .iter_mut()
-            .find(|track| track.id == updated.id)
-            .is_some_and(|track| {
-                *track = updated;
-                true
-            })
+        self.document.board.edit_track(updated)
     }
 
     pub(crate) fn set_net_class(&mut self, updated: NetClass) -> bool {
         if let Some(class) = self
-            .board_mut()
+            .document
+            .board
             .net_classes
             .iter_mut()
             .find(|class| class.class_id == updated.class_id)
         {
             *class = updated;
         } else {
-            self.board_mut().net_classes.push(updated);
+            self.document.board.net_classes.push(updated);
         }
         true
     }
@@ -202,9 +421,11 @@ impl<'a> CommandContext<'a> {
         nets: &[CadNet],
         policy: RemovedFootprintPolicy,
     ) -> bool {
-        let before = self.board_mut().clone();
-        self.board_mut().apply_eco(symbols, nets, policy);
-        *self.board_mut() != before
+        !self
+            .document
+            .board
+            .apply_eco_patch(symbols, nets, policy)
+            .is_empty()
     }
 }
 

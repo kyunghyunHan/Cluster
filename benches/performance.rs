@@ -49,6 +49,13 @@ fn schematic_benchmarks(c: &mut Criterion) {
             black_box(&large).flow_animation_checksum(black_box(phase))
         })
     });
+    for (name, fixture) in [
+        ("frame_small", &small),
+        ("frame_medium", &medium),
+        ("frame_large", &large),
+    ] {
+        c.bench_function(name, |b| b.iter(|| black_box(fixture).frame_checksum()));
+    }
     c.bench_function("save_small", |b| {
         b.iter(|| black_box(&small).serialization_len())
     });
@@ -81,6 +88,9 @@ fn history_benchmarks(c: &mut Criterion) {
     });
     c.bench_function("history_push_delta", |b| {
         b.iter(|| black_box(&fixture).delta_checksum())
+    });
+    c.bench_function("undo_redo_large", |b| {
+        b.iter(|| black_box(&fixture).undo_redo_checksum())
     });
 }
 

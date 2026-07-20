@@ -10,6 +10,15 @@ pub(crate) fn analyze_circuit_with_connectivity(
     wires: &[Wire],
     connectivity: &CanonicalConnectivity,
 ) -> Simulation {
+    analyze_circuit_with_connectivity_and_cancellation(components, wires, connectivity, None)
+}
+
+pub(crate) fn analyze_circuit_with_connectivity_and_cancellation(
+    components: &[Component],
+    wires: &[Wire],
+    connectivity: &CanonicalConnectivity,
+    cancellation: Option<&crate::engine::ngspice::CancellationToken>,
+) -> Simulation {
     let mut nodes = CircuitNodes::default();
     let mut graph: Vec<HashSet<usize>> = Vec::new();
     let mut wire_graph: Vec<HashSet<usize>> = Vec::new();
@@ -302,11 +311,15 @@ pub(crate) fn analyze_circuit_with_connectivity(
 
     if positive_nodes.is_empty() || return_nodes.is_empty() {
         details.push("Add a source/battery and GND return to run live simulation.".to_string());
-        let (dc, dc_error) =
-            match mna::solve_dc_detailed_with_connectivity(components, wires, connectivity) {
-                Ok(dc) => (Some(dc), None),
-                Err(error) => (None, Some(error)),
-            };
+        let (dc, dc_error) = match mna::solve_dc_detailed_with_connectivity_and_cancellation(
+            components,
+            wires,
+            connectivity,
+            cancellation,
+        ) {
+            Ok(dc) => (Some(dc), None),
+            Err(error) => (None, Some(error)),
+        };
         return Simulation {
             status: SimulationStatus::Warning,
             summary: "No source or return".to_string(),
@@ -326,11 +339,15 @@ pub(crate) fn analyze_circuit_with_connectivity(
     let loop_nodes: HashSet<usize> = from_positive.intersection(&from_return).copied().collect();
     if loop_nodes.is_empty() {
         details.push("No closed path between source + and return/GND.".to_string());
-        let (dc, dc_error) =
-            match mna::solve_dc_detailed_with_connectivity(components, wires, connectivity) {
-                Ok(dc) => (Some(dc), None),
-                Err(error) => (None, Some(error)),
-            };
+        let (dc, dc_error) = match mna::solve_dc_detailed_with_connectivity_and_cancellation(
+            components,
+            wires,
+            connectivity,
+            cancellation,
+        ) {
+            Ok(dc) => (Some(dc), None),
+            Err(error) => (None, Some(error)),
+        };
         return Simulation {
             status: SimulationStatus::Warning,
             summary: "Open circuit".to_string(),
@@ -483,17 +500,21 @@ pub(crate) fn analyze_circuit_with_connectivity(
         details.push(format!("{} energized load(s).", energized_loads.len()));
     }
 
-    let (dc, dc_error) =
-        match mna::solve_dc_detailed_with_connectivity(components, wires, connectivity) {
-            Ok(dc) => (Some(dc), None),
-            Err(error) => {
-                details.push(format!(
-                    "DC solver: {error}. {}",
-                    error.beginner_explanation()
-                ));
-                (None, Some(error))
-            }
-        };
+    let (dc, dc_error) = match mna::solve_dc_detailed_with_connectivity_and_cancellation(
+        components,
+        wires,
+        connectivity,
+        cancellation,
+    ) {
+        Ok(dc) => (Some(dc), None),
+        Err(error) => {
+            details.push(format!(
+                "DC solver: {error}. {}",
+                error.beginner_explanation()
+            ));
+            (None, Some(error))
+        }
+    };
     if let Some(dc) = &dc {
         if dc.max_kcl_residual > 1e-8 {
             details.push(format!(
@@ -595,27 +616,6 @@ pub(crate) fn connect(graph: &mut Vec<HashSet<usize>>, a: usize, b: usize) {
     }
     graph[a].insert(b);
     graph[b].insert(a);
-}
-
-pub(crate) fn connect_wire_contacts(
-    nodes: &mut CircuitNodes,
-    graph: &mut Vec<HashSet<usize>>,
-    wires: &[Wire],
-    components: &[Component],
-) {
-    for contact in wire_contact_points(components, wires) {
-        let contact_node = nodes.node_for(contact);
-        for wire in wires {
-            for segment in wire.points.windows(2) {
-                if point_touches_wire_segment(contact, segment[0], segment[1]) {
-                    let a = nodes.node_for(segment[0]);
-                    let b = nodes.node_for(segment[1]);
-                    connect(graph, contact_node, a);
-                    connect(graph, contact_node, b);
-                }
-            }
-        }
-    }
 }
 
 pub(crate) fn wire_contact_points(components: &[Component], wires: &[Wire]) -> Vec<Pos2> {
@@ -1683,63 +1683,19 @@ pub(crate) fn run_erc_with_netlist(
     simulation: &Simulation,
     netlist: &CircuitNetlist,
 ) -> Vec<ErcViolation> {
-    let mut v: Vec<ErcViolation> = Vec::new();
+    // The registry is the sole static ERC path. Dynamic simulation warnings
+    // are appended below and are intentionally not duplicated in the registry.
+    let mut v = validate_beginner_rules(netlist);
+    append_dynamic_erc(components, wires, simulation, &mut v);
+    v
+}
 
-    // 1. Unconnected pins: use netlist, not raw coordinates.
-    for comp in components {
-        // Skip purely decorative / reference components
-        if matches!(
-            comp.kind,
-            ComponentKind::NetLabel | ComponentKind::Breadboard
-        ) {
-            continue;
-        }
-        for pin in netlist
-            .pins
-            .iter()
-            .filter(|pin| pin.component_id == comp.id)
-        {
-            if !pin.connected_by_wire {
-                let sev = if matches!(
-                    pin.electrical_type,
-                    ElectricalType::PowerIn | ElectricalType::Ground
-                ) {
-                    ErcSeverity::Error
-                } else {
-                    ErcSeverity::Warning
-                };
-                v.push(ErcViolation {
-                    rule: ErcRule::FloatingConnectivity,
-                    severity: sev,
-                    component_id: Some(comp.id),
-                    wire_id: None,
-                    message: format!("{}: pin \"{}\" unconnected", comp.label, pin.pin_name),
-                });
-            }
-        }
-    }
-
-    // 2. No ground reference
-    let has_ground = components.iter().any(|c| c.kind == ComponentKind::Ground)
-        || components.iter().any(|c| {
-            matches!(
-                c.kind,
-                ComponentKind::VSource | ComponentKind::Battery | ComponentKind::ISource
-            ) && component_pin_defs(c)
-                .iter()
-                .any(|p| p.role == PinRole::Ground)
-        });
-    if !has_ground && !components.is_empty() {
-        v.push(ErcViolation {
-            rule: ErcRule::MissingGround,
-            severity: ErcSeverity::Error,
-            component_id: None,
-            wire_id: None,
-            message: "No ground (GND) reference in schematic.".to_string(),
-        });
-    }
-
-    // 3. No voltage/current source
+pub(crate) fn append_dynamic_erc(
+    components: &[Component],
+    wires: &[Wire],
+    simulation: &Simulation,
+    v: &mut Vec<ErcViolation>,
+) {
     let has_source = components.iter().any(|c| {
         matches!(
             c.kind,
@@ -1756,32 +1712,21 @@ pub(crate) fn run_erc_with_netlist(
         });
     }
 
-    // 4. Net-level power conflicts and short circuit
-    let net_report = analyze_wire_nets_for_erc(components, wires);
-    for conflict in &net_report.power_conflicts {
+    if simulation.shorted
+        && !v.iter().any(|violation| {
+            matches!(
+                violation.rule,
+                ErcRule::PowerShort | ErcRule::PowerRailConflict
+            )
+        })
+    {
         v.push(ErcViolation {
-            rule: ErcRule::PowerRailConflict,
+            rule: ErcRule::PowerShort,
             severity: ErcSeverity::Error,
             component_id: None,
-            wire_id: conflict.wire_id,
-            message: conflict.message.clone(),
+            wire_id: wires.first().map(|wire| wire.id),
+            message: "Short circuit detected: source + reaches GND without a load.".to_string(),
         });
-    }
-    if simulation.shorted {
-        let already_reported = !net_report.power_conflicts.is_empty();
-        if !already_reported {
-            v.push(ErcViolation {
-                rule: ErcRule::PowerShort,
-                severity: ErcSeverity::Error,
-                component_id: None,
-                wire_id: net_report.first_short_wire,
-                message: "Short circuit detected: source + reaches GND without a load.".to_string(),
-            });
-        }
-    }
-
-    for warning in validate_beginner_rules(netlist) {
-        v.push(warning);
     }
 
     // 5. Component polarity warnings from simulation
@@ -1796,192 +1741,4 @@ pub(crate) fn run_erc_with_netlist(
             });
         }
     }
-
-    // 6. Zero-value resistors
-    for comp in components {
-        if comp.kind == ComponentKind::Resistor {
-            if let Some(r) = parse_metric_value(&comp.value, "ohm") {
-                if r <= 0.0 {
-                    v.push(ErcViolation {
-                        rule: ErcRule::MissingValue,
-                        severity: ErcSeverity::Warning,
-                        component_id: Some(comp.id),
-                        wire_id: None,
-                        message: format!(
-                            "{}: zero or negative resistance value \"{}\"",
-                            comp.label, comp.value
-                        ),
-                    });
-                }
-            } else {
-                v.push(ErcViolation {
-                    rule: ErcRule::MissingValue,
-                    severity: ErcSeverity::Warning,
-                    component_id: Some(comp.id),
-                    wire_id: None,
-                    message: format!(
-                        "{}: cannot parse resistance value \"{}\"",
-                        comp.label, comp.value
-                    ),
-                });
-            }
-        }
-    }
-
-    // 7. Duplicate labels
-    let mut labels: HashMap<&str, Vec<u64>> = HashMap::new();
-    for comp in components {
-        labels.entry(comp.label.as_str()).or_default().push(comp.id);
-    }
-    for (label, ids) in &labels {
-        if ids.len() > 1 {
-            v.push(ErcViolation {
-                rule: ErcRule::DuplicateReference,
-                severity: ErcSeverity::Warning,
-                component_id: Some(ids[0]),
-                wire_id: None,
-                message: format!("Duplicate label \"{label}\" on {} components.", ids.len()),
-            });
-        }
-    }
-
-    // 8. Broken wires
-    for wire in wires {
-        if wire.points.len() < 2 || wire_length(wire) <= 0.5 {
-            v.push(ErcViolation {
-                rule: ErcRule::FloatingConnectivity,
-                severity: ErcSeverity::Warning,
-                component_id: None,
-                wire_id: Some(wire.id),
-                message: format!("Wire {} has no usable length.", wire.id),
-            });
-        }
-    }
-
-    v
-}
-
-#[derive(Default)]
-pub(crate) struct ErcNetReport {
-    first_short_wire: Option<u64>,
-    power_conflicts: Vec<ErcNetConflict>,
-}
-
-pub(crate) struct ErcNetConflict {
-    wire_id: Option<u64>,
-    message: String,
-}
-
-pub(crate) fn analyze_wire_nets_for_erc(components: &[Component], wires: &[Wire]) -> ErcNetReport {
-    let mut nodes = CircuitNodes::default();
-    let mut graph: Vec<HashSet<usize>> = Vec::new();
-    let mut wire_nodes: HashMap<u64, Vec<usize>> = HashMap::new();
-
-    for wire in wires {
-        let mut used_nodes = Vec::new();
-        for point in &wire.points {
-            used_nodes.push(nodes.node_for(*point));
-        }
-        for segment in wire.points.windows(2) {
-            let a = nodes.node_for(segment[0]);
-            let b = nodes.node_for(segment[1]);
-            connect(&mut graph, a, b);
-            used_nodes.push(a);
-            used_nodes.push(b);
-        }
-        used_nodes.sort_unstable();
-        used_nodes.dedup();
-        wire_nodes.insert(wire.id, used_nodes);
-    }
-
-    let mut positive_nodes = Vec::new();
-    let mut ground_nodes = Vec::new();
-    for component in components {
-        for pin in component_pin_defs(component) {
-            let node = nodes.node_for(pin.pos);
-            match pin.role {
-                PinRole::Positive => {
-                    positive_nodes.push((node, component.label.clone(), pin.label))
-                }
-                PinRole::Ground => ground_nodes.push((node, component.label.clone(), pin.label)),
-                _ => {}
-            }
-        }
-        if component.kind == ComponentKind::Ground {
-            for pin in component_pin_defs(component) {
-                let node = nodes.node_for(pin.pos);
-                ground_nodes.push((node, component.label.clone(), pin.label));
-            }
-        }
-    }
-    connect_wire_contacts(&mut nodes, &mut graph, wires, components);
-
-    let positive_reach: Vec<HashSet<usize>> = positive_nodes
-        .iter()
-        .map(|(node, _, _)| reachable_nodes(&graph, &[*node]))
-        .collect();
-    let ground_reach: Vec<HashSet<usize>> = ground_nodes
-        .iter()
-        .map(|(node, _, _)| reachable_nodes(&graph, &[*node]))
-        .collect();
-
-    let mut report = ErcNetReport::default();
-    let mut seen_conflicts = HashSet::new();
-    for (pos_idx, pos_seen) in positive_reach.iter().enumerate() {
-        for (gnd_idx, gnd_seen) in ground_reach.iter().enumerate() {
-            if !pos_seen.contains(&ground_nodes[gnd_idx].0)
-                && !gnd_seen.contains(&positive_nodes[pos_idx].0)
-            {
-                continue;
-            }
-            let wire_id = first_wire_touching_either_set(&wire_nodes, pos_seen, gnd_seen);
-            report.first_short_wire = report.first_short_wire.or(wire_id);
-            let key = (
-                positive_nodes[pos_idx].1.clone(),
-                positive_nodes[pos_idx].2,
-                ground_nodes[gnd_idx].1.clone(),
-                ground_nodes[gnd_idx].2,
-                wire_id,
-            );
-            if seen_conflicts.insert(key) {
-                report.power_conflicts.push(ErcNetConflict {
-                    wire_id,
-                    message: format!(
-                        "Power net conflict: {} {} is tied to {} {}.",
-                        positive_nodes[pos_idx].1,
-                        positive_nodes[pos_idx].2,
-                        ground_nodes[gnd_idx].1,
-                        ground_nodes[gnd_idx].2
-                    ),
-                });
-            }
-        }
-    }
-
-    report
-}
-
-pub(crate) fn first_wire_touching_either_set(
-    wire_nodes: &HashMap<u64, Vec<usize>>,
-    a: &HashSet<usize>,
-    b: &HashSet<usize>,
-) -> Option<u64> {
-    let mut ordered_wires = wire_nodes.iter().collect::<Vec<_>>();
-    ordered_wires.sort_by_key(|&(&id, _)| id);
-    ordered_wires
-        .iter()
-        .find(|(_, nodes)| {
-            nodes.iter().any(|node| a.contains(node)) && nodes.iter().any(|node| b.contains(node))
-        })
-        .map(|&(&id, _)| id)
-        .or_else(|| {
-            ordered_wires
-                .iter()
-                .find(|(_, nodes)| {
-                    nodes
-                        .iter()
-                        .any(|node| a.contains(node) || b.contains(node))
-                })
-                .map(|&(&id, _)| id)
-        })
 }

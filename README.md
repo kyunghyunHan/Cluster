@@ -343,7 +343,9 @@ Cluster's MNA solver is educational-grade, not a drop-in SPICE replacement:
   not invent one net-wide current value in that case
 
 For production simulation, inspect and refine the exported netlist in LTspice
-or ngspice. Export does not make the built-in solver SPICE-accurate.
+or select the optional ngspice transient backend in the simulation toolbar.
+Cluster reports an actionable error when the `ngspice` executable is not
+available; export alone does not make the built-in solver SPICE-accurate.
 
 Simulation status is shown as **OK**, **Warning**, or **Failed**. Warning means
 the editor can still show useful connectivity or voltages, but the numeric
@@ -354,50 +356,83 @@ mathematically impossible, such as an ideal-source conflict.
 
 ## Performance baseline
 
-The repository includes deterministic Criterion fixtures and benchmarks in
-`benches/performance.rs`. They cover 100/500/1,000-component schematics,
-connectivity, ERC, MNA, hit testing, viewport queries, current-flow generation,
-serialization, PCB DRC/ratsnest, and snapshot-vs-delta history costs. Run them
-with `cargo bench --bench performance`.
+The repository includes deterministic Criterion fixtures in
+`benches/performance.rs` and a percentile/heap probe in
+`examples/performance_probe.rs`. Run them with:
 
-Baseline captured on commit `97e851f` (Apple Silicon/macOS, warm build):
+```text
+cargo bench --bench performance
+CLUSTER_PERF_SAMPLES=9 cargo run --release --example performance_probe
+```
 
-| Benchmark | Median |
-| --- | ---: |
-| connectivity small / medium / large | 3.25 ms / 52.0 ms / 242.7 ms |
-| ERC small / medium / large | 6.56 ms / 178 ms / 1.06 s |
+The following p50 values compare `e613665` with this change on arm64 macOS.
+Each circuit row uses the exact component/segment count shown. Times are
+milliseconds; the local-DRC baseline used the old truncated-board approximation,
+whereas the new result validates 128 affected tracks against the complete board.
 
-These are repeatable workload baselines, not release acceptance claims. The
-large fixture intentionally remains a useful stress case while spatial-index
-and dependency-keyed cache work is measured. Criterion output is the source of
-truth for subsequent before/after comparisons.
+| Workload | 100 / 300 before → after | 500 / 2,000 before → after | 1,000 / 5,000 before → after |
+| --- | ---: | ---: | ---: |
+| Cached frame CPU model | 0.0034 → 0.0033 | 0.0238 → 0.0238 | 0.0479 → 0.0481 |
+| Hit test | 0.0015 → 0.0031 | 0.0098 → 0.0096 | 0.0230 → 0.0230 |
+| Connectivity | 3.25 → 4.41 | 48.99 → 48.71 | 238.94 → 235.92 |
+| ERC | 6.92 → 4.08 | 166.13 → 59.23 | 990.44 → 327.59 |
+| MNA | 3.68 → 3.58 | 64.93 → 64.19 | 334.31 → 330.46 |
+| Save JSON | 0.294 → 0.306 | 1.822 → 1.852 | 4.469 → 4.413 |
 
-The analysis layer now uses typed document revisions and `Arc`-backed cached
-connectivity, netlists, simulations, and connected-pin projections. Visual-only
-changes do not invalidate schematic or simulation caches; PCB-only persistence
-changes do not advance the schematic analysis revision. The performance overlay
-shows rendered/total objects, analysis durations, and cache hit state in debug
-builds.
+| PCB/history workload | Before p50 | After p50 |
+| --- | ---: | ---: |
+| PCB hit test, 250 footprints / 2,000 tracks / 150 vias | 0.0026 ms | <0.0001 ms |
+| PCB local DRC | 0.256 ms | 3.005 ms |
+| PCB full DRC | 16.843 ms | 7.132 ms |
+| Ratsnest | 0.482 ms | 0.470 ms |
+| Undo + redo, 1,000 / 5,000 | 2.172 ms | 2.114 ms |
+| Save snapshot clone, 1,000 / 5,000 | 0.360 ms | 0.354 ms |
+
+For the largest cached-frame workload, before/after p50/p95/max was
+`0.0479/0.0597/0.0597 ms` → `0.0481/0.0676/0.0676 ms`. Peak incremental heap
+for local DRC fell from 360,452 bytes to 4,080 bytes; full DRC remained 681,006
+bytes, and save-snapshot heap fell from 1,382,179 to 1,375,770 bytes. Raw probe
+output is the acceptance record; Criterion remains the statistical regression
+tool.
+
+Analysis now runs through a bounded revision-tagged worker. Stale connectivity,
+ERC, MNA, transient and full-DRC results are discarded, and autosave JSON
+serialization plus filesystem I/O no longer blocks the UI thread. PCB hit
+testing, culling, snapping, routing targets and DRC use entity/spatial indexes.
+The debug performance overlay shows live frame p50/p95/max and cache state.
 
 ## Roadmap
 
-- [x] Beginner ESP32/Arduino example gallery in the palette
-- [x] First Breadboard View wiring assistant for ESP32/Arduino I2C circuits, including missing-jumper auto-wire actions
-- [x] Phase 1 CAD model groundwork: SymbolInstance, Footprint, NetClass, Board, Track, Via, DRC, Gerber/Excellon scaffolding
-- [x] First PCB bottom dock workflow: Update PCB, generated footprints, preview with DRC markers, selectable DRC rows, auto-place, board fit, ratsnest route helper, DRC-gated fabrication export
-- [x] ERC auto-fix wiring for I2C pull-ups and relay flyback diodes
-- [x] Canonical deterministic netlist: typed pin/junction endpoints, explicit X-junctions, T-junctions, no-connect markers, scoped labels, and multi-page merge
-- [ ] Complete junction/no-connect authoring and persistence UI across every page
-- [x] Pin-type ERC: output-output conflict, power input not driven, unconnected input, floating net, MCU overvoltage, I2C/SPI/UART mismatch
-- [ ] PCB editor MVP: interactive footprint placement, manual track editing, vias, two-layer board
-- [ ] DRC panel with fuller clickable track/pad/via/edge/silkscreen navigation
-- [ ] Gerber RS-274X, Excellon drill, pick-and-place CSV, and further strengthened BOM export
-- [x] Project folder save/load for schematic, board, and CAD JSON
-- [x] First JSON custom-part library: `cluster_parts/*.json` schematic symbols with pins/roles, palette section, save/load round-trip
-- [ ] Library manager phase 2: footprint definitions, per-project libraries, in-app part editor
-- [ ] Full breadboard placement with editable physical jumpers, power rails, zoom, and pin highlighting
-- [ ] Guided tutorials with step-by-step wiring, code, simulation, and repair hints
-- [ ] Optional ngspice export/run/import for advanced simulation
+### Completed
+
+- Beginner example gallery and I2C Breadboard View wiring assistant
+- Canonical deterministic multi-page netlist and registry-based beginner ERC
+- PCB editor MVP: footprint move/rotate/flip, two-layer 45°/90° routing, vias,
+  copper editing, outline editing, selection and undo/redo
+- CAD/PCB model, project-folder round trip, DRC-gated fabrication scaffolding,
+  Gerber/Excellon and BOM/CPL export
+- Indexed, delta-based command/history boundary and revision-tagged analysis worker
+- Optional ngspice transient export/run/import backend selectable from the toolbar
+
+### In Progress
+
+- Complete junction/no-connect authoring UI across every page
+- Clickable pad/hole/silkscreen/mask DRC navigation in the PCB workspace
+- Editable physical breadboard jumpers, rails and pin highlighting
+- Library manager phase 2: project libraries, footprint editor and part editor
+
+### Next
+
+- `.cluster` project bundle, recent projects, thumbnails and crash-recovery browser
+- Interactive track endpoint and pad-to-pad routing edits
+- Export wizard and ngspice result plots
+- Guided tutorials with repair hints and code/simulation checkpoints
+
+### Long Term
+
+- Advanced PCB mask, zone, differential-pair and manufacturing checks
+- Broader mixed-signal simulation through external solver models
+- Collaborative review and reusable organization libraries
 
 
 ## Contributing

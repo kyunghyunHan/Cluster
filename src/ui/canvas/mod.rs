@@ -10,6 +10,7 @@ pub(crate) mod hit_test;
 pub(crate) mod interaction;
 pub(crate) mod overlays;
 pub(crate) mod selection;
+pub(crate) mod spatial_index;
 pub(crate) mod view;
 pub(crate) mod wires;
 

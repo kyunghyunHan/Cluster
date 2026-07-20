@@ -1,7 +1,12 @@
 use crate::model::{
     CircuitSnapshot, Component, Counters, ProjectDocument, ProjectPage, SchematicAnnotations, Wire,
 };
-use crate::pcb::board::Board;
+use crate::pcb::board::{
+    Board, BoardFootprint, BoardOutline, DesignRules, GridSettings, LayerVisibility, Zone,
+};
+use crate::pcb::layer::BoardLayer;
+use crate::pcb::track::TrackSegment;
+use crate::pcb::via::Via;
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 
@@ -26,6 +31,47 @@ struct DocumentMetadata {
     current_page: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct BoardMetadata {
+    schema_version: u32,
+    outline: BoardOutline,
+    layers: Vec<BoardLayer>,
+    layer_visibility: Vec<LayerVisibility>,
+    grid: GridSettings,
+    zones: Vec<Zone>,
+    footprint_library: Vec<crate::pcb::footprint::Footprint>,
+    design_rules: DesignRules,
+    net_classes: Vec<crate::model::cad::NetClass>,
+}
+
+impl BoardMetadata {
+    fn from_board(board: &Board) -> Self {
+        Self {
+            schema_version: board.schema_version,
+            outline: board.outline.clone(),
+            layers: board.layers.clone(),
+            layer_visibility: board.layer_visibility.clone(),
+            grid: board.grid.clone(),
+            zones: board.zones.clone(),
+            footprint_library: board.footprint_library.clone(),
+            design_rules: board.design_rules.clone(),
+            net_classes: board.net_classes.clone(),
+        }
+    }
+
+    fn apply_to(&self, board: &mut Board) {
+        board.schema_version = self.schema_version;
+        board.outline = self.outline.clone();
+        board.layers.clone_from(&self.layers);
+        board.layer_visibility.clone_from(&self.layer_visibility);
+        board.grid = self.grid.clone();
+        board.zones.clone_from(&self.zones);
+        board.footprint_library.clone_from(&self.footprint_library);
+        board.design_rules = self.design_rules.clone();
+        board.net_classes.clone_from(&self.net_classes);
+    }
+}
+
 /// Reversible user-document changes. Unchanged entities are not retained.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DocumentDelta {
@@ -33,7 +79,22 @@ pub(crate) struct DocumentDelta {
     wires: Vec<ListDelta<Wire>>,
     annotations: Option<(SchematicAnnotations, SchematicAnnotations)>,
     metadata: Option<(DocumentMetadata, DocumentMetadata)>,
-    board: Option<(Board, Board)>,
+    board_footprints: Vec<ListDelta<BoardFootprint>>,
+    board_tracks: Vec<ListDelta<TrackSegment>>,
+    board_vias: Vec<ListDelta<Via>>,
+    board_metadata: Option<(BoardMetadata, BoardMetadata)>,
+}
+
+pub(crate) struct BoardDeltaCapture {
+    footprint_ids: HashSet<u64>,
+    track_ids: HashSet<u64>,
+    via_ids: HashSet<u64>,
+    footprint_ids_before: HashSet<u64>,
+    before_footprints: HashMap<u64, ListValue<BoardFootprint>>,
+    before_tracks: HashMap<u64, ListValue<TrackSegment>>,
+    before_vias: HashMap<u64, ListValue<Via>>,
+    before_metadata: Option<BoardMetadata>,
+    capture_new_footprints: bool,
 }
 
 /// Common reversible command behavior used by schematic and PCB history.
@@ -46,6 +107,80 @@ pub(crate) trait UndoableCommand {
 }
 
 impl DocumentDelta {
+    pub(crate) fn empty() -> Self {
+        Self {
+            components: Vec::new(),
+            wires: Vec::new(),
+            annotations: None,
+            metadata: None,
+            board_footprints: Vec::new(),
+            board_tracks: Vec::new(),
+            board_vias: Vec::new(),
+            board_metadata: None,
+        }
+    }
+
+    pub(crate) fn capture_board(
+        board: &Board,
+        scope: crate::commands::pcb::PcbDeltaScope,
+    ) -> BoardDeltaCapture {
+        BoardDeltaCapture {
+            before_footprints: capture_values(&board.footprints, &scope.footprint_ids, |value| {
+                value.id
+            }),
+            before_tracks: capture_values(&board.tracks, &scope.track_ids, |value| value.id),
+            before_vias: capture_values(&board.vias, &scope.via_ids, |value| value.id),
+            footprint_ids_before: board
+                .footprints
+                .iter()
+                .map(|footprint| footprint.id)
+                .collect(),
+            before_metadata: scope
+                .board_metadata
+                .then(|| BoardMetadata::from_board(board)),
+            footprint_ids: scope.footprint_ids,
+            track_ids: scope.track_ids,
+            via_ids: scope.via_ids,
+            capture_new_footprints: scope.capture_new_footprints,
+        }
+    }
+
+    pub(crate) fn from_board_capture(capture: BoardDeltaCapture, board: &Board) -> Self {
+        let mut footprint_ids = capture.footprint_ids;
+        if capture.capture_new_footprints {
+            footprint_ids.extend(
+                board
+                    .footprints
+                    .iter()
+                    .filter(|footprint| !capture.footprint_ids_before.contains(&footprint.id))
+                    .map(|footprint| footprint.id),
+            );
+        }
+        let after_footprints = capture_values(&board.footprints, &footprint_ids, |value| value.id);
+        let after_tracks = capture_values(&board.tracks, &capture.track_ids, |value| value.id);
+        let after_vias = capture_values(&board.vias, &capture.via_ids, |value| value.id);
+        let before_metadata = capture.before_metadata;
+        let after_metadata = before_metadata
+            .as_ref()
+            .map(|_| BoardMetadata::from_board(board));
+        Self {
+            components: Vec::new(),
+            wires: Vec::new(),
+            annotations: None,
+            metadata: None,
+            board_footprints: diff_captured(
+                capture.before_footprints,
+                after_footprints,
+                &footprint_ids,
+            ),
+            board_tracks: diff_captured(capture.before_tracks, after_tracks, &capture.track_ids),
+            board_vias: diff_captured(capture.before_vias, after_vias, &capture.via_ids),
+            board_metadata: before_metadata
+                .zip(after_metadata)
+                .filter(|(before, after)| before != after),
+        }
+    }
+
     pub(crate) fn between(before: &CircuitSnapshot, after: &CircuitSnapshot) -> Self {
         let before_metadata = DocumentMetadata {
             next_id: before.next_id,
@@ -66,8 +201,18 @@ impl DocumentDelta {
                 .then(|| (before.annotations.clone(), after.annotations.clone())),
             metadata: (before_metadata != after_metadata)
                 .then_some((before_metadata, after_metadata)),
-            board: (before.board != after.board)
-                .then(|| (before.board.clone(), after.board.clone())),
+            board_footprints: diff_list(
+                &before.board.footprints,
+                &after.board.footprints,
+                |value| value.id,
+            ),
+            board_tracks: diff_list(&before.board.tracks, &after.board.tracks, |value| value.id),
+            board_vias: diff_list(&before.board.vias, &after.board.vias, |value| value.id),
+            board_metadata: {
+                let before = BoardMetadata::from_board(&before.board);
+                let after = BoardMetadata::from_board(&after.board);
+                (before != after).then_some((before, after))
+            },
         }
     }
 
@@ -89,10 +234,66 @@ impl DocumentDelta {
             document.pages = metadata.pages.clone();
             document.current_page = metadata.current_page;
         }
-        if let Some((before, after)) = &self.board {
-            document.board = if forward { after } else { before }.clone();
+        apply_list(
+            &mut document.board.footprints,
+            &self.board_footprints,
+            forward,
+            |value| value.id,
+        );
+        apply_list(
+            &mut document.board.tracks,
+            &self.board_tracks,
+            forward,
+            |value| value.id,
+        );
+        apply_list(
+            &mut document.board.vias,
+            &self.board_vias,
+            forward,
+            |value| value.id,
+        );
+        if let Some((before, after)) = &self.board_metadata {
+            (if forward { after } else { before }).apply_to(&mut document.board);
         }
+        document.board.rebuild_entity_index();
     }
+}
+
+fn capture_values<T: Clone>(
+    values: &[T],
+    ids: &HashSet<u64>,
+    id: impl Fn(&T) -> u64,
+) -> HashMap<u64, ListValue<T>> {
+    values
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| ids.contains(&id(value)))
+        .map(|(index, value)| {
+            (
+                id(value),
+                ListValue {
+                    index,
+                    value: value.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn diff_captured<T: Clone + PartialEq>(
+    mut before: HashMap<u64, ListValue<T>>,
+    mut after: HashMap<u64, ListValue<T>>,
+    ids: &HashSet<u64>,
+) -> Vec<ListDelta<T>> {
+    let mut ids = ids.iter().copied().collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.into_iter()
+        .filter_map(|id| {
+            let before = before.remove(&id);
+            let after = after.remove(&id);
+            (before != after).then_some(ListDelta { id, before, after })
+        })
+        .collect()
 }
 
 impl UndoableCommand for DocumentDelta {
@@ -109,7 +310,10 @@ impl UndoableCommand for DocumentDelta {
         merge_list(&mut self.wires, &newer.wires);
         merge_pair(&mut self.annotations, &newer.annotations);
         merge_pair(&mut self.metadata, &newer.metadata);
-        merge_pair(&mut self.board, &newer.board);
+        merge_list(&mut self.board_footprints, &newer.board_footprints);
+        merge_list(&mut self.board_tracks, &newer.board_tracks);
+        merge_list(&mut self.board_vias, &newer.board_vias);
+        merge_pair(&mut self.board_metadata, &newer.board_metadata);
         true
     }
 
@@ -144,8 +348,11 @@ impl UndoableCommand for DocumentDelta {
                     + after.no_connect_markers.capacity())
                     * size_of::<egui::Pos2>()
             })
-            + self.board.as_ref().map_or(0, |(before, after)| {
-                approximate_board_cost(before) + approximate_board_cost(after)
+            + list_delta_cost(&self.board_footprints)
+            + list_delta_cost(&self.board_tracks)
+            + list_delta_cost(&self.board_vias)
+            + self.board_metadata.as_ref().map_or(0, |(before, after)| {
+                approximate_board_metadata_cost(before) + approximate_board_metadata_cost(after)
             })
     }
 
@@ -154,7 +361,10 @@ impl UndoableCommand for DocumentDelta {
             && self.wires.is_empty()
             && self.annotations.is_none()
             && self.metadata.is_none()
-            && self.board.is_none()
+            && self.board_footprints.is_empty()
+            && self.board_tracks.is_empty()
+            && self.board_vias.is_empty()
+            && self.board_metadata.is_none()
     }
 }
 
@@ -259,12 +469,18 @@ fn merge_pair<T: Clone + PartialEq>(target: &mut Option<(T, T)>, newer: &Option<
     }
 }
 
-fn approximate_board_cost(board: &Board) -> usize {
-    size_of::<Board>()
-        + board.tracks.capacity() * size_of::<crate::pcb::track::TrackSegment>()
-        + board.vias.capacity() * size_of::<crate::pcb::via::Via>()
-        + board.footprints.capacity() * size_of::<crate::pcb::board::BoardFootprint>()
-        + board.outline.points.capacity() * size_of::<crate::model::cad::Point2>()
+fn list_delta_cost<T>(values: &[ListDelta<T>]) -> usize {
+    std::mem::size_of_val(values)
+}
+
+fn approximate_board_metadata_cost(metadata: &BoardMetadata) -> usize {
+    size_of::<BoardMetadata>()
+        + metadata.outline.points.capacity() * size_of::<crate::model::cad::Point2>()
+        + metadata.layers.capacity() * size_of::<BoardLayer>()
+        + metadata.layer_visibility.capacity() * size_of::<LayerVisibility>()
+        + metadata.zones.capacity() * size_of::<Zone>()
+        + metadata.footprint_library.capacity() * size_of::<crate::pcb::footprint::Footprint>()
+        + metadata.net_classes.capacity() * size_of::<crate::model::cad::NetClass>()
 }
 
 #[cfg(test)]

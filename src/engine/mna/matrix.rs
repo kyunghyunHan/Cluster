@@ -116,7 +116,16 @@ impl Mna {
 
     /// Solve A·x = z with Gaussian elimination + partial pivoting.
     #[allow(clippy::needless_range_loop)] // Gaussian elimination requires indexed columns.
+    #[allow(dead_code)]
     pub(super) fn solve(self) -> Result<SolveSolution, SimulationError> {
+        self.solve_with_cancellation(None)
+    }
+
+    #[allow(clippy::needless_range_loop)]
+    pub(super) fn solve_with_cancellation(
+        self,
+        cancellation: Option<&crate::engine::ngspice::CancellationToken>,
+    ) -> Result<SolveSolution, SimulationError> {
         let sz = self.n + self.m;
         if sz == 0 {
             return Ok(SolveSolution {
@@ -130,6 +139,9 @@ impl Mna {
         let mut b = self.z;
 
         for col in 0..sz {
+            if cancellation.is_some_and(|token| token.is_cancelled()) {
+                return Err(SimulationError::Cancelled);
+            }
             let mut prow = col;
             for row in (col + 1)..sz {
                 if a[row][col].abs() > a[prow][col].abs() {
@@ -157,6 +169,9 @@ impl Mna {
 
         let mut x = vec![0.0; sz];
         for i in (0..sz).rev() {
+            if cancellation.is_some_and(|token| token.is_cancelled()) {
+                return Err(SimulationError::Cancelled);
+            }
             x[i] = b[i];
             for j in (i + 1)..sz {
                 x[i] -= a[i][j] * x[j];

@@ -17,25 +17,57 @@ pub(in crate::engine) struct SegmentSpatialIndex {
 
 impl SegmentSpatialIndex {
     pub(in crate::engine) fn new(wires: &[Wire]) -> Self {
-        let mut buckets: HashMap<(i32, i32), Vec<SegmentRef>> = HashMap::new();
+        let mut index = Self {
+            buckets: HashMap::new(),
+        };
         for (wire_index, wire) in wires.iter().enumerate() {
-            for (segment_index, segment) in wire.points.windows(2).enumerate() {
-                let min_x = bucket(segment[0].x.min(segment[1].x));
-                let max_x = bucket(segment[0].x.max(segment[1].x));
-                let min_y = bucket(segment[0].y.min(segment[1].y));
-                let max_y = bucket(segment[0].y.max(segment[1].y));
-                let reference = SegmentRef {
-                    wire_index,
-                    segment_index,
-                };
-                for x in min_x..=max_x {
-                    for y in min_y..=max_y {
-                        buckets.entry((x, y)).or_default().push(reference);
-                    }
+            index.add_wire(wire_index, wire);
+        }
+        index
+    }
+
+    pub(in crate::engine) fn add_wire(&mut self, wire_index: usize, wire: &Wire) {
+        for (segment_index, segment) in wire.points.windows(2).enumerate() {
+            let min_x = bucket(segment[0].x.min(segment[1].x));
+            let max_x = bucket(segment[0].x.max(segment[1].x));
+            let min_y = bucket(segment[0].y.min(segment[1].y));
+            let max_y = bucket(segment[0].y.max(segment[1].y));
+            let reference = SegmentRef {
+                wire_index,
+                segment_index,
+            };
+            for x in min_x..=max_x {
+                for y in min_y..=max_y {
+                    self.buckets.entry((x, y)).or_default().push(reference);
                 }
             }
         }
-        Self { buckets }
+    }
+
+    #[allow(dead_code)] // Incremental API is exercised by regression tests and the staged cache.
+    pub(in crate::engine) fn update_wire(&mut self, wire_index: usize, wire: &Wire) {
+        self.remove_wire_segments(wire_index);
+        self.add_wire(wire_index, wire);
+    }
+
+    #[allow(dead_code)] // Incremental API is exercised by regression tests and the staged cache.
+    pub(in crate::engine) fn remove_wire(&mut self, wire_index: usize) {
+        self.remove_wire_segments(wire_index);
+        for candidates in self.buckets.values_mut() {
+            for candidate in candidates {
+                if candidate.wire_index > wire_index {
+                    candidate.wire_index -= 1;
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn remove_wire_segments(&mut self, wire_index: usize) {
+        self.buckets.retain(|_, candidates| {
+            candidates.retain(|candidate| candidate.wire_index != wire_index);
+            !candidates.is_empty()
+        });
     }
 
     pub(in crate::engine) fn candidates(&self, point: Pos2) -> Vec<SegmentRef> {
@@ -101,6 +133,47 @@ mod tests {
                 wire_index: 0,
                 segment_index: 0,
             }]
+        );
+    }
+
+    #[test]
+    fn segment_index_supports_incremental_add_update_remove() {
+        let mut wires = vec![
+            Wire::new(1, vec![Pos2::new(0.0, 0.0), Pos2::new(20.0, 0.0)]),
+            Wire::new(2, vec![Pos2::new(200.0, 0.0), Pos2::new(220.0, 0.0)]),
+        ];
+        let mut index = SegmentSpatialIndex::new(&wires);
+
+        wires[0].points = vec![Pos2::new(500.0, 0.0), Pos2::new(520.0, 0.0)];
+        index.update_wire(0, &wires[0]);
+        assert!(index.candidates(Pos2::new(10.0, 0.0)).is_empty());
+        assert_eq!(index.candidates(Pos2::new(510.0, 0.0))[0].wire_index, 0);
+
+        wires.push(Wire::new(
+            3,
+            vec![Pos2::new(300.0, 0.0), Pos2::new(320.0, 0.0)],
+        ));
+        index.add_wire(2, &wires[2]);
+        assert!(
+            index
+                .candidates(Pos2::new(310.0, 0.0))
+                .iter()
+                .any(|candidate| candidate.wire_index == 2)
+        );
+
+        wires.remove(0);
+        index.remove_wire(0);
+        assert!(
+            index
+                .candidates(Pos2::new(210.0, 0.0))
+                .iter()
+                .any(|candidate| candidate.wire_index == 0)
+        );
+        assert!(
+            index
+                .candidates(Pos2::new(310.0, 0.0))
+                .iter()
+                .any(|candidate| candidate.wire_index == 1)
         );
     }
 }

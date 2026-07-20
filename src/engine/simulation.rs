@@ -46,6 +46,7 @@ pub(crate) fn analyze_circuit(components: &[Component], wires: &[Wire]) -> Simul
     crate::analyze_circuit(components, wires)
 }
 
+#[allow(dead_code)]
 pub(crate) fn analyze_circuit_with_connectivity(
     components: &[Component],
     wires: &[Wire],

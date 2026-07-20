@@ -239,14 +239,15 @@ pub(crate) fn render_current_flow(
         if !screen_bounds.intersects(input.viewport) {
             continue;
         }
-        visible_wire_count += 1;
         let emphasized = input.selected_wire == Some(wire.wire_id)
             || input.highlighted_wires.contains(&wire.wire_id);
+        let mut wire_has_visible_flow = false;
         for run in &wire.runs {
             let current = run.signed_current_a;
             if !current_is_visible(input.settings, current) {
                 continue;
             }
+            wire_has_visible_flow = true;
             let level = ((current.abs() / input.settings.minimum_visible_current_a)
                 .max(1.0)
                 .log10()
@@ -311,6 +312,7 @@ pub(crate) fn render_current_flow(
                 }
             }
         }
+        visible_wire_count += usize::from(wire_has_visible_flow);
     }
     FlowRenderStats {
         needs_repaint: animated || (input.startup_progress < 1.0 && visible_wire_count > 0),

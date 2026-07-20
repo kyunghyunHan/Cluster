@@ -3,6 +3,7 @@
 use crate::model::cad::{CadNet, FootprintId, NetClass, Point2, SymbolInstance};
 use crate::pcb::footprint::Footprint;
 use crate::pcb::layer::{BoardLayer, default_two_layer_stackup};
+use crate::pcb::spatial_index::{PadRef, PcbSpatialIndex};
 use crate::pcb::track::TrackSegment;
 use crate::pcb::via::Via;
 use serde::{Deserialize, Serialize};
@@ -101,7 +102,7 @@ pub(crate) struct Zone {
     pub(crate) outline: Vec<Point2>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Board {
     pub(crate) schema_version: u32,
     pub(crate) outline: BoardOutline,
@@ -117,6 +118,34 @@ pub(crate) struct Board {
     pub(crate) footprint_library: Vec<Footprint>,
     pub(crate) design_rules: DesignRules,
     pub(crate) net_classes: Vec<NetClass>,
+    #[serde(skip)]
+    entity_index: BoardEntityIndex,
+    #[serde(skip)]
+    spatial_index: PcbSpatialIndex,
+}
+
+impl PartialEq for Board {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema_version == other.schema_version
+            && self.outline == other.outline
+            && self.layers == other.layers
+            && self.layer_visibility == other.layer_visibility
+            && self.grid == other.grid
+            && self.tracks == other.tracks
+            && self.vias == other.vias
+            && self.zones == other.zones
+            && self.footprints == other.footprints
+            && self.footprint_library == other.footprint_library
+            && self.design_rules == other.design_rules
+            && self.net_classes == other.net_classes
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct BoardEntityIndex {
+    footprints: HashMap<u64, usize>,
+    tracks: HashMap<u64, usize>,
+    vias: HashMap<u64, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -141,6 +170,72 @@ pub(crate) struct EcoReport {
     pub(crate) renamed_references: Vec<u64>,
     pub(crate) added_nets: Vec<usize>,
     pub(crate) removed_nets: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EcoPatch {
+    pub(crate) report: EcoReport,
+    footprint_ids: HashSet<u64>,
+    track_ids: HashSet<u64>,
+    via_ids: HashSet<u64>,
+    footprints_before: Vec<(usize, BoardFootprint)>,
+    footprints_after: Vec<(usize, BoardFootprint)>,
+    tracks_before: Vec<(usize, TrackSegment)>,
+    tracks_after: Vec<(usize, TrackSegment)>,
+    vias_before: Vec<(usize, Via)>,
+    vias_after: Vec<(usize, Via)>,
+    net_classes_before: Vec<NetClass>,
+    net_classes_after: Vec<NetClass>,
+}
+
+impl EcoPatch {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.report.is_empty()
+            && self.footprints_before == self.footprints_after
+            && self.tracks_before == self.tracks_after
+            && self.vias_before == self.vias_after
+            && self.net_classes_before == self.net_classes_after
+    }
+
+    pub(crate) fn rollback(&self, board: &mut Board) {
+        restore_entities(
+            &mut board.footprints,
+            &self.footprint_ids,
+            &self.footprints_before,
+            |value| value.id,
+        );
+        restore_entities(
+            &mut board.tracks,
+            &self.track_ids,
+            &self.tracks_before,
+            |value| value.id,
+        );
+        restore_entities(&mut board.vias, &self.via_ids, &self.vias_before, |value| {
+            value.id
+        });
+        board.net_classes.clone_from(&self.net_classes_before);
+        board.rebuild_entity_index();
+    }
+
+    pub(crate) fn reapply(&self, board: &mut Board) {
+        restore_entities(
+            &mut board.footprints,
+            &self.footprint_ids,
+            &self.footprints_after,
+            |value| value.id,
+        );
+        restore_entities(
+            &mut board.tracks,
+            &self.track_ids,
+            &self.tracks_after,
+            |value| value.id,
+        );
+        restore_entities(&mut board.vias, &self.via_ids, &self.vias_after, |value| {
+            value.id
+        });
+        board.net_classes.clone_from(&self.net_classes_after);
+        board.rebuild_entity_index();
+    }
 }
 
 impl EcoReport {
@@ -175,7 +270,281 @@ impl Board {
             footprint_library: vec![Footprint::resistor_axial()],
             design_rules: DesignRules::default(),
             net_classes: vec![NetClass::default()],
+            entity_index: BoardEntityIndex::default(),
+            spatial_index: PcbSpatialIndex::default(),
         }
+    }
+
+    pub(crate) fn rebuild_entity_index(&mut self) {
+        self.entity_index.footprints = self
+            .footprints
+            .iter()
+            .enumerate()
+            .map(|(index, footprint)| (footprint.id, index))
+            .collect();
+        self.entity_index.tracks = self
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| (track.id, index))
+            .collect();
+        self.entity_index.vias = self
+            .vias
+            .iter()
+            .enumerate()
+            .map(|(index, via)| (via.id, index))
+            .collect();
+        self.spatial_index = PcbSpatialIndex::build(
+            &self.footprints,
+            &self.tracks,
+            &self.vias,
+            &self.outline,
+            &self.footprint_library,
+        );
+    }
+
+    fn ensure_entity_index(&mut self) {
+        if self.entity_index.footprints.len() != self.footprints.len()
+            || self.entity_index.tracks.len() != self.tracks.len()
+            || self.entity_index.vias.len() != self.vias.len()
+        {
+            self.rebuild_entity_index();
+        }
+    }
+
+    pub(crate) fn footprint_mut(&mut self, id: u64) -> Option<&mut BoardFootprint> {
+        self.ensure_entity_index();
+        let index = *self.entity_index.footprints.get(&id)?;
+        self.footprints.get_mut(index)
+    }
+
+    pub(crate) fn footprint(&self, id: u64) -> Option<&BoardFootprint> {
+        self.entity_index
+            .footprints
+            .get(&id)
+            .and_then(|index| self.footprints.get(*index))
+            .or_else(|| self.footprints.iter().find(|footprint| footprint.id == id))
+    }
+
+    pub(crate) fn track_mut(&mut self, id: u64) -> Option<&mut TrackSegment> {
+        self.ensure_entity_index();
+        let index = *self.entity_index.tracks.get(&id)?;
+        self.tracks.get_mut(index)
+    }
+
+    pub(crate) fn track(&self, id: u64) -> Option<&TrackSegment> {
+        self.entity_index
+            .tracks
+            .get(&id)
+            .and_then(|index| self.tracks.get(*index))
+            .or_else(|| self.tracks.iter().find(|track| track.id == id))
+    }
+
+    pub(crate) fn via(&self, id: u64) -> Option<&Via> {
+        self.entity_index
+            .vias
+            .get(&id)
+            .and_then(|index| self.vias.get(*index))
+            .or_else(|| self.vias.iter().find(|via| via.id == id))
+    }
+
+    pub(crate) fn via_mut(&mut self, id: u64) -> Option<&mut Via> {
+        self.ensure_entity_index();
+        let index = *self.entity_index.vias.get(&id)?;
+        self.vias.get_mut(index)
+    }
+
+    pub(crate) fn add_track(&mut self, track: TrackSegment) {
+        self.ensure_entity_index();
+        let index = self.tracks.len();
+        self.entity_index.tracks.insert(track.id, index);
+        self.spatial_index.add_track(&track);
+        self.tracks.push(track);
+    }
+
+    pub(crate) fn remove_track(&mut self, id: u64) -> Option<TrackSegment> {
+        self.ensure_entity_index();
+        let index = self.entity_index.tracks.remove(&id)?;
+        let removed = self.tracks.swap_remove(index);
+        if let Some(swapped) = self.tracks.get(index) {
+            self.entity_index.tracks.insert(swapped.id, index);
+        }
+        self.spatial_index.remove_track(id);
+        Some(removed)
+    }
+
+    pub(crate) fn add_via(&mut self, via: Via) {
+        self.ensure_entity_index();
+        let index = self.vias.len();
+        self.entity_index.vias.insert(via.id, index);
+        self.spatial_index.add_via(&via);
+        self.vias.push(via);
+    }
+
+    pub(crate) fn remove_via(&mut self, id: u64) -> Option<Via> {
+        self.ensure_entity_index();
+        let index = self.entity_index.vias.remove(&id)?;
+        let removed = self.vias.swap_remove(index);
+        if let Some(swapped) = self.vias.get(index) {
+            self.entity_index.vias.insert(swapped.id, index);
+        }
+        self.spatial_index.remove_via(id);
+        Some(removed)
+    }
+
+    pub(crate) fn move_footprint(&mut self, id: u64, position: Point2) -> bool {
+        self.ensure_entity_index();
+        let Some(index) = self.entity_index.footprints.get(&id).copied() else {
+            return false;
+        };
+        self.footprints[index].position = position;
+        self.footprints[index].placed = true;
+        let footprint = self.footprints[index].clone();
+        self.spatial_index
+            .update_footprint(&footprint, &self.footprint_library);
+        true
+    }
+
+    pub(crate) fn rotate_footprint(&mut self, id: u64, delta_deg: f32) -> bool {
+        self.ensure_entity_index();
+        let Some(index) = self.entity_index.footprints.get(&id).copied() else {
+            return false;
+        };
+        self.footprints[index].rotation_deg =
+            (self.footprints[index].rotation_deg + delta_deg).rem_euclid(360.0);
+        let footprint = self.footprints[index].clone();
+        self.spatial_index
+            .update_footprint(&footprint, &self.footprint_library);
+        true
+    }
+
+    pub(crate) fn flip_footprint(&mut self, id: u64) -> bool {
+        self.ensure_entity_index();
+        let Some(index) = self.entity_index.footprints.get(&id).copied() else {
+            return false;
+        };
+        self.footprints[index].flipped = !self.footprints[index].flipped;
+        let footprint = self.footprints[index].clone();
+        self.spatial_index
+            .update_footprint(&footprint, &self.footprint_library);
+        true
+    }
+
+    pub(crate) fn edit_track(&mut self, updated: TrackSegment) -> bool {
+        self.ensure_entity_index();
+        let Some(index) = self.entity_index.tracks.get(&updated.id).copied() else {
+            return false;
+        };
+        self.tracks[index] = updated;
+        self.spatial_index.update_track(&self.tracks[index]);
+        true
+    }
+
+    pub(crate) fn edit_via(&mut self, updated: Via) -> bool {
+        self.ensure_entity_index();
+        let Some(index) = self.entity_index.vias.get(&updated.id).copied() else {
+            return false;
+        };
+        self.vias[index] = updated;
+        self.spatial_index.update_via(&self.vias[index]);
+        true
+    }
+
+    pub(crate) fn entity_index_is_consistent(&self) -> bool {
+        self.entity_index.footprints.len() == self.footprints.len()
+            && self.entity_index.tracks.len() == self.tracks.len()
+            && self.entity_index.vias.len() == self.vias.len()
+            && self
+                .footprints
+                .iter()
+                .enumerate()
+                .all(|(index, footprint)| {
+                    self.entity_index.footprints.get(&footprint.id) == Some(&index)
+                })
+            && self
+                .tracks
+                .iter()
+                .enumerate()
+                .all(|(index, track)| self.entity_index.tracks.get(&track.id) == Some(&index))
+            && self
+                .vias
+                .iter()
+                .enumerate()
+                .all(|(index, via)| self.entity_index.vias.get(&via.id) == Some(&index))
+    }
+
+    pub(crate) fn footprint_candidates(&self, point: Point2) -> Vec<u64> {
+        self.spatial_index.footprint_candidates(point)
+    }
+
+    pub(crate) fn footprints_in_rect(&self, min: Point2, max: Point2) -> Vec<u64> {
+        self.spatial_index.footprints_in_rect(min, max)
+    }
+
+    pub(crate) fn track_candidates(&self, point: Point2) -> Vec<u64> {
+        self.spatial_index.track_candidates(point)
+    }
+
+    pub(crate) fn track_candidates_in_bounds(&self, min: Point2, max: Point2) -> Vec<u64> {
+        if self.entity_index_is_consistent() {
+            self.spatial_index.track_candidates_in_bounds(min, max)
+        } else {
+            // Compatibility for construction/import code that fills public
+            // vectors before calling `rebuild_entity_index`.
+            self.tracks.iter().map(|track| track.id).collect()
+        }
+    }
+
+    pub(crate) fn track_candidate_pairs(&self) -> Vec<(u64, u64)> {
+        if self.entity_index_is_consistent() {
+            self.spatial_index.track_candidate_pairs()
+        } else {
+            self.tracks
+                .iter()
+                .enumerate()
+                .flat_map(|(index, left)| {
+                    self.tracks[index + 1..]
+                        .iter()
+                        .map(move |right| (left.id, right.id))
+                })
+                .collect()
+        }
+    }
+
+    pub(crate) fn via_candidates(&self, point: Point2) -> Vec<u64> {
+        self.spatial_index.via_candidates(point)
+    }
+
+    pub(crate) fn via_candidates_in_bounds(&self, min: Point2, max: Point2) -> Vec<u64> {
+        self.spatial_index.via_candidates_in_bounds(min, max)
+    }
+
+    pub(crate) fn pad_candidates(&self, point: Point2) -> Vec<PadRef> {
+        self.spatial_index.pad_candidates(point)
+    }
+
+    pub(crate) fn pad_position(&self, pad: &PadRef) -> Option<Point2> {
+        let footprint = self.footprint(pad.footprint_id)?;
+        let definition = self
+            .footprint_library
+            .iter()
+            .find(|definition| definition.footprint_id == footprint.footprint_id)?;
+        let pad = definition
+            .pads
+            .iter()
+            .find(|item| item.number == pad.number)?;
+        Some(Point2::new(
+            footprint.position.x + pad.position.x,
+            footprint.position.y + pad.position.y,
+        ))
+    }
+
+    pub(crate) fn edge_candidates(&self, point: Point2) -> Vec<usize> {
+        self.spatial_index.edge_candidates(point)
+    }
+
+    pub(crate) fn edges_in_rect(&self, min: Point2, max: Point2) -> Vec<usize> {
+        self.spatial_index.edges_in_rect(min, max)
     }
 
     pub(crate) fn eco_report(&self, symbols: &[SymbolInstance], nets: &[CadNet]) -> EcoReport {
@@ -240,13 +609,50 @@ impl Board {
         }
     }
 
-    pub(crate) fn apply_eco(
+    pub(crate) fn apply_eco_patch(
         &mut self,
         symbols: &[SymbolInstance],
         nets: &[CadNet],
         removed_policy: RemovedFootprintPolicy,
-    ) -> EcoReport {
+    ) -> EcoPatch {
         let report = self.eco_report(symbols, nets);
+        let footprint_ids_before = self
+            .footprints
+            .iter()
+            .map(|footprint| footprint.id)
+            .collect::<HashSet<_>>();
+        let mut footprint_ids = report
+            .removed_footprints
+            .iter()
+            .chain(&report.changed_assignments)
+            .chain(&report.renamed_references)
+            .copied()
+            .collect::<HashSet<_>>();
+        let removed_nets = report.removed_nets.iter().copied().collect::<HashSet<_>>();
+        let track_ids = if removed_policy == RemovedFootprintPolicy::RemoveFootprintAndTracks {
+            self.tracks
+                .iter()
+                .filter(|track| removed_nets.contains(&track.net_id))
+                .map(|track| track.id)
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let via_ids = if removed_policy == RemovedFootprintPolicy::RemoveFootprintAndTracks {
+            self.vias
+                .iter()
+                .filter(|via| removed_nets.contains(&via.net_id))
+                .map(|via| via.id)
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let footprints_before =
+            capture_entities(&self.footprints, &footprint_ids, |value| value.id);
+        let tracks_before = capture_entities(&self.tracks, &track_ids, |value| value.id);
+        let vias_before = capture_entities(&self.vias, &via_ids, |value| value.id);
+        let net_classes_before = self.net_classes.clone();
+
         let removed_ids = report
             .removed_footprints
             .iter()
@@ -263,7 +669,6 @@ impl Board {
             }
         }
         if removed_policy == RemovedFootprintPolicy::RemoveFootprintAndTracks {
-            let removed_nets = report.removed_nets.iter().copied().collect::<HashSet<_>>();
             self.tracks
                 .retain(|track| !removed_nets.contains(&track.net_id));
             self.vias.retain(|via| !removed_nets.contains(&via.net_id));
@@ -330,7 +735,36 @@ impl Board {
                 });
             }
         }
-        report
+        self.rebuild_entity_index();
+        footprint_ids.extend(
+            self.footprints
+                .iter()
+                .filter(|footprint| !footprint_ids_before.contains(&footprint.id))
+                .map(|footprint| footprint.id),
+        );
+        EcoPatch {
+            report,
+            footprints_before,
+            footprints_after: capture_entities(&self.footprints, &footprint_ids, |value| value.id),
+            tracks_before,
+            tracks_after: capture_entities(&self.tracks, &track_ids, |value| value.id),
+            vias_before,
+            vias_after: capture_entities(&self.vias, &via_ids, |value| value.id),
+            net_classes_before,
+            net_classes_after: self.net_classes.clone(),
+            footprint_ids,
+            track_ids,
+            via_ids,
+        }
+    }
+
+    pub(crate) fn apply_eco(
+        &mut self,
+        symbols: &[SymbolInstance],
+        nets: &[CadNet],
+        removed_policy: RemovedFootprintPolicy,
+    ) -> EcoReport {
+        self.apply_eco_patch(symbols, nets, removed_policy).report
     }
 
     pub(crate) fn update_from_schematic(&mut self, symbols: &[SymbolInstance], nets: &[CadNet]) {
@@ -443,6 +877,33 @@ impl Board {
             }
         }
         islands
+    }
+}
+
+fn capture_entities<T: Clone>(
+    values: &[T],
+    ids: &HashSet<u64>,
+    id: impl Fn(&T) -> u64,
+) -> Vec<(usize, T)> {
+    values
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| ids.contains(&id(value)))
+        .map(|(index, value)| (index, value.clone()))
+        .collect()
+}
+
+fn restore_entities<T: Clone>(
+    values: &mut Vec<T>,
+    ids: &HashSet<u64>,
+    captured: &[(usize, T)],
+    id: impl Fn(&T) -> u64,
+) {
+    values.retain(|value| !ids.contains(&id(value)));
+    let mut captured = captured.to_vec();
+    captured.sort_by_key(|(index, _)| *index);
+    for (index, value) in captured {
+        values.insert(index.min(values.len()), value);
     }
 }
 
@@ -612,7 +1073,7 @@ mod tests {
         moved.reference = "R10".to_string();
         moved.position = Point2::new(80.0, 50.0);
         moved.rotation_deg = 90;
-        board.update_from_schematic(&[moved], &[]);
+        let patch = board.apply_eco_patch(&[moved], &[], RemovedFootprintPolicy::KeepAsOrphan);
 
         assert_eq!(board.footprints.len(), 2);
         let footprint = board
@@ -626,6 +1087,22 @@ mod tests {
         assert_eq!(footprint.rotation_deg, 180.0);
         assert!(board.footprints.iter().any(
             |footprint| footprint.reference == "LED1" && footprint.symbol_instance_id.is_none()
+        ));
+
+        patch.rollback(&mut board);
+        assert!(board.footprints.iter().any(
+            |footprint| footprint.reference == "R1" && footprint.symbol_instance_id == Some(1)
+        ));
+        assert!(
+            board
+                .footprints
+                .iter()
+                .any(|footprint| footprint.reference == "LED1"
+                    && footprint.symbol_instance_id == Some(2))
+        );
+        patch.reapply(&mut board);
+        assert!(board.footprints.iter().any(
+            |footprint| footprint.reference == "R10" && footprint.symbol_instance_id == Some(1)
         ));
     }
 
@@ -765,5 +1242,71 @@ mod tests {
             drill_mm: 0.3,
         });
         assert!(board.ratsnest_edges(&nets).is_empty());
+    }
+
+    #[test]
+    fn entity_indices_follow_swap_remove_and_updates() {
+        let mut board = Board::new_two_layer(50.0, 30.0);
+        for id in 1..=3 {
+            board.add_track(TrackSegment {
+                id,
+                net_id: id as usize,
+                layer: BoardLayer::FrontCopper,
+                start: Point2::new(id as f32, 1.0),
+                end: Point2::new(id as f32 + 1.0, 1.0),
+                width_mm: 0.25,
+            });
+            board.add_via(Via {
+                id: id + 10,
+                net_id: id as usize,
+                position: Point2::new(id as f32, 2.0),
+                diameter_mm: 0.6,
+                drill_mm: 0.3,
+            });
+        }
+        board.rebuild_entity_index();
+        assert!(board.entity_index_is_consistent());
+
+        assert_eq!(board.remove_track(2).map(|track| track.id), Some(2));
+        assert_eq!(board.remove_via(11).map(|via| via.id), Some(11));
+        assert!(board.track_mut(3).is_some());
+        assert!(board.entity_index_is_consistent());
+
+        let json = serde_json::to_string(&board).expect("serialize board");
+        let mut restored: Board = serde_json::from_str(&json).expect("deserialize board");
+        assert!(!restored.entity_index_is_consistent());
+        restored.rebuild_entity_index();
+        assert!(restored.entity_index_is_consistent());
+    }
+
+    #[test]
+    fn spatial_index_updates_incrementally_with_board_entities() {
+        let mut board = Board::new_two_layer(80.0, 50.0);
+        board.add_track(TrackSegment {
+            id: 41,
+            net_id: 1,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(8.0, 8.0),
+            end: Point2::new(16.0, 8.0),
+            width_mm: 0.25,
+        });
+        assert!(board.track_candidates(Point2::new(12.0, 8.0)).contains(&41));
+        board.edit_track(TrackSegment {
+            id: 41,
+            net_id: 1,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(48.0, 40.0),
+            end: Point2::new(56.0, 40.0),
+            width_mm: 0.25,
+        });
+        assert!(!board.track_candidates(Point2::new(12.0, 8.0)).contains(&41));
+        assert!(
+            board
+                .track_candidates(Point2::new(52.0, 40.0))
+                .contains(&41)
+        );
+        assert_eq!(board.remove_track(41).map(|track| track.id), Some(41));
+        assert!(board.track_candidates(Point2::new(52.0, 40.0)).is_empty());
+        assert!(board.entity_index_is_consistent());
     }
 }

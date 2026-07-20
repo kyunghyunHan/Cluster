@@ -9,10 +9,12 @@ pub(crate) enum ComponentCommand {
     Place {
         kind: ComponentKind,
         position: Pos2,
+        value: String,
     },
     PlaceCustom {
         part_id: String,
         position: Pos2,
+        value: String,
     },
     Paste {
         components: Vec<Component>,
@@ -28,13 +30,21 @@ pub(crate) enum ComponentCommand {
 impl ComponentCommand {
     pub(crate) fn apply(self, context: &mut CommandContext<'_>) -> CommandOutcome {
         match self {
-            Self::Place { kind, position } => {
-                context.place_component(kind, position);
+            Self::Place {
+                kind,
+                position,
+                value,
+            } => {
+                context.place_component(kind, position, value, None);
                 return CommandOutcome::new(ChangeSet::schematic())
                     .with_status("Component placed. Drag to reposition, R to rotate.");
             }
-            Self::PlaceCustom { part_id, position } => {
-                context.place_custom_component(&part_id, position);
+            Self::PlaceCustom {
+                part_id,
+                position,
+                value,
+            } => {
+                context.place_component(ComponentKind::Custom, position, value, Some(part_id));
                 return CommandOutcome::new(ChangeSet::schematic())
                     .with_status("Custom part placed. Drag to reposition, R to rotate.");
             }
@@ -53,7 +63,7 @@ impl ComponentCommand {
                     } else {
                         context.next_label(source.kind)
                     };
-                    context.components_mut().push(Component {
+                    context.insert_component(Component {
                         id: new_id,
                         kind: source.kind,
                         pos: source.pos + offset,
@@ -72,7 +82,7 @@ impl ComponentCommand {
                         .into_iter()
                         .map(|point| point + offset)
                         .collect();
-                    context.wires_mut().push(Wire::new(new_wire_id, points));
+                    context.insert_wire(Wire::new(new_wire_id, points));
                 }
                 context.set_multi_selected(new_ids.iter().copied().collect());
                 context.set_selected(None);
@@ -89,36 +99,8 @@ impl ComponentCommand {
                 if delta.length_sq() <= 0.01 {
                     return CommandOutcome::unchanged();
                 }
-                let old_pins = context
-                    .components()
-                    .iter()
-                    .filter(|component| component_ids.contains(&component.id))
-                    .flat_map(crate::component_pins)
-                    .collect::<Vec<_>>();
-                for component in context.components_mut() {
-                    if component_ids.contains(&component.id) {
-                        component.pos += delta;
-                    }
-                }
-                let new_pins = context
-                    .components()
-                    .iter()
-                    .filter(|component| component_ids.contains(&component.id))
-                    .flat_map(crate::component_pins)
-                    .collect::<Vec<_>>();
-                crate::move_attached_wire_endpoints(context.wires_mut(), &old_pins, &new_pins);
-                for wire in context.wires_mut() {
-                    if wire.points.len() > 2 {
-                        let first = wire.points[0];
-                        let Some(&last) = wire.points.last() else {
-                            continue;
-                        };
-                        if old_pins.iter().any(|pin| first.distance(*pin) <= 20.0)
-                            || old_pins.iter().any(|pin| last.distance(*pin) <= 20.0)
-                        {
-                            crate::tidy_wire_points(wire);
-                        }
-                    }
+                if !context.move_components(&component_ids, delta) {
+                    return CommandOutcome::unchanged();
                 }
             }
         }

@@ -230,6 +230,14 @@ impl SchematicFixture {
             .sum()
     }
 
+    /// Deterministic CPU-side work representative of a cached schematic
+    /// frame: viewport culling, hit testing and visible flow phase updates.
+    pub fn frame_checksum(&self) -> usize {
+        self.viewport_query_checksum()
+            + self.hit_test_checksum() as usize
+            + self.flow_animation_checksum(0.016) as usize
+    }
+
     pub fn serialization_len(&self) -> usize {
         let mut app = crate::CircuitApp::new();
         app.document.components.clone_from(&self.components);
@@ -315,6 +323,7 @@ impl PcbFixture {
                 drill_mm: 0.3,
             })
             .collect();
+        board.rebuild_entity_index();
         let nets = (0..32)
             .map(|net_id| CadNet {
                 net_id,
@@ -359,8 +368,9 @@ impl PcbFixture {
     pub fn hit_test_checksum(&self) -> usize {
         let point = Point2::new(-1_000.0, -1_000.0);
         self.board
-            .footprints
-            .iter()
+            .footprint_candidates(point)
+            .into_iter()
+            .filter_map(|id| self.board.footprint(id))
             .filter(|footprint| {
                 (footprint.position.x - point.x).abs() <= 5.0
                     && (footprint.position.y - point.y).abs() <= 5.0
@@ -368,8 +378,9 @@ impl PcbFixture {
             .count()
             + self
                 .board
-                .tracks
-                .iter()
+                .track_candidates(point)
+                .into_iter()
+                .filter_map(|id| self.board.track(id))
                 .filter(|track| point_segment_distance(point, track.start, track.end) <= 0.5)
                 .count()
     }
@@ -379,10 +390,14 @@ impl PcbFixture {
     }
 
     pub fn local_drc_checksum(&self) -> usize {
-        let mut local = self.board.clone();
-        local.tracks.truncate(128.min(local.tracks.len()));
-        local.vias.truncate(32.min(local.vias.len()));
-        crate::pcb::drc::run_drc(&local).len()
+        let affected = self
+            .board
+            .tracks
+            .iter()
+            .take(128)
+            .map(|track| track.id)
+            .collect();
+        crate::pcb::drc::run_local_drc(&self.board, &affected).len()
     }
 
     pub fn full_drc_checksum(&self) -> usize {
@@ -429,6 +444,16 @@ impl HistoryFixture {
 
     pub fn delta_checksum(&self) -> usize {
         DocumentDelta::between(&self.before, &self.after).memory_cost()
+    }
+
+    pub fn undo_redo_checksum(&self) -> usize {
+        let mut app = crate::CircuitApp::new();
+        app.restore_snapshot(self.before.clone());
+        let delta = DocumentDelta::between(&self.before, &self.after);
+        app.push_history_delta(delta, "Benchmark edit", None);
+        app.undo();
+        app.redo();
+        app.document.components.len() + app.document.wires.len()
     }
 }
 

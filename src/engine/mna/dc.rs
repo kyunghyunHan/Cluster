@@ -90,10 +90,36 @@ pub fn solve_dc_detailed_with_connectivity(
     wires: &[Wire],
     connectivity: &CanonicalConnectivity,
 ) -> Result<DcResult, SimulationError> {
+    solve_dc_detailed_with_connectivity_and_cancellation(components, wires, connectivity, None)
+}
+
+pub(crate) fn solve_dc_detailed_with_cancellation(
+    components: &[Component],
+    wires: &[Wire],
+    cancellation: &crate::engine::ngspice::CancellationToken,
+) -> Result<DcResult, SimulationError> {
+    let connectivity = crate::engine::netlist::build_canonical_connectivity(components, wires);
+    solve_dc_detailed_with_connectivity_and_cancellation(
+        components,
+        wires,
+        &connectivity,
+        Some(cancellation),
+    )
+}
+
+pub(crate) fn solve_dc_detailed_with_connectivity_and_cancellation(
+    components: &[Component],
+    wires: &[Wire],
+    connectivity: &CanonicalConnectivity,
+    cancellation: Option<&crate::engine::ngspice::CancellationToken>,
+) -> Result<DcResult, SimulationError> {
     // ── 1. Build net map ──────────────────────────────────────────────────
     let mut nm = NetMap::from_connectivity(components, wires, connectivity);
 
     for comp in components {
+        if cancellation.is_some_and(|token| token.is_cancelled()) {
+            return Err(SimulationError::Cancelled);
+        }
         let pins = component_pin_defs(comp);
         let shorted = match comp.kind {
             ComponentKind::Inductor => true,
@@ -679,7 +705,7 @@ pub fn solve_dc_detailed_with_connectivity(
         for i_src in &is_src {
             mat.stamp_is(i_src.pos, i_src.neg, i_src.i);
         }
-        mat.solve()
+        mat.solve_with_cancellation(cancellation)
     };
 
     let mut diode_states = vec![false; diode_entries.len()];
@@ -691,6 +717,9 @@ pub fn solve_dc_detailed_with_connectivity(
 
     if has_iterated_nonlinear_devices {
         for iteration in 1..=24 {
+            if cancellation.is_some_and(|token| token.is_cancelled()) {
+                return Err(SimulationError::Cancelled);
+            }
             let previous_x = solution.x.clone();
             let voltage = |mna_idx: usize| -> f64 {
                 if mna_idx == 0 {

@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::engine::transient::{TransientKind, TransientResult, TransientSample};
 use crate::model::{CircuitNetlist, Component, ComponentKind, Wire};
 
 // ─── Result types ─────────────────────────────────────────────────────────────
@@ -399,6 +400,20 @@ pub(crate) fn run_ngspice_configured(
     config: &NgspiceConfig,
     cancellation: &CancellationToken,
 ) -> Result<NgspiceResult, NgspiceError> {
+    let (combined, stderr) =
+        run_ngspice_raw_configured(netlist_text, document_revision, config, cancellation)?;
+    let mut result = parse_operating_point(&combined).ok_or(NgspiceError::NoResults)?;
+    result.stderr = stderr;
+    result.document_revision = document_revision;
+    Ok(result)
+}
+
+fn run_ngspice_raw_configured(
+    netlist_text: &str,
+    _document_revision: u64,
+    config: &NgspiceConfig,
+    cancellation: &CancellationToken,
+) -> Result<(String, String), NgspiceError> {
     if cancellation.is_cancelled() {
         return Err(NgspiceError::Cancelled);
     }
@@ -461,11 +476,82 @@ pub(crate) fn run_ngspice_configured(
     }
 
     let combined = format!("{stdout}\n{out_text}");
-    let mut result = parse_operating_point(&combined).ok_or(NgspiceError::NoResults)?;
-    result.stderr = stderr;
-    result.document_revision = document_revision;
     drop(cleanup);
-    Ok(result)
+    Ok((combined, stderr))
+}
+
+pub(crate) fn export_ngspice_transient_netlist(
+    components: &[Component],
+    wires: &[Wire],
+    netlist: &CircuitNetlist,
+    duration_s: f64,
+    maximum_samples: usize,
+) -> (String, Vec<NgspiceUnsupported>) {
+    let (operating_point, unsupported) = export_ngspice_netlist(components, wires, netlist);
+    let target = netlist
+        .pins
+        .iter()
+        .find(|pin| {
+            components.iter().any(|component| {
+                component.id == pin.component_id && component.kind == ComponentKind::Capacitor
+            })
+        })
+        .and_then(|pin| netlist.nets.iter().find(|net| net.id == pin.net_id))
+        .map(|net| {
+            if net.name.eq_ignore_ascii_case("GND") {
+                "0".to_string()
+            } else {
+                spice_node_name(&net.name)
+            }
+        })
+        .unwrap_or_else(|| "0".to_string());
+    let duration_s = duration_s.clamp(1.0e-6, 1.0e3);
+    let samples = maximum_samples.clamp(2, 100_000);
+    let step = duration_s / (samples - 1) as f64;
+    let mut transient = operating_point.replace("\n.op\n.end\n", "\n");
+    transient.push_str(&format!(
+        ".tran {step:.9e} {duration_s:.9e}\n.print tran time v({target})\n.end\n"
+    ));
+    (transient, unsupported)
+}
+
+pub(crate) fn run_ngspice_transient_configured(
+    netlist_text: &str,
+    document_revision: u64,
+    config: &NgspiceConfig,
+    cancellation: &CancellationToken,
+) -> Result<TransientResult, NgspiceError> {
+    let (output, _stderr) =
+        run_ngspice_raw_configured(netlist_text, document_revision, config, cancellation)?;
+    parse_transient_output(&output).ok_or(NgspiceError::NoResults)
+}
+
+pub(crate) fn parse_transient_output(output: &str) -> Option<TransientResult> {
+    let mut samples = Vec::new();
+    for line in output.lines() {
+        let values = line
+            .split_whitespace()
+            .filter_map(|value| value.parse::<f64>().ok())
+            .collect::<Vec<_>>();
+        let (time, voltage) = match values.as_slice() {
+            [time, voltage] => (*time, *voltage),
+            [_index, time, voltage, ..] => (*time, *voltage),
+            _ => continue,
+        };
+        if time.is_finite() && voltage.is_finite() && time >= 0.0 {
+            samples.push(TransientSample {
+                t_s: time,
+                v_cap: voltage,
+                source_v: voltage,
+            });
+        }
+    }
+    (samples.len() >= 2).then(|| TransientResult {
+        kind: TransientKind::RcStep,
+        summary: format!("ngspice transient: {} samples", samples.len()),
+        samples,
+        limitations: vec!["Imported from the selected ngspice node.".to_string()],
+    })
 }
 
 struct WorkDirGuard(PathBuf);
@@ -683,5 +769,15 @@ mod tests {
             run_ngspice_configured(".end", 42, &config, &cancellation),
             Err(NgspiceError::Cancelled)
         ));
+    }
+
+    #[test]
+    fn transient_table_imports_time_and_voltage_samples() {
+        let result = parse_transient_output(
+            "Index   time          v(out)\n0 0.000000e+00 0.0\n1 1.000000e-03 3.2\n2 2.000000e-03 4.4\n",
+        )
+        .expect("transient result");
+        assert_eq!(result.samples.len(), 3);
+        assert!((result.samples[2].v_cap - 4.4).abs() < 1.0e-9);
     }
 }

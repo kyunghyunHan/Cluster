@@ -218,7 +218,19 @@ pub(crate) fn render_pcb_workspace(
             let local = point - rect.min - pan;
             Point2::new(local.x / zoom, local.y / zoom)
         };
-        draw_board(&painter, rect, board, nets, state, map);
+        draw_board(
+            &painter,
+            rect,
+            board,
+            nets,
+            state,
+            Point2::new((-state.pan.x) / state.zoom, (-state.pan.y) / state.zoom),
+            Point2::new(
+                (rect.width() - state.pan.x) / state.zoom,
+                (rect.height() - state.pan.y) / state.zoom,
+            ),
+            map,
+        );
 
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             state.routing = RoutingState::Idle;
@@ -274,12 +286,15 @@ fn handle_view(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Rendering inputs are explicit and borrowed for one frame.
 fn draw_board(
     painter: &egui::Painter,
     rect: Rect,
     board: &Board,
     nets: &[CadNet],
     state: &PcbWorkspaceState,
+    viewport_min: Point2,
+    viewport_max: Point2,
     map: impl Fn(Point2) -> Pos2 + Copy,
 ) {
     let grid = (board.grid.grid_mm * state.zoom).max(4.0);
@@ -300,14 +315,20 @@ fn draw_board(
         y += grid;
     }
     if state.show_edges {
-        for segment in board.outline.points.windows(2) {
-            painter.line_segment(
-                [map(segment[0]), map(segment[1])],
-                Stroke::new(2.0_f32, Color32::from_rgb(210, 210, 190)),
-            );
+        for edge in board.edges_in_rect(viewport_min, viewport_max) {
+            if let Some(segment) = board.outline.points.get(edge..=edge + 1) {
+                painter.line_segment(
+                    [map(segment[0]), map(segment[1])],
+                    Stroke::new(2.0_f32, Color32::from_rgb(210, 210, 190)),
+                );
+            }
         }
     }
-    for track in &board.tracks {
+    for track in board
+        .track_candidates_in_bounds(viewport_min, viewport_max)
+        .into_iter()
+        .filter_map(|id| board.track(id))
+    {
         let visible = match track.layer {
             BoardLayer::FrontCopper => state.show_front_copper,
             BoardLayer::BackCopper => state.show_back_copper,
@@ -329,7 +350,11 @@ fn draw_board(
             ),
         );
     }
-    for via in &board.vias {
+    for via in board
+        .via_candidates_in_bounds(viewport_min, viewport_max)
+        .into_iter()
+        .filter_map(|id| board.via(id))
+    {
         painter.circle_filled(
             map(via.position),
             (via.diameter_mm * state.zoom * 0.5).max(3.0),
@@ -342,14 +367,8 @@ fn draw_board(
         );
     }
     for edge in board.ratsnest_edges(nets) {
-        let from = board
-            .footprints
-            .iter()
-            .find(|footprint| footprint.id == edge.from_footprint_id);
-        let to = board
-            .footprints
-            .iter()
-            .find(|footprint| footprint.id == edge.to_footprint_id);
+        let from = board.footprint(edge.from_footprint_id);
+        let to = board.footprint(edge.to_footprint_id);
         if let Some((from, to)) = from.zip(to) {
             painter.line_segment(
                 [map(from.position), map(to.position)],
@@ -357,7 +376,11 @@ fn draw_board(
             );
         }
     }
-    for footprint in &board.footprints {
+    for footprint in board
+        .footprints_in_rect(viewport_min, viewport_max)
+        .into_iter()
+        .filter_map(|id| board.footprint(id))
+    {
         let center = map(footprint.position);
         let bounds = Rect::from_center_size(center, Vec2::new(9.0, 6.0) * state.zoom.min(3.0));
         let selected = state.selected_footprints.contains(&footprint.id);
@@ -424,7 +447,11 @@ fn update_interaction(
     state: &mut PcbWorkspaceState,
     commands: &mut Vec<PcbCommand>,
 ) {
-    let world = snap_point(pointer.world, board.grid.grid_mm);
+    let world = if matches!(state.tool, PcbTool::Route | PcbTool::Via) {
+        snap_routing_point(pointer.world, board)
+    } else {
+        snap_point(pointer.world, board.grid.grid_mm)
+    };
     if let RoutingState::Routing { cursor, .. } = &mut state.routing {
         *cursor = world;
     }
@@ -496,8 +523,9 @@ fn update_interaction(
                 let min_y = start.y.min(world.y);
                 let max_y = start.y.max(world.y);
                 state.selected_footprints = board
-                    .footprints
+                    .footprints_in_rect(Point2::new(min_x, min_y), Point2::new(max_x, max_y))
                     .iter()
+                    .filter_map(|id| board.footprint(*id))
                     .filter(|footprint| {
                         footprint.position.x >= min_x
                             && footprint.position.x <= max_x
@@ -570,9 +598,7 @@ fn route_click(
             net,
         } => {
             let start = board
-                .footprints
-                .iter()
-                .find(|footprint| footprint.id == *source_footprint)
+                .footprint(*source_footprint)
                 .map_or(world, |footprint| footprint.position);
             state.routing = RoutingState::Routing {
                 net: *net,
@@ -627,9 +653,10 @@ fn route_click(
 
 fn hit_footprint(board: &Board, point: Point2) -> Option<u64> {
     board
-        .footprints
+        .footprint_candidates(point)
         .iter()
         .rev()
+        .filter_map(|id| board.footprint(*id))
         .find(|footprint| {
             (footprint.position.x - point.x).abs() <= 5.0
                 && (footprint.position.y - point.y).abs() <= 3.5
@@ -639,9 +666,10 @@ fn hit_footprint(board: &Board, point: Point2) -> Option<u64> {
 
 fn hit_via(board: &Board, point: Point2) -> Option<u64> {
     board
-        .vias
+        .via_candidates(point)
         .iter()
         .rev()
+        .filter_map(|id| board.via(*id))
         .find(|via| {
             (via.position.x - point.x).powi(2) + (via.position.y - point.y).powi(2)
                 <= (via.diameter_mm * 0.75).powi(2)
@@ -651,9 +679,10 @@ fn hit_via(board: &Board, point: Point2) -> Option<u64> {
 
 fn hit_track(board: &Board, point: Point2) -> Option<u64> {
     board
-        .tracks
+        .track_candidates(point)
         .iter()
         .rev()
+        .filter_map(|id| board.track(*id))
         .find(|track| {
             point_segment_distance(point, track.start, track.end) <= track.width_mm * 0.5 + 0.3
         })
@@ -674,11 +703,7 @@ fn point_segment_distance(point: Point2, start: Point2, end: Point2) -> f32 {
 }
 
 fn footprint_net(board: &Board, nets: &[CadNet], footprint_id: u64) -> Option<usize> {
-    let symbol_id = board
-        .footprints
-        .iter()
-        .find(|footprint| footprint.id == footprint_id)?
-        .symbol_instance_id?;
+    let symbol_id = board.footprint(footprint_id)?.symbol_instance_id?;
     nets.iter()
         .find(|net| {
             net.connected_pins
@@ -697,6 +722,22 @@ fn snap_point(point: Point2, grid: f32) -> Point2 {
             (point.y / grid).round() * grid,
         )
     }
+}
+
+fn snap_routing_point(point: Point2, board: &Board) -> Point2 {
+    board
+        .pad_candidates(point)
+        .into_iter()
+        .filter_map(|pad| board.pad_position(&pad))
+        .filter(|position| {
+            (position.x - point.x).powi(2) + (position.y - point.y).powi(2) <= 2.0_f32.powi(2)
+        })
+        .min_by(|left, right| {
+            let left_distance = (left.x - point.x).powi(2) + (left.y - point.y).powi(2);
+            let right_distance = (right.x - point.x).powi(2) + (right.y - point.y).powi(2);
+            left_distance.total_cmp(&right_distance)
+        })
+        .unwrap_or_else(|| snap_point(point, board.grid.grid_mm))
 }
 
 fn route_segments(start: Point2, end: Point2, mode: CornerMode) -> Vec<(Point2, Point2)> {

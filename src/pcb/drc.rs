@@ -115,8 +115,8 @@ pub(crate) fn run_drc(board: &Board) -> Vec<DrcViolation> {
         });
     }
 
-    for (i, a) in board.tracks.iter().enumerate() {
-        for b in board.tracks.iter().skip(i + 1) {
+    for (left_id, right_id) in board.track_candidate_pairs() {
+        if let Some((a, b)) = board.track(left_id).zip(board.track(right_id)) {
             if a.layer != b.layer || a.net_id == b.net_id {
                 continue;
             }
@@ -208,6 +208,85 @@ pub(crate) fn run_drc(board: &Board) -> Vec<DrcViolation> {
         }
     }
 
+    violations
+}
+
+pub(crate) fn run_local_drc(
+    board: &Board,
+    affected_track_ids: &std::collections::HashSet<u64>,
+) -> Vec<DrcViolation> {
+    let mut violations = Vec::new();
+    let rules = &board.design_rules;
+    let max_track_width = board
+        .tracks
+        .iter()
+        .map(|track| track.width_mm)
+        .fold(0.0_f32, f32::max);
+    let mut checked_pairs = std::collections::HashSet::new();
+    for id in affected_track_ids {
+        let Some(track) = board.track(*id) else {
+            continue;
+        };
+        if track.width_mm < rules.min_track_width_mm {
+            violations.push(DrcViolation {
+                severity: DrcSeverity::Error,
+                title: "Track too narrow".to_string(),
+                message: format!(
+                    "Track {} is {:.2} mm, below minimum {:.2} mm.",
+                    track.id, track.width_mm, rules.min_track_width_mm
+                ),
+                location: Some(midpoint(track.start, track.end)),
+                object_id: Some(track.id),
+            });
+        }
+        let margin = rules.default_clearance_mm + (track.width_mm + max_track_width) * 0.5;
+        let min = Point2::new(
+            track.start.x.min(track.end.x) - margin,
+            track.start.y.min(track.end.y) - margin,
+        );
+        let max = Point2::new(
+            track.start.x.max(track.end.x) + margin,
+            track.start.y.max(track.end.y) + margin,
+        );
+        for candidate in board
+            .track_candidates_in_bounds(min, max)
+            .into_iter()
+            .filter_map(|candidate| board.track(candidate))
+        {
+            if candidate.id == track.id
+                || candidate.layer != track.layer
+                || candidate.net_id == track.net_id
+            {
+                continue;
+            }
+            let pair = if track.id < candidate.id {
+                (track.id, candidate.id)
+            } else {
+                (candidate.id, track.id)
+            };
+            if !checked_pairs.insert(pair) {
+                continue;
+            }
+            let distance = segment_distance(track.start, track.end, candidate.start, candidate.end);
+            let required = rules.default_clearance_mm + (track.width_mm + candidate.width_mm) * 0.5;
+            if distance < required {
+                violations.push(DrcViolation {
+                    severity: DrcSeverity::Error,
+                    title: if distance <= f32::EPSILON {
+                        "Different-net copper short".to_string()
+                    } else {
+                        "Clearance violation".to_string()
+                    },
+                    message: format!(
+                        "Tracks {} and {} have {:.2} mm centerline spacing; {:.2} mm is required including copper width.",
+                        track.id, candidate.id, distance, required
+                    ),
+                    location: Some(midpoint(track.start, track.end)),
+                    object_id: Some(track.id),
+                });
+            }
+        }
+    }
     violations
 }
 

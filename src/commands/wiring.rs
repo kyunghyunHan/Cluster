@@ -35,24 +35,20 @@ impl WiringCommand {
                 let start = context.infer_wire_endpoint(points[0]);
                 let end = context.infer_wire_endpoint(*points.last().unwrap_or(&points[0]));
                 let id = context.next_id();
-                context
-                    .wires_mut()
-                    .push(Wire::with_endpoints(id, points, start, end));
+                context.insert_wire(Wire::with_endpoints(id, points, start, end));
                 return CommandOutcome::new(ChangeSet::schematic()).with_status("Wire placed.");
             }
             Self::MoveControlPoint {
                 wire_id,
                 point_index,
                 position,
-            } => crate::ui::app::move_wire_control_point(
-                context.wires_mut(),
-                wire_id,
-                point_index,
-                position,
-            ),
+            } => {
+                if !context.move_wire_control_point(wire_id, point_index, position) {
+                    return CommandOutcome::unchanged();
+                }
+            }
             Self::InsertControlPoint { position } => {
-                let Some((wire_id, point_index)) =
-                    crate::ui::app::insert_wire_control_point(position, context.wires_mut())
+                let Some((wire_id, point_index)) = context.insert_wire_control_point(position)
                 else {
                     return CommandOutcome::unchanged();
                 };
@@ -63,13 +59,7 @@ impl WiringCommand {
                 context.set_selected(Some(crate::app::Selection::Wire(wire_id)));
             }
             Self::Tidy { wire_id } => {
-                let mut count = 0;
-                for wire in context.wires_mut() {
-                    if wire_id.is_none_or(|id| id == wire.id) {
-                        crate::tidy_wire_points(wire);
-                        count += 1;
-                    }
-                }
+                let count = context.tidy_wires(wire_id);
                 let status = if wire_id.is_some() {
                     "Wire straightened.".to_string()
                 } else {

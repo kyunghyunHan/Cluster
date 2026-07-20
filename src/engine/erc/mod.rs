@@ -7,4 +7,4 @@ pub(crate) mod rules;
 
 pub(crate) use context::ErcContext;
 pub(crate) use registry::{ErcRegistry, ErcSettings};
-pub(crate) use rule::{ErcCheck, FunctionRule};
+pub(crate) use rule::{ErcCheck, ErcDependency, FunctionRule};

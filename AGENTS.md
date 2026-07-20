@@ -193,7 +193,7 @@ Notes:
 2. CAD/PCB 데이터 모델: 일부 완료 - SymbolInstance, Footprint, NetClass, Board, Track, Via, 기본 DRC, Gerber/Excellon scaffold, bottom dock Update PCB/footprint auto-place/PCB preview+DRC marker/board fit/ratsnest route helper/selectable DRC rows/project folder save-load/DRC-gated fabrication export 추가. 향후 기존 Component를 SymbolInstance로 점진 이전
 3. Schematic netlist 안정화: 일부 완료 - deterministic net name/id 생성, global GND merge, explicit junction/no-connect annotation의 페이지별 저장/복원, crossing/T-junction/pin-to-wire/multi-page label 회귀 테스트 추가. 향후 junction/no-connect UI 편집, local/global label scope 확장
 4. 초보자 ERC 강화: 일부 완료 - GPIO 전류 초과, LED 저항 누락, 모터/릴레이 직접 구동, 공통 GND, 입력 전용 GPIO, ADC 과전압, I2C/SPI/UART 배선 실수, ERC repair suggestion/Auto fix UI scaffold, I2C pull-up/relay flyback diode 자동 배선 repair, 배선 중 PinRole 기반 호환/의심 목적지 Smart Wiring 안내 추가. 향후 전압 범위 metadata를 이용한 더 정밀한 배선 안내와 안전한 자동 repair 확장
-5. PCB editor MVP: 일부 완료 - 전용 PCB workspace, 독립 pan/zoom/grid, footprint 다중/box 선택·drag·rotate·flip, F.Cu/B.Cu 표시, 45°/90° manual route, via, copper 삭제, undo/redo 추가. copper-connected island 기반 ratsnest와 배치 보존 ECO 적용. 향후 pad 단위 route target, interactive track endpoint 편집, board outline tool 강화
+5. PCB editor MVP: 완료 - 전용 PCB workspace, 독립 pan/zoom/grid, footprint 다중/box 선택·drag·rotate·flip, F.Cu/B.Cu 표시, 45°/90° manual route, via, copper/outline 편집, undo/redo, pad snap, spatial-index culling, copper-connected island ratsnest와 배치 보존 ECO 적용. interactive track endpoint 편집은 후속 고급 기능으로 관리
 6. DRC panel: 일부 완료 - track width/clearance/different-net short/via/annular ring/edge clearance/outside copper/open outline/outside footprint/duplicate reference/dangling track·via/unrouted ratsnest 검사, PCB dock DRC row 선택 및 preview marker 추가. 향후 pad-to-pad/hole-to-copper/silkscreen/mask violation과 workspace 직접 탐색 연결
 7. Export: 일부 완료 - SVG/SPICE/BOM/Arduino 유지, Gerber RS-274X/Excellon scaffold, BOM/CPL CSV helper, PCB DRC error가 있으면 fabrication export 차단, 선택적 ngspice batch 실행 경로 추가. 향후 UI export wizard와 ngspice 결과 plot 연결
 8. 실제 부품 라이브러리: ESP32 DevKit V1, Arduino Uno, Pico, STM32 Blue Pill/Nucleo, SSD1306 OLED, DHT11/DHT22, PIR, DS3231, Relay Module, L298N, SG90, buzzer 등 한국어/영어 검색 지원
@@ -201,7 +201,7 @@ Notes:
 10. 고급 시뮬레이션: internal beginner DC 유지 + 선택적 ngspice export/run/import
 
 현재 구조 안정화 상태:
-- 성능 기준선은 commit `97e851f`에서 deterministic Criterion fixture로 기록되었고, `benches/performance.rs`가 schematic/PCB/undo 핵심 경로를 재현한다. 현재 `DocumentRevisions`와 `Arc` 기반 connectivity/netlist/simulation cache가 적용되어 visual-only/PCB-only 변경이 schematic 분석 캐시를 무효화하지 않는다. 대규모 전체 spatial index 및 worker 전환은 아직 미완료이며 benchmark 전후 수치를 함께 기록해야 한다.
+- 성능 기준선과 구조 마무리 수치는 README Performance baseline에 기록한다. `benches/performance.rs`와 `examples/performance_probe.rs`가 schematic/PCB/undo/frame percentile/heap 핵심 경로를 재현한다. `DocumentRevisions`와 `Arc` cache, bounded revision-tagged analysis worker, PCB entity/spatial index, local DRC가 적용되어 visual-only/PCB-only 변경이 schematic 분석 cache를 무효화하지 않고 오래된 worker 결과를 폐기한다.
 - `ProjectDocument`/`EditorState`/`WorkspaceState`/`AnalysisState` 소유권 경계를 사용한다.
 - editor command는 제한된 `CommandContext`와 typed `ChangeSet`을 사용하며 중앙 dispatcher가 cache/dirty/autosave/repaint를 처리한다. undo/redo는 16 MiB 제한의 entity delta를 저장한다.
 - canonical connectivity의 endpoint/spatial-index/intersection/junction/geometry/label/union-find/diagnostics 단계가 분리되었고 입력 배열 순서와 무관한 exact net mapping을 테스트한다.

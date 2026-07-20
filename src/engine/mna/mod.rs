@@ -30,6 +30,9 @@ pub use ac::{AcResult, solve_ac, solve_ac_with_connectivity};
 use dc::solve_dc;
 #[allow(unused_imports)] // Compatibility entry point remains available to tests and callers.
 pub use dc::{DcResult, solve_dc_detailed, solve_dc_detailed_with_connectivity};
+pub(crate) use dc::{
+    solve_dc_detailed_with_cancellation, solve_dc_detailed_with_connectivity_and_cancellation,
+};
 pub use display::{
     format_current, format_power, format_si, format_voltage, parse_si_value, voltage_color,
 };

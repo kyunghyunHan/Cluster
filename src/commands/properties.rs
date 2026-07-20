@@ -24,43 +24,34 @@ impl PropertiesCommand {
                 component_id,
                 value,
             } => {
-                let Some(component) = context
-                    .components_mut()
-                    .iter_mut()
-                    .find(|component| component.id == component_id)
-                else {
+                if !context.update_component(component_id, |component| component.value = value) {
                     return CommandOutcome::unchanged();
-                };
-                component.value = value;
+                }
             }
             Self::ToggleSwitch { component_id } => {
-                let Some(component) = context
-                    .components_mut()
-                    .iter_mut()
-                    .find(|component| component.id == component_id)
-                else {
+                let mut status = None;
+                if !context.update_component(component_id, |component| {
+                    let was_open = component.value.to_ascii_lowercase().contains("open");
+                    component.value = if was_open { "closed" } else { "open" }.to_string();
+                    let state = if was_open { "▶ CLOSED" } else { "■ OPEN" };
+                    status = Some(format!("{} {state}", component.label));
+                }) {
                     return CommandOutcome::unchanged();
-                };
-                let was_open = component.value.to_ascii_lowercase().contains("open");
-                component.value = if was_open { "closed" } else { "open" }.to_string();
-                let state = if was_open { "▶ CLOSED" } else { "■ OPEN" };
-                let status = format!("{} {state}", component.label);
-                return CommandOutcome::new(ChangeSet::properties()).with_status(status);
+                }
+                return CommandOutcome::new(ChangeSet::properties())
+                    .with_status(status.unwrap_or_default());
             }
             Self::SetComponentProperties {
                 component_id,
                 label,
                 value,
             } => {
-                let Some(component) = context
-                    .components_mut()
-                    .iter_mut()
-                    .find(|component| component.id == component_id)
-                else {
+                if !context.update_component(component_id, |component| {
+                    component.label = label;
+                    component.value = value;
+                }) {
                     return CommandOutcome::unchanged();
-                };
-                component.label = label;
-                component.value = value;
+                }
             }
         }
         CommandOutcome::new(ChangeSet::properties())

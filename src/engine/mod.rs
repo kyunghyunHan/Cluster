@@ -8,5 +8,6 @@ pub(crate) mod simulation;
 pub(crate) mod transient;
 pub(crate) mod units;
 pub(crate) mod validation;
+pub(crate) mod worker;
 
 pub(crate) use units::parse_metric_value;

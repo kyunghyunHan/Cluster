@@ -362,6 +362,7 @@ impl crate::CircuitApp {
         self.execute_editor_command(EditorCommand::Component(ComponentCommand::Place {
             kind,
             position: pos,
+            value: Self::default_value(kind),
         }));
     }
 
@@ -384,6 +385,9 @@ impl crate::CircuitApp {
         self.execute_editor_command(EditorCommand::Component(ComponentCommand::PlaceCustom {
             part_id: part_id.to_string(),
             position: pos,
+            value: custom_part(part_id)
+                .map(|definition| definition.default_value)
+                .unwrap_or_default(),
         }));
     }
 
@@ -431,6 +435,7 @@ impl crate::CircuitApp {
         self.invalidate_analysis_cache();
     }
 
+    #[allow(dead_code)] // Direct fixture construction; UI placement uses the command path.
     pub(crate) fn place_custom_component(&mut self, part_id: &str, pos: Pos2) -> u64 {
         let def = custom_part(part_id);
         let label = self.next_custom_label(Some(part_id));
@@ -580,55 +585,6 @@ impl crate::CircuitApp {
         self.execute_editor_command(EditorCommand::Wiring(WiringCommand::Add { points }));
     }
 
-    pub(crate) fn infer_wire_endpoint(&self, point: Pos2) -> WireEndpoint {
-        for component in &self.components {
-            for pin in component_pin_defs(component) {
-                if point.distance(pin.pos) <= 1.0 {
-                    return WireEndpoint::Pin(PinRef {
-                        component_id: component.id,
-                        pin_name: pin.label.to_string(),
-                    });
-                }
-            }
-        }
-        WireEndpoint::FreePoint(point)
-    }
-
-    pub(crate) fn split_wire_at_point(&mut self, point: Pos2) {
-        let mut split_target: Option<(usize, usize)> = None;
-        'outer: for (wi, wire) in self.wires.iter().enumerate() {
-            for si in 0..wire.points.len().saturating_sub(1) {
-                let a = wire.points[si];
-                let b = wire.points[si + 1];
-                if distance_to_segment(point, a, b) < 2.5
-                    && point.distance(a) > 5.0
-                    && point.distance(b) > 5.0
-                {
-                    split_target = Some((wi, si));
-                    break 'outer;
-                }
-            }
-        }
-        if let Some((wi, si)) = split_target {
-            let old_start = self.wires[wi].start.clone();
-            let old_end = self.wires[wi].end.clone();
-            let mut first = self.wires[wi].points[..=si].to_vec();
-            first.push(point);
-            let mut second = vec![point];
-            second.extend_from_slice(&self.wires[wi].points[si + 1..]);
-            self.wires[wi].points = crate::simplify_wire(first);
-            self.wires[wi].start = old_start;
-            self.wires[wi].end = WireEndpoint::FreePoint(point);
-            let new_id = self.next_id();
-            self.wires.push(Wire {
-                id: new_id,
-                points: crate::simplify_wire(second),
-                start: WireEndpoint::FreePoint(point),
-                end: old_end,
-            });
-        }
-    }
-
     pub(crate) fn same_net_wires(&mut self, wire_id: u64) -> HashSet<u64> {
         let connectivity = self.current_connectivity();
         let Some(net_id) = connectivity.netlist.wire_nets.get(&wire_id).copied() else {
@@ -758,15 +714,25 @@ impl crate::CircuitApp {
         let step_y = 10.0;
         let usable_width = (board_width - start_x * 2.0).max(step_x);
         let per_row = (usable_width / step_x).floor().max(1.0) as usize;
-        for (index, footprint) in self.document.board.footprints.iter_mut().enumerate() {
-            let col = index % per_row;
-            let row = index / per_row;
-            footprint.position = crate::model::cad::Point2::new(
-                start_x + col as f32 * step_x,
-                start_y + row as f32 * step_y,
-            );
-            footprint.placed = true;
-        }
+        let moves = self
+            .document
+            .board
+            .footprints
+            .iter()
+            .enumerate()
+            .map(|(index, footprint)| {
+                let col = index % per_row;
+                let row = index / per_row;
+                (
+                    footprint.id,
+                    crate::model::cad::Point2::new(
+                        start_x + col as f32 * step_x,
+                        start_y + row as f32 * step_y,
+                    ),
+                )
+            })
+            .collect();
+        self.execute_editor_command(EditorCommand::Pcb(PcbCommand::MoveFootprints(moves)));
         self.refresh_pcb_analysis_from_current();
         self.status = format!(
             "Auto-placed {} PCB footprint(s).",
@@ -810,24 +776,55 @@ impl crate::CircuitApp {
         let margin = 6.0_f32;
         let shift_x = margin - min_x;
         let shift_y = margin - min_y;
-        for footprint in &mut self.document.board.footprints {
-            footprint.position.x += shift_x;
-            footprint.position.y += shift_y;
-        }
-        for track in &mut self.document.board.tracks {
-            track.start.x += shift_x;
-            track.start.y += shift_y;
-            track.end.x += shift_x;
-            track.end.y += shift_y;
-        }
-        for via in &mut self.document.board.vias {
-            via.position.x += shift_x;
-            via.position.y += shift_y;
-        }
-
         let width = (max_x - min_x + margin * 2.0).max(25.0);
         let height = (max_y - min_y + margin * 2.0).max(20.0);
-        self.document.board.outline = BoardOutline::rectangular(width, height);
+        let footprint_positions = self
+            .document
+            .board
+            .footprints
+            .iter()
+            .map(|footprint| {
+                (
+                    footprint.id,
+                    Point2::new(
+                        footprint.position.x + shift_x,
+                        footprint.position.y + shift_y,
+                    ),
+                )
+            })
+            .collect();
+        let tracks = self
+            .document
+            .board
+            .tracks
+            .iter()
+            .cloned()
+            .map(|mut track| {
+                track.start.x += shift_x;
+                track.start.y += shift_y;
+                track.end.x += shift_x;
+                track.end.y += shift_y;
+                track
+            })
+            .collect();
+        let vias = self
+            .document
+            .board
+            .vias
+            .iter()
+            .cloned()
+            .map(|mut via| {
+                via.position.x += shift_x;
+                via.position.y += shift_y;
+                via
+            })
+            .collect();
+        self.execute_editor_command(EditorCommand::Pcb(PcbCommand::SetGeometry {
+            footprint_positions,
+            tracks,
+            vias,
+            outline: BoardOutline::rectangular(width, height),
+        }));
         self.refresh_pcb_analysis_from_current();
         self.status = format!("Fit PCB board to {:.1} x {:.1} mm.", width, height);
     }
@@ -854,7 +851,7 @@ impl crate::CircuitApp {
             .max()
             .unwrap_or(0)
             + 1;
-        let mut added = 0usize;
+        let mut tracks = Vec::new();
         for ratsnest in self.document.board.ratsnest_edges(&cad.nets) {
             if self
                 .document
@@ -871,7 +868,7 @@ impl crate::CircuitApp {
             ) else {
                 continue;
             };
-            self.document.board.tracks.push(TrackSegment {
+            tracks.push(TrackSegment {
                 id: next_id,
                 net_id: ratsnest.net_id,
                 layer: BoardLayer::FrontCopper,
@@ -885,7 +882,13 @@ impl crate::CircuitApp {
                     .max(0.25),
             });
             next_id += 1;
-            added += 1;
+        }
+        let added = tracks.len();
+        if !tracks.is_empty() {
+            self.execute_editor_command(EditorCommand::Pcb(PcbCommand::AddRoute {
+                tracks,
+                vias: Vec::new(),
+            }));
         }
         self.refresh_pcb_analysis(&cad);
         self.analysis.pcb_cad = Some(cad);
@@ -1029,6 +1032,7 @@ impl crate::CircuitApp {
         self.record_history();
         self.restore_snapshot(snapshot);
         self.document.board = board;
+        self.document.board.rebuild_entity_index();
         self.finish_history_transaction();
         self.dispatch_changes(crate::commands::ChangeSet::restored_document());
         self.analysis.pcb_cad = Some(cad.clone());
@@ -1108,7 +1112,7 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn refresh_pcb_analysis(&mut self, cad: &CadProjectData) {
-        self.pcb_ui.ratsnest_count = self.unrouted_pcb_ratsnest(cad).len();
+        self.rebuild_pcb_ratsnest_counts(cad);
         self.analysis.pcb_drc = run_drc_with_nets(&self.document.board, &cad.nets);
         self.analysis.dirty_flags.pcb_drc_dirty = false;
         if self
@@ -1118,6 +1122,75 @@ impl crate::CircuitApp {
         {
             self.pcb_ui.selected_drc_index = None;
         }
+    }
+
+    pub(crate) fn schedule_full_pcb_analysis(&mut self, cad: &CadProjectData) {
+        let revision = self.analysis.revisions.persistence;
+        if self.analysis.pending_full_drc_revision == Some(revision) {
+            return;
+        }
+        self.rebuild_pcb_ratsnest_counts(cad);
+        let request = crate::engine::worker::AnalysisRequest::FullDrc {
+            board: Box::new(self.document.board.clone()),
+            nets: cad.nets.clone(),
+        };
+        if self.analysis.worker.submit(revision, request).is_ok() {
+            self.analysis.pending_full_drc_revision = Some(revision);
+        }
+    }
+
+    pub(crate) fn refresh_local_pcb_analysis(
+        &mut self,
+        affected_track_ids: &std::collections::HashSet<u64>,
+        affected_net_ids: &std::collections::HashSet<usize>,
+    ) {
+        let Some(cad) = self.analysis.pcb_cad.clone() else {
+            return;
+        };
+        self.analysis.pcb_drc.retain(|violation| {
+            !violation
+                .object_id
+                .is_some_and(|id| affected_track_ids.contains(&id))
+        });
+        self.analysis.pcb_drc.extend(crate::pcb::drc::run_local_drc(
+            &self.document.board,
+            affected_track_ids,
+        ));
+        let edges = self.document.board.ratsnest_edges(&cad.nets);
+        for net_id in affected_net_ids {
+            let routed = self
+                .document
+                .board
+                .tracks
+                .iter()
+                .any(|track| track.net_id == *net_id)
+                || self
+                    .document
+                    .board
+                    .vias
+                    .iter()
+                    .any(|via| via.net_id == *net_id);
+            let count = if routed {
+                0
+            } else {
+                edges.iter().filter(|edge| edge.net_id == *net_id).count()
+            };
+            self.analysis.pcb_ratsnest_by_net.insert(*net_id, count);
+        }
+        self.pcb_ui.ratsnest_count = self.analysis.pcb_ratsnest_by_net.values().sum();
+        self.analysis.dirty_flags.pcb_drc_dirty = false;
+    }
+
+    fn rebuild_pcb_ratsnest_counts(&mut self, cad: &CadProjectData) {
+        self.analysis.pcb_ratsnest_by_net.clear();
+        for edge in self.unrouted_pcb_ratsnest(cad) {
+            *self
+                .analysis
+                .pcb_ratsnest_by_net
+                .entry(edge.net_id)
+                .or_default() += 1;
+        }
+        self.pcb_ui.ratsnest_count = self.analysis.pcb_ratsnest_by_net.values().sum();
     }
 
     fn unrouted_pcb_ratsnest(&self, cad: &CadProjectData) -> Vec<crate::pcb::board::RatsnestEdge> {
@@ -1650,6 +1723,7 @@ impl crate::CircuitApp {
 
     // ── Cache accessors ──────────────────────────────────────────────────────
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn current_simulation(
         &mut self,
     ) -> std::sync::Arc<crate::engine::simulation::Simulation> {
@@ -1657,7 +1731,11 @@ impl crate::CircuitApp {
             self.simulation_run_state = crate::ui::app::SimulationRunState::Stopped;
             return std::sync::Arc::new(crate::engine::simulation::Simulation::default());
         }
-        let ac_key = self.simulation_ui.ac_freq_hz.to_bits();
+        let ac_key = self.simulation_ui.ac_freq_hz.to_bits()
+            ^ match self.simulation_ui.backend {
+                crate::engine::backend::BackendKind::InternalMna => 0,
+                crate::engine::backend::BackendKind::NgSpice => 0x8000_0000,
+            };
         let revision = crate::ui::app::SimulationRevisionKey {
             connectivity: self.analysis.revisions.schematic_connectivity,
             topology: self.analysis.revisions.simulation_topology,
@@ -1734,6 +1812,77 @@ impl crate::CircuitApp {
         simulation
     }
 
+    /// Returns the newest completed simulation to the renderer and schedules
+    /// stale work on the bounded worker. Direct callers such as exports and
+    /// tests continue to use `current_simulation`, which is synchronous by
+    /// design.
+    pub(crate) fn simulation_for_frame(
+        &mut self,
+    ) -> std::sync::Arc<crate::engine::simulation::Simulation> {
+        if !self.simulate {
+            self.simulation_run_state = crate::ui::app::SimulationRunState::Stopped;
+            self.analysis.pending_schematic = None;
+            return std::sync::Arc::new(crate::engine::simulation::Simulation::default());
+        }
+        let ac_key = self.simulation_ui.ac_freq_hz.to_bits()
+            ^ match self.simulation_ui.backend {
+                crate::engine::backend::BackendKind::InternalMna => 0,
+                crate::engine::backend::BackendKind::NgSpice => 0x8000_0000,
+            };
+        let revision_key = crate::ui::app::SimulationRevisionKey {
+            connectivity: self.analysis.revisions.schematic_connectivity,
+            topology: self.analysis.revisions.simulation_topology,
+            parameters: self.analysis.revisions.simulation_parameters,
+            electrical: self.analysis.revisions.electrical_parameters,
+        };
+        if let Some((cached_key, cached_ac_key, simulation)) = &self.analysis.cached_simulation
+            && *cached_key == revision_key
+            && *cached_ac_key == ac_key
+        {
+            self.performance.simulation_cache_hit = true;
+            self.performance.simulation_cache_hits =
+                self.performance.simulation_cache_hits.saturating_add(1);
+            return std::sync::Arc::clone(simulation);
+        }
+        self.performance.simulation_cache_hit = false;
+        self.performance.simulation_cache_misses =
+            self.performance.simulation_cache_misses.saturating_add(1);
+
+        let document_revision = self.analysis.revisions.persistence;
+        let pending = (document_revision, revision_key, ac_key);
+        if self.analysis.pending_schematic != Some(pending) {
+            let request = crate::engine::worker::AnalysisRequest::Schematic {
+                components: self.components.clone(),
+                wires: self.wires.clone(),
+                annotations: Box::new(self.annotations.netlist_annotations()),
+                ac_frequency_hz: self.simulation_ui.ac_freq_hz as f64,
+                backend: self.simulation_ui.backend,
+                revision_key,
+                ac_key,
+            };
+            if self
+                .analysis
+                .worker
+                .submit(document_revision, request)
+                .is_ok()
+            {
+                self.analysis.pending_schematic = Some(pending);
+            }
+        }
+        self.simulation_run_state = crate::ui::app::SimulationRunState::Solving;
+        self.analysis
+            .cached_simulation
+            .as_ref()
+            .map(|(_, _, simulation)| std::sync::Arc::clone(simulation))
+            .unwrap_or_else(|| {
+                std::sync::Arc::new(crate::engine::simulation::Simulation {
+                    summary: "Analyzing…".to_string(),
+                    explanation: "Circuit analysis is running in the background.".to_string(),
+                    ..crate::engine::simulation::Simulation::default()
+                })
+            })
+    }
+
     pub(crate) fn current_netlist(&mut self) -> std::sync::Arc<CircuitNetlist> {
         let revision = self.analysis.revisions.schematic_connectivity;
         if let Some((cached_revision, netlist)) = &self.analysis.cached_netlist
@@ -1803,13 +1952,87 @@ impl crate::CircuitApp {
             return;
         }
         self.save_current_page();
-        if let Err(err) =
-            self.write_circuit_json(&crate::ui::app::autorecover_path(self.document_id))
-        {
-            self.status = format!("Auto backup failed: {err}");
+        let revision = self.analysis.revisions.persistence;
+        let request = crate::engine::worker::AnalysisRequest::Autosave {
+            saved: Box::new(SavedCircuit::from_app(self)),
+            path: crate::ui::app::autorecover_path(self.document_id),
+        };
+        if self.analysis.worker.submit(revision, request).is_err() {
+            self.status = "Auto backup queue is busy; retrying shortly.".to_string();
             return;
         }
-        self.last_autorecover_revision = self.analysis.revisions.persistence;
+        self.last_autorecover_revision = revision;
+    }
+
+    pub(crate) fn poll_analysis_worker(&mut self) {
+        while let Some(result) = self.analysis.worker.try_recv() {
+            if result.document_revision != self.analysis.revisions.persistence {
+                continue;
+            }
+            let document_revision = result.document_revision;
+            match result.payload {
+                crate::engine::worker::AnalysisPayload::Schematic(result) => {
+                    let expected = (document_revision, result.revision_key, result.ac_key);
+                    if self.analysis.pending_schematic != Some(expected) {
+                        continue;
+                    }
+                    let connectivity = std::sync::Arc::new(result.connectivity);
+                    self.analysis.cached_netlist = Some((
+                        result.revision_key.connectivity,
+                        std::sync::Arc::new(connectivity.netlist.clone()),
+                    ));
+                    self.analysis.cached_connectivity = Some((
+                        result.revision_key.connectivity,
+                        std::sync::Arc::clone(&connectivity),
+                    ));
+                    self.analysis.cached_simulation = Some((
+                        result.revision_key,
+                        result.ac_key,
+                        std::sync::Arc::new(result.simulation),
+                    ));
+                    self.simulation_run_state = match self
+                        .analysis
+                        .cached_simulation
+                        .as_ref()
+                        .map(|(_, _, simulation)| simulation.status)
+                        .unwrap_or_default()
+                    {
+                        crate::engine::simulation::SimulationStatus::Ok => {
+                            crate::ui::app::SimulationRunState::Valid
+                        }
+                        crate::engine::simulation::SimulationStatus::Warning => {
+                            crate::ui::app::SimulationRunState::Warning
+                        }
+                        crate::engine::simulation::SimulationStatus::Failed => {
+                            crate::ui::app::SimulationRunState::Failed
+                        }
+                    };
+                    self.performance.netlist_ms = result.connectivity_ms;
+                    self.performance.mna_ms = result.simulation_ms;
+                    self.performance.erc_ms = result.erc_ms;
+                    self.analysis.pending_schematic = None;
+                    self.analysis.simulation_revision =
+                        self.analysis.simulation_revision.saturating_add(1);
+                    self.analysis.dirty_flags.connectivity_dirty = false;
+                    self.analysis.dirty_flags.validation_dirty = false;
+                    self.analysis.dirty_flags.simulation_dirty = false;
+                    self.workspace_state.repaint_requested = true;
+                }
+                crate::engine::worker::AnalysisPayload::FullDrc(violations) => {
+                    if self.analysis.pending_full_drc_revision != Some(result.document_revision) {
+                        continue;
+                    }
+                    self.analysis.pcb_drc = violations;
+                    self.analysis.pending_full_drc_revision = None;
+                    self.analysis.dirty_flags.pcb_drc_dirty = false;
+                    self.workspace_state.repaint_requested = true;
+                }
+                crate::engine::worker::AnalysisPayload::Autosave(Err(error)) => {
+                    self.status = format!("Auto backup failed: {error}");
+                }
+                crate::engine::worker::AnalysisPayload::Autosave(Ok(_)) => {}
+            }
+        }
     }
 
     pub(crate) fn effective_project_pages(&self) -> Vec<ProjectPage> {

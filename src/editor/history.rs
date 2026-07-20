@@ -40,6 +40,7 @@ impl crate::CircuitApp {
             .current_page
             .min(self.pages.len().saturating_sub(1));
         self.document.board = snapshot.board;
+        self.document.board.rebuild_entity_index();
         self.editor.selected = None;
         self.editor.drag = None;
         self.editor.draft_wire.clear();
