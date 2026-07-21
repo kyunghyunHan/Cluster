@@ -15,9 +15,7 @@ pub(crate) mod view;
 pub(crate) mod wires;
 
 pub(crate) use background::draw_grid;
-pub(crate) use hit_test::{
-    hit_test, hit_test_component, hit_test_wire, hit_test_wire_control_point,
-};
+pub(crate) use hit_test::{hit_test_component, hit_test_wire};
 pub(crate) use overlays::draw_probe_card;
 pub(crate) use selection::selection_summary;
 pub(crate) use view::CanvasView;

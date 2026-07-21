@@ -64,7 +64,23 @@ pub(crate) struct PcbWorkspaceState {
     pub(crate) show_edges: bool,
     pub(crate) routing: RoutingState,
     drag_start: Option<(Pos2, Vec<(u64, Point2)>)>,
+    track_drag: Option<TrackDragState>,
     box_start: Option<Point2>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TrackDragMode {
+    Start,
+    End,
+    Segment,
+}
+
+#[derive(Debug, Clone)]
+struct TrackDragState {
+    original: TrackSegment,
+    preview: TrackSegment,
+    pointer_start: Point2,
+    mode: TrackDragMode,
 }
 
 impl Default for PcbWorkspaceState {
@@ -91,6 +107,7 @@ impl PcbWorkspaceState {
             highlighted_net: None,
             routing: RoutingState::Idle,
             drag_start: None,
+            track_drag: None,
             box_start: None,
         }
     }
@@ -349,6 +366,20 @@ fn draw_board(
                 color,
             ),
         );
+        if state.selected_track == Some(track.id) {
+            for point in [track.start, track.end] {
+                painter.circle_filled(map(point), 4.0, Color32::from_rgb(100, 240, 170));
+            }
+        }
+    }
+    if let Some(drag) = &state.track_drag {
+        painter.line_segment(
+            [map(drag.preview.start), map(drag.preview.end)],
+            Stroke::new(
+                (drag.preview.width_mm * state.zoom).max(3.0),
+                Color32::from_rgb(100, 240, 170),
+            ),
+        );
     }
     for via in board
         .via_candidates_in_bounds(viewport_min, viewport_max)
@@ -490,8 +521,52 @@ fn update_interaction(
                             .map(|footprint| (footprint.id, footprint.position))
                             .collect(),
                     ));
+                } else if let Some(track_id) = hit_track(board, world)
+                    && let Some(track) = board.track(track_id)
+                {
+                    let endpoint_radius = (8.0 / state.zoom).max(0.35);
+                    let mode = if point_distance(world, track.start) <= endpoint_radius {
+                        TrackDragMode::Start
+                    } else if point_distance(world, track.end) <= endpoint_radius {
+                        TrackDragMode::End
+                    } else {
+                        TrackDragMode::Segment
+                    };
+                    state.selected_track = Some(track_id);
+                    state.selected_via = None;
+                    state.track_drag = Some(TrackDragState {
+                        original: track.clone(),
+                        preview: track.clone(),
+                        pointer_start: world,
+                        mode,
+                    });
                 } else {
                     state.box_start = Some(world);
+                }
+            }
+            if response.dragged()
+                && let Some(drag) = &mut state.track_drag
+            {
+                match drag.mode {
+                    TrackDragMode::Start => drag.preview.start = snap_routing_point(world, board),
+                    TrackDragMode::End => drag.preview.end = snap_routing_point(world, board),
+                    TrackDragMode::Segment => {
+                        let snapped_delta = snap_point(
+                            Point2::new(
+                                world.x - drag.pointer_start.x,
+                                world.y - drag.pointer_start.y,
+                            ),
+                            board.grid.grid_mm,
+                        );
+                        drag.preview.start = Point2::new(
+                            drag.original.start.x + snapped_delta.x,
+                            drag.original.start.y + snapped_delta.y,
+                        );
+                        drag.preview.end = Point2::new(
+                            drag.original.end.x + snapped_delta.x,
+                            drag.original.end.y + snapped_delta.y,
+                        );
+                    }
                 }
             }
             if pointer.released
@@ -514,6 +589,12 @@ fn update_interaction(
                             .collect(),
                     ));
                 }
+            }
+            if pointer.released
+                && let Some(drag) = state.track_drag.take()
+                && drag.preview != drag.original
+            {
+                commands.push(PcbCommand::EditTrack(drag.preview));
             }
             if pointer.released
                 && let Some(start) = state.box_start.take()
@@ -700,6 +781,10 @@ fn point_segment_distance(point: Point2, start: Point2, end: Point2) -> f32 {
         (((point.x - start.x) * dx + (point.y - start.y) * dy) / length_squared).clamp(0.0, 1.0);
     let closest = Point2::new(start.x + dx * t, start.y + dy * t);
     ((point.x - closest.x).powi(2) + (point.y - closest.y).powi(2)).sqrt()
+}
+
+fn point_distance(left: Point2, right: Point2) -> f32 {
+    ((left.x - right.x).powi(2) + (left.y - right.y).powi(2)).sqrt()
 }
 
 fn footprint_net(board: &Board, nets: &[CadNet], footprint_id: u64) -> Option<usize> {

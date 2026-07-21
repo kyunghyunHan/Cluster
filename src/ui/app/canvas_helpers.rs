@@ -8,49 +8,6 @@ pub(crate) fn snap_pos(pos: Pos2, _rect: Rect, grid: f32, snap: bool) -> Pos2 {
     }
 }
 
-pub(crate) fn insert_wire_control_point(pos: Pos2, wires: &mut [Wire]) -> Option<(u64, usize)> {
-    let threshold = 10.0;
-    for wire in wires.iter_mut().rev() {
-        for index in 0..wire.points.len().saturating_sub(1) {
-            let a = wire.points[index];
-            let b = wire.points[index + 1];
-            if distance_to_segment(pos, a, b) <= threshold {
-                let horizontal = (a.y - b.y).abs() <= 0.5;
-                let vertical = (a.x - b.x).abs() <= 0.5;
-                let inserted = if horizontal {
-                    Pos2::new(pos.x.clamp(a.x.min(b.x), a.x.max(b.x)), a.y)
-                } else if vertical {
-                    Pos2::new(a.x, pos.y.clamp(a.y.min(b.y), a.y.max(b.y)))
-                } else {
-                    closest_point_on_segment(pos, a, b)
-                };
-                wire.points.insert(index + 1, inserted);
-                return Some((wire.id, index + 1));
-            }
-        }
-    }
-    None
-}
-
-pub(crate) fn move_wire_control_point(
-    wires: &mut [Wire],
-    wire_id: u64,
-    point_index: usize,
-    pos: Pos2,
-) {
-    let Some(wire) = wires.iter_mut().find(|wire| wire.id == wire_id) else {
-        return;
-    };
-    if point_index >= wire.points.len() {
-        return;
-    }
-    wire.points[point_index] = pos;
-    let is_endpoint = point_index == 0 || point_index + 1 == wire.points.len();
-    if !is_endpoint {
-        straighten_neighbor_segments(wire, point_index);
-    }
-}
-
 pub(crate) fn straighten_neighbor_segments(wire: &mut Wire, point_index: usize) {
     let point = wire.points[point_index];
     if point_index > 0 {

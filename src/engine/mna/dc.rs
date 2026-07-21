@@ -23,6 +23,20 @@ use super::errors::{ComponentPowerRole, SimulationError};
 use super::matrix::{Mna, validate_voltage_sources};
 use super::models::{BjtEntry, DiodeEntry, IsEntry, MosEntry, NetMap, ResEntry, VsEntry};
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MnaStageProfile {
+    pub(crate) circuit_compilation_ms: f64,
+    pub(crate) node_indexing_ms: f64,
+    pub(crate) matrix_allocation_ms: f64,
+    pub(crate) matrix_stamping_ms: f64,
+    pub(crate) nonlinear_iteration_ms: f64,
+    pub(crate) factorization_solve_ms: f64,
+    pub(crate) convergence_test_ms: f64,
+    pub(crate) result_mapping_ms: f64,
+    pub(crate) wire_segment_current_mapping_ms: f64,
+    pub(crate) total_ms: f64,
+}
+
 // ── Public result type ────────────────────────────────────────────────────────
 
 #[allow(dead_code)] // Graph aliases are retained for result-format compatibility.
@@ -113,6 +127,29 @@ pub(crate) fn solve_dc_detailed_with_connectivity_and_cancellation(
     connectivity: &CanonicalConnectivity,
     cancellation: Option<&crate::engine::ngspice::CancellationToken>,
 ) -> Result<DcResult, SimulationError> {
+    let mut profile = MnaStageProfile::default();
+    solve_dc_profiled_internal(components, wires, connectivity, cancellation, &mut profile)
+}
+
+pub(crate) fn solve_dc_detailed_profiled(
+    components: &[Component],
+    wires: &[Wire],
+    connectivity: &CanonicalConnectivity,
+) -> (Result<DcResult, SimulationError>, MnaStageProfile) {
+    let mut profile = MnaStageProfile::default();
+    let result = solve_dc_profiled_internal(components, wires, connectivity, None, &mut profile);
+    (result, profile)
+}
+
+fn solve_dc_profiled_internal(
+    components: &[Component],
+    wires: &[Wire],
+    connectivity: &CanonicalConnectivity,
+    cancellation: Option<&crate::engine::ngspice::CancellationToken>,
+    profile: &mut MnaStageProfile,
+) -> Result<DcResult, SimulationError> {
+    let total_started = std::time::Instant::now();
+    let compilation_started = std::time::Instant::now();
     // ── 1. Build net map ──────────────────────────────────────────────────
     let mut nm = NetMap::from_connectivity(components, wires, connectivity);
 
@@ -166,6 +203,7 @@ pub(crate) fn solve_dc_detailed_with_connectivity_and_cancellation(
     }
 
     // ── 3. Assign MNA node numbers (GND=0, others 1..N) ──────────────────
+    let node_indexing_started = std::time::Instant::now();
     let node_count = nm.nodes.positions.len();
     let all_roots: HashSet<usize> = (0..node_count).map(|i| nm.uf.find(i)).collect();
 
@@ -180,6 +218,7 @@ pub(crate) fn solve_dc_detailed_with_connectivity_and_cancellation(
         }
     }
     let num_nodes = next_node - 1;
+    profile.node_indexing_ms = node_indexing_started.elapsed().as_secs_f64() * 1_000.0;
 
     let mna_node = |pos: Pos2, nm: &mut NetMap, mna_of: &HashMap<usize, usize>| -> Option<usize> {
         let root = nm.root_of(pos)?;
@@ -659,16 +698,23 @@ pub(crate) fn solve_dc_detailed_with_connectivity_and_cancellation(
     }
     validate_voltage_sources(&vs)?;
     let total_nodes = num_nodes + bjt_entries.len();
+    profile.circuit_compilation_ms = compilation_started.elapsed().as_secs_f64() * 1_000.0;
 
     // ── 6. Build MNA matrix ───────────────────────────────────────────────
     let m = vs.len();
     if total_nodes == 0 {
         return Err(SimulationError::FloatingNode);
     }
+    let allocation_ms = std::cell::Cell::new(0.0);
+    let stamping_ms = std::cell::Cell::new(0.0);
+    let solve_ms = std::cell::Cell::new(0.0);
     let solve_with_states = |diode_on: &[bool],
                              mos_on: &[bool]|
      -> Result<super::matrix::SolveSolution, SimulationError> {
+        let started = std::time::Instant::now();
         let mut mat = Mna::new(total_nodes, m);
+        allocation_ms.set(allocation_ms.get() + started.elapsed().as_secs_f64() * 1_000.0);
+        let started = std::time::Instant::now();
         for re in &res {
             mat.stamp_r(re.a, re.b, re.r);
         }
@@ -705,9 +751,14 @@ pub(crate) fn solve_dc_detailed_with_connectivity_and_cancellation(
         for i_src in &is_src {
             mat.stamp_is(i_src.pos, i_src.neg, i_src.i);
         }
-        mat.solve_with_cancellation(cancellation)
+        stamping_ms.set(stamping_ms.get() + started.elapsed().as_secs_f64() * 1_000.0);
+        let started = std::time::Instant::now();
+        let result = mat.solve_with_cancellation(cancellation);
+        solve_ms.set(solve_ms.get() + started.elapsed().as_secs_f64() * 1_000.0);
+        result
     };
 
+    let nonlinear_started = std::time::Instant::now();
     let mut diode_states = vec![false; diode_entries.len()];
     let mut mos_states = vec![false; mos_entries.len()];
     let mut solution = solve_with_states(&diode_states, &mos_states)?;
@@ -771,9 +822,16 @@ pub(crate) fn solve_dc_detailed_with_connectivity_and_cancellation(
             solution = solve_with_states(&diode_states, &mos_states)?;
         }
     }
+    profile.matrix_allocation_ms = allocation_ms.get();
+    profile.matrix_stamping_ms = stamping_ms.get();
+    profile.factorization_solve_ms = solve_ms.get();
+    profile.nonlinear_iteration_ms = nonlinear_started.elapsed().as_secs_f64() * 1_000.0;
+    profile.convergence_test_ms =
+        (profile.nonlinear_iteration_ms - profile.factorization_solve_ms).max(0.0);
     let x = &solution.x;
 
     // ── 8. Decode results ─────────────────────────────────────────────────
+    let result_mapping_started = std::time::Instant::now();
     let vnode = |mna_idx: usize| -> f64 {
         if mna_idx == 0 {
             0.0
@@ -900,35 +958,32 @@ pub(crate) fn solve_dc_detailed_with_connectivity_and_cancellation(
         }
     }
 
+    let wire_mapping_started = std::time::Instant::now();
     let mut wire_current = HashMap::new();
     let mut wire_current_known = HashSet::new();
+    let pin_grid = build_component_pin_grid(components);
     for wire in wires {
         let mut candidates = Vec::new();
-        for component in components {
+        for (component_index, pin_index) in wire_pin_candidates(wire, &pin_grid) {
+            let component = &components[component_index];
             let Some(&current) = branch_current.get(&component.id) else {
                 continue;
             };
             let pins = component_pin_defs(component);
-            for (pin_index, pin) in pins.iter().enumerate() {
-                if !wire
-                    .points
-                    .windows(2)
-                    .any(|seg| point_touches_wire_segment(pin.pos, seg[0], seg[1]))
-                {
-                    continue;
-                }
-                let terminal_current =
-                    terminal_current_into_component(component.kind, pin, pin_index, current);
-                let Some(distance) = distance_along_wire(&wire.points, pin.pos) else {
-                    continue;
-                };
-                let toward_pin_sign = if distance <= wire_polyline_length(&wire.points) * 0.5 {
-                    -1.0
-                } else {
-                    1.0
-                };
-                candidates.push(terminal_current * toward_pin_sign);
-            }
+            let Some(pin) = pins.get(pin_index) else {
+                continue;
+            };
+            let terminal_current =
+                terminal_current_into_component(component.kind, pin, pin_index, current);
+            let Some(distance) = distance_along_wire(&wire.points, pin.pos) else {
+                continue;
+            };
+            let toward_pin_sign = if distance <= wire_polyline_length(&wire.points) * 0.5 {
+                -1.0
+            } else {
+                1.0
+            };
+            candidates.push(terminal_current * toward_pin_sign);
         }
         let representative = candidates
             .iter()
@@ -946,7 +1001,6 @@ pub(crate) fn solve_dc_detailed_with_connectivity_and_cancellation(
             }
         }
     }
-
     let mut wire_segment_currents = HashMap::new();
     for wire in wires {
         if wire_current_known.contains(&wire.id)
@@ -958,13 +1012,15 @@ pub(crate) fn solve_dc_detailed_with_connectivity_and_cancellation(
             }
         }
     }
+    profile.wire_segment_current_mapping_ms =
+        wire_mapping_started.elapsed().as_secs_f64() * 1_000.0;
 
     let vmax = net_voltages
         .values()
         .map(|v| v.abs())
         .fold(0.0_f64, f64::max);
 
-    Ok(DcResult {
+    let result = DcResult {
         node_voltages: net_voltages.clone(),
         net_voltages,
         component_voltage,
@@ -981,7 +1037,60 @@ pub(crate) fn solve_dc_detailed_with_connectivity_and_cancellation(
         vmax: vmax.max(0.1),
         nonlinear_iterations,
         nonlinear_converged,
-    })
+    };
+    profile.result_mapping_ms = result_mapping_started.elapsed().as_secs_f64() * 1_000.0;
+    profile.total_ms = total_started.elapsed().as_secs_f64() * 1_000.0;
+    Ok(result)
+}
+
+type PinGridEntry = (usize, usize, Pos2);
+
+fn build_component_pin_grid(components: &[Component]) -> HashMap<(i32, i32), Vec<PinGridEntry>> {
+    let mut grid = HashMap::new();
+    for (component_index, component) in components.iter().enumerate() {
+        for (pin_index, pin) in component_pin_defs(component).into_iter().enumerate() {
+            grid.entry(mna_pin_cell(pin.pos))
+                .or_insert_with(Vec::new)
+                .push((component_index, pin_index, pin.pos));
+        }
+    }
+    grid
+}
+
+fn wire_pin_candidates(
+    wire: &Wire,
+    grid: &HashMap<(i32, i32), Vec<PinGridEntry>>,
+) -> Vec<(usize, usize)> {
+    let mut seen = HashSet::new();
+    for segment in wire.points.windows(2) {
+        let min = mna_pin_cell(Pos2::new(
+            segment[0].x.min(segment[1].x) - 1.0,
+            segment[0].y.min(segment[1].y) - 1.0,
+        ));
+        let max = mna_pin_cell(Pos2::new(
+            segment[0].x.max(segment[1].x) + 1.0,
+            segment[0].y.max(segment[1].y) + 1.0,
+        ));
+        for x in min.0..=max.0 {
+            for y in min.1..=max.1 {
+                for &(component_index, pin_index, position) in
+                    grid.get(&(x, y)).into_iter().flatten()
+                {
+                    if point_touches_wire_segment(position, segment[0], segment[1]) {
+                        seen.insert((component_index, pin_index));
+                    }
+                }
+            }
+        }
+    }
+    seen.into_iter().collect()
+}
+
+fn mna_pin_cell(position: Pos2) -> (i32, i32) {
+    (
+        (position.x / 64.0).floor() as i32,
+        (position.y / 64.0).floor() as i32,
+    )
 }
 
 // ── Wire geometry helpers ─────────────────────────────────────────────────────

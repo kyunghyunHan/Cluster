@@ -450,6 +450,15 @@ impl Board {
         true
     }
 
+    pub(crate) fn set_outline(&mut self, outline: BoardOutline) -> bool {
+        if self.outline == outline {
+            return false;
+        }
+        self.outline = outline;
+        self.spatial_index.update_outline(&self.outline);
+        true
+    }
+
     pub(crate) fn entity_index_is_consistent(&self) -> bool {
         self.entity_index.footprints.len() == self.footprints.len()
             && self.entity_index.tracks.len() == self.tracks.len()

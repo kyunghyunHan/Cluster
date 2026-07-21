@@ -97,6 +97,13 @@ pub(crate) struct BoardDeltaCapture {
     capture_new_footprints: bool,
 }
 
+pub(crate) struct SchematicDeltaCapture {
+    component_ids: HashSet<u64>,
+    wire_ids: HashSet<u64>,
+    before_components: HashMap<u64, ListValue<Component>>,
+    before_wires: HashMap<u64, ListValue<Wire>>,
+}
+
 /// Common reversible command behavior used by schematic and PCB history.
 pub(crate) trait UndoableCommand {
     fn apply(&self, document: &mut ProjectDocument);
@@ -142,6 +149,46 @@ impl DocumentDelta {
             track_ids: scope.track_ids,
             via_ids: scope.via_ids,
             capture_new_footprints: scope.capture_new_footprints,
+        }
+    }
+
+    pub(crate) fn capture_schematic_entities(
+        document: &ProjectDocument,
+        component_ids: HashSet<u64>,
+        wire_ids: HashSet<u64>,
+    ) -> SchematicDeltaCapture {
+        SchematicDeltaCapture {
+            before_components: capture_values(&document.components, &component_ids, |value| {
+                value.id
+            }),
+            before_wires: capture_values(&document.wires, &wire_ids, |value| value.id),
+            component_ids,
+            wire_ids,
+        }
+    }
+
+    pub(crate) fn from_schematic_capture(
+        capture: SchematicDeltaCapture,
+        document: &ProjectDocument,
+    ) -> Self {
+        let after_components =
+            capture_values(&document.components, &capture.component_ids, |value| {
+                value.id
+            });
+        let after_wires = capture_values(&document.wires, &capture.wire_ids, |value| value.id);
+        Self {
+            components: diff_captured(
+                capture.before_components,
+                after_components,
+                &capture.component_ids,
+            ),
+            wires: diff_captured(capture.before_wires, after_wires, &capture.wire_ids),
+            annotations: None,
+            metadata: None,
+            board_footprints: Vec::new(),
+            board_tracks: Vec::new(),
+            board_vias: Vec::new(),
+            board_metadata: None,
         }
     }
 
@@ -255,7 +302,84 @@ impl DocumentDelta {
         if let Some((before, after)) = &self.board_metadata {
             (if forward { after } else { before }).apply_to(&mut document.board);
         }
-        document.board.rebuild_entity_index();
+        if !self.board_footprints.is_empty()
+            || !self.board_tracks.is_empty()
+            || !self.board_vias.is_empty()
+            || self.board_metadata.is_some()
+        {
+            document.board.rebuild_entity_index();
+        }
+    }
+
+    pub(crate) fn change_set(&self) -> crate::commands::ChangeSet {
+        let components_changed = !self.components.is_empty();
+        let component_geometry_changed =
+            self.components
+                .iter()
+                .any(|delta| match (&delta.before, &delta.after) {
+                    (Some(before), Some(after)) => {
+                        before.value.kind != after.value.kind
+                            || before.value.pos != after.value.pos
+                            || before.value.rotation != after.value.rotation
+                            || before.value.part_id != after.value.part_id
+                    }
+                    _ => true,
+                });
+        let label_connectivity_changed =
+            self.components
+                .iter()
+                .any(|delta| match (&delta.before, &delta.after) {
+                    (Some(before), Some(after)) => {
+                        (before.value.kind == crate::model::ComponentKind::NetLabel
+                            || after.value.kind == crate::model::ComponentKind::NetLabel)
+                            && before.value.value != after.value.value
+                    }
+                    _ => false,
+                });
+        let page_structure_changed = self.metadata.as_ref().is_some_and(|(before, after)| {
+            before.pages != after.pages || before.current_page != after.current_page
+        });
+        let schematic_geometry = component_geometry_changed
+            || !self.wires.is_empty()
+            || self.annotations.is_some()
+            || page_structure_changed;
+        let schematic_connectivity =
+            schematic_geometry || label_connectivity_changed || self.annotations.is_some();
+        let schematic = components_changed
+            || !self.wires.is_empty()
+            || self.annotations.is_some()
+            || self.metadata.is_some();
+        let board = !self.board_footprints.is_empty()
+            || !self.board_tracks.is_empty()
+            || !self.board_vias.is_empty()
+            || self.board_metadata.is_some();
+        crate::commands::ChangeSet {
+            persistence_changed: schematic || board,
+            schematic_geometry_changed: schematic_geometry,
+            schematic_connectivity_changed: schematic_connectivity,
+            electrical_values_changed: components_changed,
+            simulation_topology_changed: schematic_geometry,
+            simulation_parameters_changed: components_changed,
+            pcb_sync_changed: components_changed || page_structure_changed,
+            pcb_geometry_changed: board,
+            pcb_rules_changed: self.board_metadata.is_some(),
+            visual_only: false,
+        }
+    }
+
+    pub(crate) fn schematic_component_ids(&self) -> Vec<u64> {
+        self.components.iter().map(|delta| delta.id).collect()
+    }
+
+    pub(crate) fn schematic_wire_ids(&self) -> Vec<u64> {
+        self.wires.iter().map(|delta| delta.id).collect()
+    }
+
+    pub(crate) fn requires_full_schematic_index_rebuild(&self) -> bool {
+        self.annotations.is_some()
+            || self.metadata.as_ref().is_some_and(|(before, after)| {
+                before.pages != after.pages || before.current_page != after.current_page
+            })
     }
 }
 

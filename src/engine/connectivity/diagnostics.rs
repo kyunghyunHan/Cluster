@@ -20,8 +20,8 @@ pub(in crate::engine) fn geometry_diagnostics(wires: &[Wire]) -> Vec<Connectivit
 pub(in crate::engine) fn crossing_diagnostics(
     wires: &[Wire],
     explicit_junctions: &[Pos2],
+    index: &SegmentSpatialIndex,
 ) -> Vec<ConnectivityDiagnostic> {
-    let index = SegmentSpatialIndex::new(wires);
     index
         .candidate_pairs()
         .into_iter()
@@ -56,8 +56,8 @@ pub(in crate::engine) fn crossing_diagnostics(
 pub(in crate::engine) fn orphan_junction_diagnostics(
     wires: &[Wire],
     explicit_junctions: &[Pos2],
+    index: &SegmentSpatialIndex,
 ) -> Vec<ConnectivityDiagnostic> {
-    let index = SegmentSpatialIndex::new(wires);
     explicit_junctions
         .iter()
         .copied()

@@ -1,7 +1,6 @@
-use super::spatial_index::SegmentSpatialIndex;
+use super::junctions::ContactSplits;
 use crate::model::Wire;
 use egui::Pos2;
-use std::collections::HashMap;
 
 pub(in crate::engine) struct NormalizedWireSegment {
     pub(in crate::engine) id: u64,
@@ -20,12 +19,8 @@ pub(in crate::engine) fn wire_endpoint_contact_points(wires: &[Wire]) -> Vec<Pos
 
 pub(in crate::engine) fn normalized_wire_segments(
     wires: &[Wire],
-    explicit_junctions: &[Pos2],
+    mut splits_by_wire: ContactSplits,
 ) -> Vec<NormalizedWireSegment> {
-    let contacts = wire_endpoint_contact_points(wires)
-        .into_iter()
-        .chain(explicit_junctions.iter().copied())
-        .collect::<Vec<_>>();
     let cumulative_by_wire = wires
         .iter()
         .map(|wire| {
@@ -37,31 +32,6 @@ pub(in crate::engine) fn normalized_wire_segments(
             cumulative
         })
         .collect::<Vec<_>>();
-    let index = SegmentSpatialIndex::new(wires);
-    let mut splits_by_wire: HashMap<usize, Vec<(f32, Pos2)>> = HashMap::new();
-    for contact in contacts {
-        for candidate in index.candidates(contact) {
-            let wire = &wires[candidate.wire_index];
-            let segment = &wire.points[candidate.segment_index..=candidate.segment_index + 1];
-            let delta = segment[1] - segment[0];
-            let length_squared = delta.length_sq();
-            if length_squared <= f32::EPSILON {
-                continue;
-            }
-            let factor = (delta.dot(contact - segment[0]) / length_squared).clamp(0.0, 1.0);
-            let projected = segment[0] + delta * factor;
-            if projected.distance(contact) > 1.0 {
-                continue;
-            }
-            let parameter = cumulative_by_wire[candidate.wire_index][candidate.segment_index]
-                + factor * length_squared.sqrt();
-            splits_by_wire
-                .entry(candidate.wire_index)
-                .or_default()
-                .push((parameter, contact));
-        }
-    }
-
     let mut output = Vec::new();
     let mut next_id = 1u64;
     for (wire_index, wire) in wires.iter().enumerate() {

@@ -2,21 +2,28 @@
 
 use crate::editor::delta::{DocumentDelta, UndoableCommand};
 use crate::engine::mna;
-use crate::engine::netlist::build_canonical_connectivity_with_annotations;
+use crate::engine::netlist::{
+    build_canonical_connectivity_profiled, build_canonical_connectivity_with_annotations,
+    build_multi_page_circuit_netlist_with_annotations,
+};
 use crate::engine::simulation::Simulation;
 use crate::model::cad::{CadNet, Point2, Size2};
 use crate::model::{
     CircuitSnapshot, Component, ComponentKind, JunctionDot, JunctionId, NetlistAnnotations, PinRef,
-    SavedCircuit, SchematicAnnotations, Wire,
+    SavedCircuit, SchematicAnnotations, SchematicEntityIndex, Wire, component_pin_defs,
 };
 use crate::pcb::board::{Board, BoardFootprint};
 use crate::pcb::footprint::{Footprint, Pad, PadShape};
 use crate::pcb::layer::BoardLayer;
 use crate::pcb::track::TrackSegment;
 use crate::pcb::via::Via;
+use crate::ui::canvas::spatial_index::SchematicSpatialIndex;
 use crate::ui::canvas::{hit_test_component, hit_test_wire};
 use crate::ui::current_flow::{CurrentFlowCache, FlowCacheKey};
 use egui::{Pos2, Rect};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchematicSize {
@@ -41,6 +48,407 @@ pub enum PcbSize {
     Medium,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealisticFixtureKind {
+    DenseEsp32I2c,
+    BranchHeavyPower,
+    MultiPage,
+    MixedSimulation,
+    DenseCrossing,
+}
+
+pub struct RealisticFixture {
+    components: Vec<Component>,
+    wires: Vec<Wire>,
+    annotations: NetlistAnnotations,
+    pages: Vec<(Vec<Component>, Vec<Wire>)>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MnaStageMetrics {
+    pub circuit_compilation_ms: f64,
+    pub node_indexing_ms: f64,
+    pub matrix_allocation_ms: f64,
+    pub matrix_stamping_ms: f64,
+    pub nonlinear_iteration_ms: f64,
+    pub factorization_solve_ms: f64,
+    pub convergence_test_ms: f64,
+    pub result_mapping_ms: f64,
+    pub wire_segment_current_mapping_ms: f64,
+    pub total_ms: f64,
+}
+
+impl RealisticFixture {
+    pub fn generate(kind: RealisticFixtureKind) -> Self {
+        match kind {
+            RealisticFixtureKind::DenseEsp32I2c => dense_i2c_fixture(),
+            RealisticFixtureKind::BranchHeavyPower => branch_heavy_power_fixture(),
+            RealisticFixtureKind::MultiPage => multi_page_fixture(),
+            RealisticFixtureKind::MixedSimulation => mixed_simulation_fixture(),
+            RealisticFixtureKind::DenseCrossing => dense_crossing_fixture(),
+        }
+    }
+
+    fn connectivity(&self) -> crate::model::CanonicalConnectivity {
+        build_canonical_connectivity_with_annotations(
+            &self.components,
+            &self.wires,
+            &self.annotations,
+        )
+    }
+
+    pub fn connectivity_checksum(&self) -> usize {
+        if !self.pages.is_empty() {
+            let pages = self
+                .pages
+                .iter()
+                .map(|(components, wires)| (components.as_slice(), wires.as_slice()))
+                .collect::<Vec<_>>();
+            let netlist =
+                build_multi_page_circuit_netlist_with_annotations(&pages, &self.annotations);
+            return netlist.nets.len() + netlist.pins.len() + netlist.wire_segments.len();
+        }
+        let connectivity = self.connectivity();
+        connectivity.netlist.nets.len()
+            + connectivity.netlist.pins.len()
+            + connectivity.wire_segment_nets.len()
+            + connectivity.diagnostics.len()
+    }
+
+    pub fn erc_checksum(&self) -> usize {
+        if !self.pages.is_empty() {
+            let pages = self
+                .pages
+                .iter()
+                .map(|(components, wires)| (components.as_slice(), wires.as_slice()))
+                .collect::<Vec<_>>();
+            return crate::engine::validation::validate_beginner_rules(
+                &build_multi_page_circuit_netlist_with_annotations(&pages, &self.annotations),
+            )
+            .len();
+        }
+        let connectivity = self.connectivity();
+        crate::run_erc_with_netlist(
+            &self.components,
+            &self.wires,
+            &Simulation::default(),
+            &connectivity.netlist,
+        )
+        .len()
+    }
+
+    pub fn mna_checksum(&self) -> usize {
+        if !self.pages.is_empty() {
+            return self.connectivity_checksum();
+        }
+        let connectivity = self.connectivity();
+        mna::solve_dc_detailed_with_connectivity(&self.components, &self.wires, &connectivity)
+            .map_or(connectivity.netlist.nets.len(), |dc| dc.node_voltages.len())
+    }
+
+    pub fn mna_stage_profile(&self) -> MnaStageMetrics {
+        if !self.pages.is_empty() {
+            return MnaStageMetrics::default();
+        }
+        let connectivity = self.connectivity();
+        let (_, profile) =
+            mna::solve_dc_detailed_profiled(&self.components, &self.wires, &connectivity);
+        MnaStageMetrics {
+            circuit_compilation_ms: profile.circuit_compilation_ms,
+            node_indexing_ms: profile.node_indexing_ms,
+            matrix_allocation_ms: profile.matrix_allocation_ms,
+            matrix_stamping_ms: profile.matrix_stamping_ms,
+            nonlinear_iteration_ms: profile.nonlinear_iteration_ms,
+            factorization_solve_ms: profile.factorization_solve_ms,
+            convergence_test_ms: profile.convergence_test_ms,
+            result_mapping_ms: profile.result_mapping_ms,
+            wire_segment_current_mapping_ms: profile.wire_segment_current_mapping_ms,
+            total_ms: profile.total_ms,
+        }
+    }
+}
+
+fn fixture_component(id: u64, kind: ComponentKind, position: Pos2) -> Component {
+    Component {
+        id,
+        kind,
+        pos: position,
+        rotation: 0,
+        label: format!("{kind:?}{id}"),
+        value: match kind {
+            ComponentKind::Resistor => "4.7k",
+            ComponentKind::Capacitor => "100nF",
+            ComponentKind::VSource | ComponentKind::Battery => "3.3V",
+            ComponentKind::DcMotor => "100",
+            _ => "1",
+        }
+        .to_string(),
+        part_id: None,
+    }
+}
+
+fn endpoint_wire(id: u64, component: &Component, pin_index: usize, target: Pos2) -> Wire {
+    let pins = component_pin_defs(component);
+    let pin = &pins[pin_index.min(pins.len().saturating_sub(1))];
+    Wire::with_endpoints(
+        id,
+        vec![pin.pos, Pos2::new(target.x, pin.pos.y), target],
+        crate::model::WireEndpoint::Pin(PinRef {
+            component_id: component.id,
+            pin_name: pin.label.to_string(),
+        }),
+        crate::model::WireEndpoint::FreePoint(target),
+    )
+}
+
+fn dense_i2c_fixture() -> RealisticFixture {
+    let mut components = vec![
+        fixture_component(1, ComponentKind::Esp32, Pos2::new(0.0, 0.0)),
+        fixture_component(2, ComponentKind::ArduinoUno, Pos2::new(300.0, 0.0)),
+    ];
+    for index in 0..24 {
+        components.push(fixture_component(
+            index + 3,
+            if index % 3 == 0 {
+                ComponentKind::Oled
+            } else {
+                ComponentKind::Sensor
+            },
+            Pos2::new(
+                (index % 8) as f32 * 180.0,
+                180.0 + (index / 8) as f32 * 150.0,
+            ),
+        ));
+    }
+    components.push(fixture_component(
+        100,
+        ComponentKind::Resistor,
+        Pos2::new(80.0, 580.0),
+    ));
+    components.push(fixture_component(
+        101,
+        ComponentKind::Resistor,
+        Pos2::new(220.0, 580.0),
+    ));
+    let mut wires = Vec::new();
+    let mut junctions = HashMap::new();
+    for component in &components {
+        for pin_index in 0..component_pin_defs(component).len().min(4) {
+            let target = Pos2::new(component.pos.x, 720.0 + pin_index as f32 * 50.0);
+            let wire_id = 10_000 + wires.len() as u64;
+            wires.push(endpoint_wire(wire_id, component, pin_index, target));
+            junctions.insert(JunctionId(wire_id), target);
+        }
+    }
+    RealisticFixture {
+        components,
+        wires,
+        annotations: NetlistAnnotations {
+            junction_endpoints: junctions,
+            ..Default::default()
+        },
+        pages: Vec::new(),
+    }
+}
+
+fn branch_heavy_power_fixture() -> RealisticFixture {
+    let mut components = vec![
+        fixture_component(1, ComponentKind::VSource, Pos2::new(-180.0, 0.0)),
+        fixture_component(2, ComponentKind::Ground, Pos2::new(-180.0, 140.0)),
+    ];
+    for index in 0..240 {
+        components.push(fixture_component(
+            index + 3,
+            ComponentKind::Resistor,
+            Pos2::new((index % 40) as f32 * 70.0, (index / 40) as f32 * 100.0),
+        ));
+    }
+    let mut wires = Vec::new();
+    let mut junctions = HashMap::new();
+    for component in &components[2..] {
+        for (pin_index, rail_y) in [(0, -120.0), (1, 720.0)] {
+            let target = Pos2::new(component.pos.x, rail_y);
+            let id = 20_000 + wires.len() as u64;
+            wires.push(endpoint_wire(id, component, pin_index, target));
+            junctions.insert(JunctionId(id), target);
+        }
+    }
+    wires.push(Wire::new(
+        29_998,
+        vec![Pos2::new(-200.0, -120.0), Pos2::new(2_800.0, -120.0)],
+    ));
+    wires.push(Wire::new(
+        29_999,
+        vec![Pos2::new(-200.0, 720.0), Pos2::new(2_800.0, 720.0)],
+    ));
+    RealisticFixture {
+        components,
+        wires,
+        annotations: NetlistAnnotations {
+            junction_endpoints: junctions,
+            ..Default::default()
+        },
+        pages: Vec::new(),
+    }
+}
+
+fn multi_page_fixture() -> RealisticFixture {
+    let mut pages = Vec::new();
+    let mut scopes = HashMap::new();
+    for page in 0..10u64 {
+        let mut components = Vec::new();
+        let mut wires = Vec::new();
+        for index in 0..12u64 {
+            let resistor_id = page * 100 + index * 2 + 1;
+            let label_id = resistor_id + 1;
+            let resistor = fixture_component(
+                resistor_id,
+                ComponentKind::Resistor,
+                Pos2::new(index as f32 * 100.0, 100.0),
+            );
+            let mut label = fixture_component(
+                label_id,
+                ComponentKind::NetLabel,
+                Pos2::new(index as f32 * 100.0, 200.0),
+            );
+            label.value = format!("BUS_{}", index % 4);
+            scopes.insert(
+                label_id,
+                if index % 3 == 0 {
+                    crate::model::NetLabelScope::Page
+                } else {
+                    crate::model::NetLabelScope::Global
+                },
+            );
+            wires.push(endpoint_wire(40_000 + resistor_id, &resistor, 0, label.pos));
+            components.push(resistor);
+            components.push(label);
+        }
+        pages.push((components, wires));
+    }
+    RealisticFixture {
+        components: Vec::new(),
+        wires: Vec::new(),
+        annotations: NetlistAnnotations {
+            net_label_scopes: scopes,
+            ..Default::default()
+        },
+        pages,
+    }
+}
+
+fn mixed_simulation_fixture() -> RealisticFixture {
+    let kinds = [
+        ComponentKind::VSource,
+        ComponentKind::Resistor,
+        ComponentKind::Diode,
+        ComponentKind::NpnTransistor,
+        ComponentKind::Nmosfet,
+        ComponentKind::Relay,
+        ComponentKind::DcMotor,
+        ComponentKind::Capacitor,
+        ComponentKind::Battery,
+        ComponentKind::Pmosfet,
+    ];
+    let mut components = (0..120u64)
+        .map(|index| {
+            fixture_component(
+                index + 1,
+                kinds[index as usize % kinds.len()],
+                Pos2::new((index % 20) as f32 * 100.0, (index / 20) as f32 * 120.0),
+            )
+        })
+        .collect::<Vec<_>>();
+    // Give every device pin a nearby global net label. This keeps the mixed
+    // nonlinear workload electrically well-defined without long fixture wires
+    // accidentally touching unrelated pins as the grid becomes dense.
+    let devices = components.clone();
+    let mut wires = Vec::new();
+    let mut label_scopes = HashMap::new();
+    let mut next_label_id = 10_000u64;
+    let mut power_domain = 0u64;
+    for device in &devices {
+        if matches!(device.kind, ComponentKind::VSource | ComponentKind::Battery) {
+            power_domain += 1;
+        }
+        for (pin_index, pin) in component_pin_defs(device).iter().enumerate() {
+            let ground_side = matches!(pin.label, "-" | "K" | "E" | "S" | "COIL-" | "GND")
+                || pin.role == crate::model::PinRole::Ground;
+            let mut label = fixture_component(
+                next_label_id,
+                ComponentKind::NetLabel,
+                pin.pos
+                    + egui::vec2(
+                        if pin_index % 2 == 0 { -24.0 } else { 24.0 },
+                        if ground_side { 28.0 } else { -28.0 },
+                    ),
+            );
+            label.value = if ground_side {
+                "GND".to_string()
+            } else {
+                format!("PWR_{power_domain}")
+            };
+            label_scopes.insert(label.id, crate::model::NetLabelScope::Global);
+            let label_pin = component_pin_defs(&label)[0].clone();
+            wires.push(Wire::with_endpoints(
+                50_000 + wires.len() as u64,
+                vec![pin.pos, label_pin.pos],
+                crate::model::WireEndpoint::Pin(PinRef {
+                    component_id: device.id,
+                    pin_name: pin.label.to_string(),
+                }),
+                crate::model::WireEndpoint::Pin(PinRef {
+                    component_id: label.id,
+                    pin_name: label_pin.label.to_string(),
+                }),
+            ));
+            components.push(label);
+            next_label_id += 1;
+        }
+    }
+    RealisticFixture {
+        components,
+        wires,
+        annotations: NetlistAnnotations {
+            net_label_scopes: label_scopes,
+            ..Default::default()
+        },
+        pages: Vec::new(),
+    }
+}
+
+fn dense_crossing_fixture() -> RealisticFixture {
+    let mut wires = Vec::new();
+    for index in 0..80u64 {
+        let offset = 20.0 + index as f32 * 18.0;
+        wires.push(Wire::new(
+            60_000 + index,
+            vec![Pos2::new(0.0, offset), Pos2::new(1_500.0, offset)],
+        ));
+        wires.push(Wire::new(
+            61_000 + index,
+            vec![Pos2::new(offset, 0.0), Pos2::new(offset, 1_500.0)],
+        ));
+    }
+    let mut junction_endpoints = HashMap::new();
+    let mut no_connects = Vec::new();
+    for index in (0..80u64).step_by(8) {
+        let position = Pos2::new(20.0 + index as f32 * 18.0, 20.0 + index as f32 * 18.0);
+        junction_endpoints.insert(JunctionId(70_000 + index), position);
+        no_connects.push(position + egui::vec2(9.0, 0.0));
+    }
+    RealisticFixture {
+        components: Vec::new(),
+        wires,
+        annotations: NetlistAnnotations {
+            junction_endpoints,
+            no_connects,
+            ..Default::default()
+        },
+        pages: Vec::new(),
+    }
+}
+
 impl PcbSize {
     const fn counts(self) -> (usize, usize, usize, usize) {
         match self {
@@ -55,6 +463,25 @@ pub struct SchematicFixture {
     wires: Vec<Wire>,
     annotations: NetlistAnnotations,
     expected: (usize, usize, usize, usize),
+    entity_index: SchematicEntityIndex,
+    spatial_index: SchematicSpatialIndex,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConnectivityStageMetrics {
+    pub endpoint_extraction_ms: f64,
+    pub segment_spatial_index_build_ms: f64,
+    pub pin_spatial_index_build_ms: f64,
+    pub intersection_candidate_lookup_ms: f64,
+    pub exact_intersection_checks_ms: f64,
+    pub junction_application_ms: f64,
+    pub endpoint_on_segment_contacts_ms: f64,
+    pub union_find_ms: f64,
+    pub label_merge_ms: f64,
+    pub net_construction_ms: f64,
+    pub deterministic_sorting_ms: f64,
+    pub diagnostics_ms: f64,
+    pub total_ms: f64,
 }
 
 impl SchematicFixture {
@@ -110,11 +537,25 @@ impl SchematicFixture {
             no_connect_markers: Vec::new(),
         }
         .netlist_annotations();
+        let schematic_annotations = SchematicAnnotations {
+            junction_dots: annotations
+                .junction_endpoints
+                .iter()
+                .map(|(&id, &position)| JunctionDot { id, position })
+                .collect(),
+            no_connect_markers: Vec::new(),
+        };
+        let mut entity_index = SchematicEntityIndex::default();
+        entity_index.rebuild(&components, &wires, &schematic_annotations);
+        let mut spatial_index = SchematicSpatialIndex::default();
+        spatial_index.sync(&components, &wires);
         let fixture = Self {
             components,
             wires,
             annotations,
             expected,
+            entity_index,
+            spatial_index,
         };
         fixture.assert_counts();
         fixture
@@ -156,6 +597,26 @@ impl SchematicFixture {
             + result.diagnostics.len()
     }
 
+    pub fn connectivity_stage_profile(&self) -> ConnectivityStageMetrics {
+        let (_, profile) =
+            build_canonical_connectivity_profiled(&self.components, &self.wires, &self.annotations);
+        ConnectivityStageMetrics {
+            endpoint_extraction_ms: profile.endpoint_extraction_ms,
+            segment_spatial_index_build_ms: profile.segment_spatial_index_build_ms,
+            pin_spatial_index_build_ms: profile.pin_spatial_index_build_ms,
+            intersection_candidate_lookup_ms: profile.intersection_candidate_lookup_ms,
+            exact_intersection_checks_ms: profile.exact_intersection_checks_ms,
+            junction_application_ms: profile.junction_application_ms,
+            endpoint_on_segment_contacts_ms: profile.endpoint_on_segment_contacts_ms,
+            union_find_ms: profile.union_find_ms,
+            label_merge_ms: profile.label_merge_ms,
+            net_construction_ms: profile.net_construction_ms,
+            deterministic_sorting_ms: profile.deterministic_sorting_ms,
+            diagnostics_ms: profile.diagnostics_ms,
+            total_ms: profile.total_ms,
+        }
+    }
+
     pub fn erc_checksum(&self) -> usize {
         let connectivity = self.connectivity();
         crate::run_erc_with_netlist(
@@ -180,6 +641,62 @@ impl SchematicFixture {
         let miss = Pos2::new(-10_000.0, -10_000.0);
         u64::from(hit_test_component(miss, &self.components).is_some())
             + u64::from(hit_test_wire(miss, &self.wires).is_some())
+    }
+
+    pub fn component_hit_checksum(&self, index: usize) -> u64 {
+        let position = self.components[index.min(self.components.len() - 1)].pos;
+        match hit_test_component(position, &self.components) {
+            Some(crate::app::Selection::Component(id)) => id,
+            _ => 0,
+        }
+    }
+
+    pub fn component_miss_checksum(&self) -> u64 {
+        u64::from(hit_test_component(Pos2::new(-10_000.0, -10_000.0), &self.components).is_some())
+    }
+
+    pub fn pin_hit_dense_checksum(&self) -> u64 {
+        let component = &self.components[self.components.len() / 2];
+        let pins = component_pin_defs(component);
+        let Some(pin) = pins.first() else {
+            return 0;
+        };
+        self.spatial_index
+            .nearest_pin(pin.pos, 1.0)
+            .map_or(0, |pin| pin.component_id)
+    }
+
+    pub fn wire_hit_dense_checksum(&self) -> u64 {
+        let wire = &self.wires[self.wires.len() / 2];
+        let position = wire.points[0].lerp(wire.points[1], 0.5);
+        match hit_test_wire(position, &self.wires) {
+            Some(crate::app::Selection::Wire(id)) => id,
+            _ => 0,
+        }
+    }
+
+    pub fn wire_miss_checksum(&self) -> u64 {
+        u64::from(hit_test_wire(Pos2::new(-10_000.0, -10_000.0), &self.wires).is_some())
+    }
+
+    pub fn indexed_hit_test_checksum(&self) -> u64 {
+        let component = &self.components[self.components.len() / 2];
+        self.spatial_index
+            .query_components(component.pos, component.pos)
+            .into_iter()
+            .filter_map(|id| self.entity_index.component(id).map(|index| (index, id)))
+            .max_by_key(|(index, _)| *index)
+            .map_or(0, |(_, id)| id)
+    }
+
+    pub fn indexed_viewport_checksum(&self, viewport: Rect) -> usize {
+        self.spatial_index
+            .query_components(viewport.min, viewport.max)
+            .len()
+            + self
+                .spatial_index
+                .query_wires(viewport.min, viewport.max)
+                .len()
     }
 
     pub fn viewport_query_checksum(&self) -> usize {
@@ -232,7 +749,7 @@ impl SchematicFixture {
 
     /// Deterministic CPU-side work representative of a cached schematic
     /// frame: viewport culling, hit testing and visible flow phase updates.
-    pub fn frame_checksum(&self) -> usize {
+    pub fn synthetic_canvas_cpu_checksum(&self) -> usize {
         self.viewport_query_checksum()
             + self.hit_test_checksum() as usize
             + self.flow_animation_checksum(0.016) as usize
@@ -243,6 +760,164 @@ impl SchematicFixture {
         app.document.components.clone_from(&self.components);
         app.document.wires.clone_from(&self.wires);
         serde_json::to_vec(&SavedCircuit::from_app(&app)).map_or(0, |json| json.len())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffscreenFrameScenario {
+    EmptyProject,
+    SmallSchematic,
+    MediumSchematic,
+    LargeSchematic,
+    ValidationPanel,
+    Inspector,
+    SimulationAnimation,
+    PcbWorkspace,
+    BreadboardWorkspace,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OffscreenFrameMetrics {
+    pub app_update_ms: f64,
+    pub top_panel_ms: f64,
+    pub left_panel_ms: f64,
+    pub right_panel_ms: f64,
+    pub bottom_panels_ms: f64,
+    pub canvas_ms: f64,
+    pub canvas_prepare_ms: f64,
+    pub wire_paint_ms: f64,
+    pub symbol_paint_ms: f64,
+    pub overlay_and_interaction_ms: f64,
+    pub tessellation_ms: f64,
+    pub total_ms: f64,
+    pub shape_count: usize,
+    pub primitive_count: usize,
+    pub visible_component_count: usize,
+    pub visible_wire_segment_count: usize,
+}
+
+/// Runs the production `CircuitApp::update_ui` body inside an offscreen egui
+/// context, followed by the same tessellation API used by a native viewport.
+pub struct OffscreenFrameFixture {
+    app: crate::CircuitApp,
+    context: egui::Context,
+    raw_input: egui::RawInput,
+    next_time: f64,
+}
+
+impl OffscreenFrameFixture {
+    pub fn generate(scenario: OffscreenFrameScenario) -> Self {
+        let mut app = crate::CircuitApp::new();
+        app.workspace_state.bottom_dock_open = false;
+        let schematic_size = match scenario {
+            OffscreenFrameScenario::EmptyProject | OffscreenFrameScenario::PcbWorkspace => None,
+            OffscreenFrameScenario::SmallSchematic
+            | OffscreenFrameScenario::ValidationPanel
+            | OffscreenFrameScenario::Inspector
+            | OffscreenFrameScenario::SimulationAnimation
+            | OffscreenFrameScenario::BreadboardWorkspace => Some(SchematicSize::Small),
+            OffscreenFrameScenario::MediumSchematic => Some(SchematicSize::Medium),
+            OffscreenFrameScenario::LargeSchematic => Some(SchematicSize::Large),
+        };
+        if let Some(size) = schematic_size {
+            let fixture = SchematicFixture::generate(size);
+            app.document.components = fixture.components;
+            app.document.wires = fixture.wires;
+        }
+        match scenario {
+            OffscreenFrameScenario::ValidationPanel => {
+                app.workspace_state.bottom_dock_open = true;
+                app.workspace_state.bottom_dock_tab = crate::ui::bottom_dock::BottomDockTab::Erc;
+            }
+            OffscreenFrameScenario::Inspector => {
+                app.editor.selected = app
+                    .document
+                    .components
+                    .first()
+                    .map(|component| crate::app::Selection::Component(component.id));
+            }
+            OffscreenFrameScenario::SimulationAnimation => {
+                app.simulate = true;
+                app.simulation_ui.last_simulation_enabled = true;
+            }
+            OffscreenFrameScenario::PcbWorkspace => {
+                app.workspace_state.workspace = crate::ui::app::Workspace::Pcb;
+                app.document.board = PcbFixture::generate(PcbSize::Medium).board;
+            }
+            OffscreenFrameScenario::BreadboardWorkspace => {
+                app.workspace_state.workspace = crate::ui::app::Workspace::Breadboard;
+                app.breadboard_ui.open = true;
+            }
+            _ => {}
+        }
+
+        let annotations = app.document.annotations.netlist_annotations();
+        let connectivity = build_canonical_connectivity_with_annotations(
+            &app.document.components,
+            &app.document.wires,
+            &annotations,
+        );
+        let revision = app.analysis.revisions.schematic_connectivity;
+        app.analysis.cached_netlist = Some((revision, Arc::new(connectivity.netlist.clone())));
+        app.analysis.cached_connectivity = Some((revision, Arc::new(connectivity)));
+
+        let raw_input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1440.0, 900.0))),
+            ..Default::default()
+        };
+        let mut fixture = Self {
+            app,
+            context: egui::Context::default(),
+            raw_input,
+            next_time: 0.0,
+        };
+        let _ = fixture.measure_frame();
+        fixture
+    }
+
+    pub fn measure_frame(&mut self) -> OffscreenFrameMetrics {
+        self.next_time += 1.0 / 60.0;
+        let mut input = self.raw_input.clone();
+        input.time = Some(self.next_time);
+        let total_started = Instant::now();
+        let mut app_update_ms = 0.0;
+        let output = self.context.run(input, |context| {
+            let started = Instant::now();
+            self.app.update_ui(context);
+            app_update_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        });
+        let shape_count = output.shapes.len();
+        let tessellation_started = Instant::now();
+        let primitives = self
+            .context
+            .tessellate(output.shapes, output.pixels_per_point);
+        let tessellation_ms = tessellation_started.elapsed().as_secs_f64() * 1_000.0;
+        OffscreenFrameMetrics {
+            app_update_ms,
+            top_panel_ms: self.app.performance.top_panel_ms,
+            left_panel_ms: self.app.performance.left_panel_ms,
+            right_panel_ms: self.app.performance.right_panel_ms,
+            bottom_panels_ms: self.app.performance.bottom_panels_ms,
+            canvas_ms: self.app.performance.canvas_ms,
+            canvas_prepare_ms: self.app.performance.canvas_prepare_ms,
+            wire_paint_ms: self.app.performance.wire_paint_ms,
+            symbol_paint_ms: self.app.performance.symbol_paint_ms,
+            overlay_and_interaction_ms: self.app.performance.overlay_and_interaction_ms,
+            tessellation_ms,
+            total_ms: total_started.elapsed().as_secs_f64() * 1_000.0,
+            shape_count,
+            primitive_count: primitives.len(),
+            visible_component_count: self.app.performance.rendered_components,
+            visible_wire_segment_count: self.app.performance.rendered_wire_segments,
+        }
+    }
+
+    pub fn checksum(&mut self) -> usize {
+        let metrics = self.measure_frame();
+        metrics.shape_count
+            + metrics.primitive_count
+            + metrics.visible_component_count
+            + metrics.visible_wire_segment_count
     }
 }
 
@@ -385,6 +1060,95 @@ impl PcbFixture {
                 .count()
     }
 
+    pub fn footprint_hit_checksum(&self, index: usize, indexed: bool) -> u64 {
+        let footprint = &self.board.footprints[index.min(self.board.footprints.len() - 1)];
+        let point = footprint.position;
+        let found = if indexed {
+            self.board
+                .footprint_candidates(point)
+                .into_iter()
+                .filter_map(|id| self.board.footprint(id))
+                .find(|candidate| {
+                    (candidate.position.x - point.x).abs() <= 6.5
+                        && (candidate.position.y - point.y).abs() <= 3.5
+                })
+        } else {
+            self.board.footprints.iter().rev().find(|candidate| {
+                (candidate.position.x - point.x).abs() <= 6.5
+                    && (candidate.position.y - point.y).abs() <= 3.5
+            })
+        };
+        found.map_or(0, |footprint| footprint.id)
+    }
+
+    pub fn footprint_miss_checksum(&self, indexed: bool) -> usize {
+        let point = Point2::new(-1_000.0, -1_000.0);
+        if indexed {
+            self.board.footprint_candidates(point).len()
+        } else {
+            self.board
+                .footprints
+                .iter()
+                .filter(|footprint| {
+                    (footprint.position.x - point.x).abs() <= 6.5
+                        && (footprint.position.y - point.y).abs() <= 3.5
+                })
+                .count()
+        }
+    }
+
+    pub fn pad_hit_dense_checksum(&self) -> usize {
+        let footprint = &self.board.footprints[self.board.footprints.len() / 2];
+        self.board.pad_candidates(footprint.position).len()
+    }
+
+    pub fn track_hit_dense_checksum(&self, indexed: bool) -> u64 {
+        let track = &self.board.tracks[self.board.tracks.len() / 2];
+        let point = Point2::new(
+            (track.start.x + track.end.x) * 0.5,
+            (track.start.y + track.end.y) * 0.5,
+        );
+        let found = if indexed {
+            self.board
+                .track_candidates(point)
+                .into_iter()
+                .filter_map(|id| self.board.track(id))
+                .find(|candidate| {
+                    point_segment_distance(point, candidate.start, candidate.end) <= 0.5
+                })
+        } else {
+            self.board.tracks.iter().rev().find(|candidate| {
+                point_segment_distance(point, candidate.start, candidate.end) <= 0.5
+            })
+        };
+        found.map_or(0, |track| track.id)
+    }
+
+    pub fn track_miss_checksum(&self, indexed: bool) -> usize {
+        let point = Point2::new(-1_000.0, -1_000.0);
+        if indexed {
+            self.board.track_candidates(point).len()
+        } else {
+            self.board
+                .tracks
+                .iter()
+                .filter(|track| point_segment_distance(point, track.start, track.end) <= 0.5)
+                .count()
+        }
+    }
+
+    pub fn viewport_checksum(&self, variant: usize) -> usize {
+        let (min, max) = match variant {
+            0 => (Point2::new(-1_000.0, -1_000.0), Point2::new(-900.0, -900.0)),
+            1 => (Point2::new(0.0, 0.0), Point2::new(20.0, 20.0)),
+            2 => (Point2::new(0.0, 0.0), Point2::new(160.0, 160.0)),
+            _ => (Point2::new(0.0, 0.0), Point2::new(500.0, 500.0)),
+        };
+        self.board.footprints_in_rect(min, max).len()
+            + self.board.track_candidates_in_bounds(min, max).len()
+            + self.board.via_candidates_in_bounds(min, max).len()
+    }
+
     pub fn ratsnest_checksum(&self) -> usize {
         self.board.ratsnest_edges(&self.nets).len()
     }
@@ -421,6 +1185,142 @@ fn point_segment_distance(point: Point2, start: Point2, end: Point2) -> f32 {
 pub struct HistoryFixture {
     before: CircuitSnapshot,
     after: CircuitSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandHistoryScenario {
+    MoveOneComponent,
+    MoveHundredComponents,
+    RotateComponent,
+    EditProperty,
+    AddAndSplitWire,
+    RoutePcbTrack,
+    AddVia,
+    MoveFootprint,
+}
+
+pub struct CommandHistoryFixture {
+    app: crate::CircuitApp,
+    scenario: CommandHistoryScenario,
+}
+
+impl CommandHistoryFixture {
+    pub fn generate(scenario: CommandHistoryScenario) -> Self {
+        let schematic = SchematicFixture::generate(SchematicSize::Large);
+        let mut app = crate::CircuitApp::new();
+        app.document.components = schematic.components;
+        app.document.wires = schematic.wires;
+        app.document.next_id = app
+            .document
+            .components
+            .iter()
+            .map(|component| component.id)
+            .chain(app.document.wires.iter().map(|wire| wire.id))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        app.document.board = PcbFixture::generate(PcbSize::Small).board;
+        app.analysis.schematic_entity_revision = u64::MAX;
+        app.analysis.schematic_spatial_revision = u64::MAX;
+        app.analysis.attachment_revision = u64::MAX;
+        Self { app, scenario }
+    }
+
+    pub fn command_undo_redo_checksum(&mut self) -> usize {
+        use crate::commands::EditorCommand;
+        use crate::commands::component::ComponentCommand;
+        use crate::commands::pcb::PcbCommand;
+        use crate::commands::properties::PropertiesCommand;
+        use crate::commands::selection::SelectionCommand;
+        use crate::commands::wiring::WiringCommand;
+
+        let command = match self.scenario {
+            CommandHistoryScenario::MoveOneComponent => {
+                EditorCommand::Component(ComponentCommand::Move {
+                    component_ids: [1].into_iter().collect(),
+                    delta: egui::vec2(20.0, 0.0),
+                })
+            }
+            CommandHistoryScenario::MoveHundredComponents => {
+                EditorCommand::Component(ComponentCommand::Move {
+                    component_ids: (1..=100).collect(),
+                    delta: egui::vec2(20.0, 20.0),
+                })
+            }
+            CommandHistoryScenario::RotateComponent => {
+                self.app.editor.selected = Some(crate::app::Selection::Component(1));
+                EditorCommand::Selection(SelectionCommand::Rotate)
+            }
+            CommandHistoryScenario::EditProperty => {
+                EditorCommand::Properties(PropertiesCommand::SetComponentValue {
+                    component_id: 1,
+                    value: "2.2k".to_string(),
+                })
+            }
+            CommandHistoryScenario::AddAndSplitWire => {
+                let first = &self.app.document.wires[0];
+                let midpoint = first.points[0].lerp(first.points[1], 0.5);
+                EditorCommand::Wiring(WiringCommand::Add {
+                    points: vec![midpoint, midpoint + egui::vec2(0.0, 40.0)],
+                })
+            }
+            CommandHistoryScenario::RoutePcbTrack => {
+                let id = self
+                    .app
+                    .document
+                    .board
+                    .tracks
+                    .iter()
+                    .map(|track| track.id)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                EditorCommand::Pcb(PcbCommand::AddTrack(TrackSegment {
+                    id,
+                    net_id: 1,
+                    layer: BoardLayer::FrontCopper,
+                    start: Point2::new(1.0, 1.0),
+                    end: Point2::new(8.0, 1.0),
+                    width_mm: 0.25,
+                }))
+            }
+            CommandHistoryScenario::AddVia => {
+                let id = self
+                    .app
+                    .document
+                    .board
+                    .vias
+                    .iter()
+                    .map(|via| via.id)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                EditorCommand::Pcb(PcbCommand::AddVia(Via {
+                    id,
+                    net_id: 1,
+                    position: Point2::new(4.0, 4.0),
+                    diameter_mm: 0.6,
+                    drill_mm: 0.3,
+                }))
+            }
+            CommandHistoryScenario::MoveFootprint => {
+                let footprint = &self.app.document.board.footprints[0];
+                EditorCommand::Pcb(PcbCommand::MoveFootprint {
+                    footprint_id: footprint.id,
+                    position: Point2::new(footprint.position.x + 1.0, footprint.position.y),
+                })
+            }
+        };
+        self.app.execute_editor_command(command);
+        self.app.undo();
+        self.app.redo();
+        let checksum = self.app.document.components.len()
+            + self.app.document.wires.len()
+            + self.app.document.board.tracks.len()
+            + self.app.document.board.vias.len();
+        self.app.undo();
+        checksum
+    }
 }
 
 impl HistoryFixture {
@@ -478,6 +1378,43 @@ mod tests {
         }
         for size in [PcbSize::Small, PcbSize::Medium] {
             PcbFixture::generate(size).assert_counts();
+        }
+    }
+
+    #[test]
+    fn realistic_fixtures_build_connectivity_erc_and_mna_without_panics() {
+        for kind in [
+            RealisticFixtureKind::DenseEsp32I2c,
+            RealisticFixtureKind::BranchHeavyPower,
+            RealisticFixtureKind::MultiPage,
+            RealisticFixtureKind::MixedSimulation,
+            RealisticFixtureKind::DenseCrossing,
+        ] {
+            let fixture = RealisticFixture::generate(kind);
+            assert!(fixture.connectivity_checksum() > 0, "{kind:?}");
+            let _ = fixture.erc_checksum();
+            assert!(fixture.mna_checksum() > 0, "{kind:?}");
+        }
+        let mixed = RealisticFixture::generate(RealisticFixtureKind::MixedSimulation);
+        assert!(mixed.mna_stage_profile().total_ms > 0.0);
+    }
+
+    #[test]
+    fn real_command_history_scenarios_round_trip_through_undo_and_redo() {
+        for scenario in [
+            CommandHistoryScenario::MoveOneComponent,
+            CommandHistoryScenario::MoveHundredComponents,
+            CommandHistoryScenario::RotateComponent,
+            CommandHistoryScenario::EditProperty,
+            CommandHistoryScenario::AddAndSplitWire,
+            CommandHistoryScenario::RoutePcbTrack,
+            CommandHistoryScenario::AddVia,
+            CommandHistoryScenario::MoveFootprint,
+        ] {
+            assert!(
+                CommandHistoryFixture::generate(scenario).command_undo_redo_checksum() > 0,
+                "{scenario:?}"
+            );
         }
     }
 }

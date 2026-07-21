@@ -13,19 +13,39 @@ impl crate::CircuitApp {
             );
             self.analysis.schematic_entity_revision = self.analysis.revisions.schematic_geometry;
         }
+        if self.analysis.schematic_spatial_revision != self.analysis.revisions.schematic_geometry {
+            self.analysis
+                .schematic_spatial_index
+                .sync(&self.document.components, &self.document.wires);
+            self.analysis.schematic_spatial_revision = self.analysis.revisions.schematic_geometry;
+        }
+        if self.analysis.attachment_revision != self.analysis.revisions.schematic_geometry {
+            self.analysis
+                .attachment_index
+                .rebuild(&self.document.components, &self.document.wires);
+            self.analysis.attachment_revision = self.analysis.revisions.schematic_geometry;
+        }
         let description = command.description();
         let merge_key = command.merge_key();
         let pcb_local_impact = command.pcb_local_analysis_impact(&self.document.board);
         let board_capture = command.pcb_delta_scope(&self.document.board).map(|scope| {
             crate::editor::delta::DocumentDelta::capture_board(&self.document.board, scope)
         });
-        let snapshot = board_capture.is_none().then(|| self.snapshot());
+        let schematic_capture = if board_capture.is_none() {
+            self.schematic_delta_capture(&command)
+        } else {
+            None
+        };
+        let snapshot =
+            (board_capture.is_none() && schematic_capture.is_none()).then(|| self.snapshot());
         let mut allocator = IdAllocator::new(self.document.next_id, self.document.counters.clone());
         let outcome = command.apply(&mut CommandContext::new(
             &mut self.document,
             &mut self.editor.document,
             &mut allocator,
             &mut self.analysis.schematic_entity_index,
+            &mut self.analysis.attachment_index,
+            &mut self.analysis.schematic_spatial_index,
         ));
         allocator.commit(&mut self.document.next_id, &mut self.document.counters);
         let changes = outcome.changes;
@@ -35,6 +55,8 @@ impl crate::CircuitApp {
                     capture,
                     &self.document.board,
                 )
+            } else if let Some(capture) = schematic_capture {
+                crate::editor::delta::DocumentDelta::from_schematic_capture(capture, &self.document)
             } else if let Some(snapshot) = snapshot.as_ref() {
                 crate::editor::delta::DocumentDelta::between(snapshot, &self.snapshot())
             } else {
@@ -53,6 +75,57 @@ impl crate::CircuitApp {
         changes
     }
 
+    fn schematic_delta_capture(
+        &self,
+        command: &EditorCommand,
+    ) -> Option<crate::editor::delta::SchematicDeltaCapture> {
+        use crate::commands::component::ComponentCommand;
+        use crate::commands::properties::PropertiesCommand;
+        use crate::commands::selection::SelectionCommand;
+        use crate::commands::wiring::WiringCommand;
+        use std::collections::HashSet;
+
+        let (component_ids, wire_ids) = match command {
+            EditorCommand::Component(ComponentCommand::Move { component_ids, .. }) => {
+                let wire_ids = component_ids
+                    .iter()
+                    .flat_map(|id| self.analysis.attachment_index.attached_wires(*id))
+                    .copied()
+                    .collect();
+                (component_ids.clone(), wire_ids)
+            }
+            EditorCommand::Properties(
+                PropertiesCommand::SetComponentValue { component_id, .. }
+                | PropertiesCommand::SetComponentProperties { component_id, .. }
+                | PropertiesCommand::ToggleSwitch { component_id },
+            ) => (HashSet::from([*component_id]), HashSet::new()),
+            EditorCommand::Selection(SelectionCommand::Rotate) => {
+                let crate::app::Selection::Component(component_id) = self.editor.selected? else {
+                    return None;
+                };
+                let wire_ids = self
+                    .analysis
+                    .attachment_index
+                    .attached_wires(component_id)
+                    .iter()
+                    .copied()
+                    .collect();
+                (HashSet::from([component_id]), wire_ids)
+            }
+            EditorCommand::Wiring(WiringCommand::MoveControlPoint { wire_id, .. }) => {
+                (HashSet::new(), HashSet::from([*wire_id]))
+            }
+            _ => return None,
+        };
+        Some(
+            crate::editor::delta::DocumentDelta::capture_schematic_entities(
+                &self.document,
+                component_ids,
+                wire_ids,
+            ),
+        )
+    }
+
     pub(crate) fn execute_continuous_editor_command(
         &mut self,
         command: EditorCommand,
@@ -66,16 +139,32 @@ impl crate::CircuitApp {
             );
             self.analysis.schematic_entity_revision = self.analysis.revisions.schematic_geometry;
         }
+        if self.analysis.schematic_spatial_revision != self.analysis.revisions.schematic_geometry {
+            self.analysis
+                .schematic_spatial_index
+                .sync(&self.document.components, &self.document.wires);
+            self.analysis.schematic_spatial_revision = self.analysis.revisions.schematic_geometry;
+        }
+        if self.analysis.attachment_revision != self.analysis.revisions.schematic_geometry {
+            self.analysis
+                .attachment_index
+                .rebuild(&self.document.components, &self.document.wires);
+            self.analysis.attachment_revision = self.analysis.revisions.schematic_geometry;
+        }
         let mut allocator = IdAllocator::new(self.document.next_id, self.document.counters.clone());
         let outcome = command.apply(&mut CommandContext::new(
             &mut self.document,
             &mut self.editor.document,
             &mut allocator,
             &mut self.analysis.schematic_entity_index,
+            &mut self.analysis.attachment_index,
+            &mut self.analysis.schematic_spatial_index,
         ));
         allocator.commit(&mut self.document.next_id, &mut self.document.counters);
         let changes = outcome.changes;
-        self.dispatch_changes(changes);
+        // A drag is a rollback-capable history transaction. Geometry changes
+        // immediately for visual feedback, but persistent revisions and heavy
+        // connectivity/ERC/simulation invalidation happen once on release.
         self.apply_command_outcome(outcome);
         changes
     }
@@ -186,6 +275,76 @@ mod tests {
         assert_eq!(app.editor.history.undo.len(), 1);
         assert!(app.analysis.circuit_revision > revision);
         assert_eq!(changes, ChangeSet::schematic());
+    }
+
+    #[test]
+    fn drag_preview_defers_analysis_revision_until_release() {
+        let mut app = crate::CircuitApp::new();
+        app.execute_editor_command(EditorCommand::Component(ComponentCommand::Place {
+            kind: ComponentKind::Resistor,
+            position: Pos2::new(100.0, 100.0),
+            value: "10k".to_string(),
+        }));
+        let id = app.components[0].id;
+        let revision = app.analysis.revisions;
+        app.begin_history_transaction("Move component", None);
+        let changes = app.execute_continuous_editor_command(EditorCommand::Component(
+            ComponentCommand::Move {
+                component_ids: [id].into_iter().collect(),
+                delta: egui::vec2(20.0, 0.0),
+            },
+        ));
+        assert!(changes.persistence_changed);
+        assert_eq!(app.analysis.revisions, revision);
+        assert_eq!(app.components[0].pos, Pos2::new(120.0, 100.0));
+
+        app.finish_history_transaction();
+        app.dispatch_changes(changes);
+        assert!(app.analysis.revisions.persistence > revision.persistence);
+        assert_eq!(app.editor.history.undo.len(), 2);
+    }
+
+    #[test]
+    fn schematic_indices_remain_consistent_across_undo_redo_and_reset() {
+        let mut app = crate::CircuitApp::new();
+        for x in [40.0, 120.0] {
+            app.execute_editor_command(EditorCommand::Component(ComponentCommand::Place {
+                kind: ComponentKind::Resistor,
+                position: Pos2::new(x, 80.0),
+                value: "1k".to_string(),
+            }));
+        }
+        assert!(app.analysis.schematic_entity_index.is_consistent(
+            &app.document.components,
+            &app.document.wires,
+            &app.document.annotations,
+        ));
+        assert!(
+            app.analysis
+                .attachment_index
+                .is_consistent(&app.document.components, &app.document.wires)
+        );
+
+        app.undo();
+        assert!(app.analysis.schematic_entity_index.is_consistent(
+            &app.document.components,
+            &app.document.wires,
+            &app.document.annotations,
+        ));
+        app.redo();
+        assert!(app.analysis.schematic_entity_index.is_consistent(
+            &app.document.components,
+            &app.document.wires,
+            &app.document.annotations,
+        ));
+        app.execute_editor_command(EditorCommand::Document(
+            crate::commands::document::DocumentCommand::Reset,
+        ));
+        assert!(app.analysis.schematic_entity_index.is_consistent(
+            &app.document.components,
+            &app.document.wires,
+            &app.document.annotations,
+        ));
     }
 
     #[test]

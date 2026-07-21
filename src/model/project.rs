@@ -4,7 +4,7 @@
 //! selections, tools, dialogs, caches, and simulation results. Persistence
 //! continues through the schema-versioned `SavedCircuit` compatibility DTO.
 
-use super::{Component, Counters, SchematicAnnotations, Wire, component_pin_defs};
+use super::{Component, Counters, PinRef, SchematicAnnotations, Wire, component_pin_defs};
 use super::{JunctionId, WireEndpoint};
 use crate::pcb::board::Board;
 use std::collections::HashMap;
@@ -18,7 +18,6 @@ pub(crate) struct SchematicEntityIndex {
     component_by_id: HashMap<u64, usize>,
     wire_by_id: HashMap<u64, usize>,
     junction_by_id: HashMap<JunctionId, usize>,
-    attached_wires_by_component: HashMap<u64, Vec<u64>>,
 }
 
 impl SchematicEntityIndex {
@@ -44,66 +43,41 @@ impl SchematicEntityIndex {
             .enumerate()
             .map(|(index, junction)| (junction.id, index))
             .collect();
-        self.attached_wires_by_component.clear();
-        let mut pin_components = HashMap::<(i32, i32), Vec<(u64, egui::Pos2)>>::new();
-        for component in components {
-            for pin in component_pin_defs(component) {
-                pin_components
-                    .entry(pin_cell(pin.pos))
-                    .or_default()
-                    .push((component.id, pin.pos));
-            }
-        }
-        for wire in wires {
-            for endpoint in [&wire.start, &wire.end] {
-                if let WireEndpoint::Pin(pin) = endpoint {
-                    self.attached_wires_by_component
-                        .entry(pin.component_id)
-                        .or_default()
-                        .push(wire.id);
-                }
-            }
-            for position in wire.points.first().into_iter().chain(wire.points.last()) {
-                let origin = pin_cell(*position);
-                for x in (origin.0 - 1)..=(origin.0 + 1) {
-                    for y in (origin.1 - 1)..=(origin.1 + 1) {
-                        for &(component_id, pin_position) in
-                            pin_components.get(&(x, y)).into_iter().flatten()
-                        {
-                            if position.distance(pin_position) <= 20.0 {
-                                self.attached_wires_by_component
-                                    .entry(component_id)
-                                    .or_default()
-                                    .push(wire.id);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        for wire_ids in self.attached_wires_by_component.values_mut() {
-            wire_ids.sort_unstable();
-            wire_ids.dedup();
-        }
     }
 
     pub(crate) fn component(&self, id: u64) -> Option<usize> {
         self.component_by_id.get(&id).copied()
     }
 
+    pub(crate) fn insert_component(&mut self, id: u64, index: usize) {
+        self.component_by_id.insert(id, index);
+    }
+
+    pub(crate) fn remove_component(&mut self, id: u64, moved: Option<(u64, usize)>) {
+        self.component_by_id.remove(&id);
+        if let Some((moved_id, index)) = moved {
+            self.component_by_id.insert(moved_id, index);
+        }
+    }
+
     pub(crate) fn wire(&self, id: u64) -> Option<usize> {
         self.wire_by_id.get(&id).copied()
+    }
+
+    pub(crate) fn insert_wire(&mut self, id: u64, index: usize) {
+        self.wire_by_id.insert(id, index);
+    }
+
+    pub(crate) fn remove_wire(&mut self, id: u64, moved: Option<(u64, usize)>) {
+        self.wire_by_id.remove(&id);
+        if let Some((moved_id, index)) = moved {
+            self.wire_by_id.insert(moved_id, index);
+        }
     }
 
     #[allow(dead_code)] // Used by the junction edit path as that UI is completed.
     pub(crate) fn junction(&self, id: JunctionId) -> Option<usize> {
         self.junction_by_id.get(&id).copied()
-    }
-
-    pub(crate) fn attached_wires(&self, component_id: u64) -> &[u64] {
-        self.attached_wires_by_component
-            .get(&component_id)
-            .map_or(&[], Vec::as_slice)
     }
 
     #[cfg(test)]
@@ -118,7 +92,177 @@ impl SchematicEntityIndex {
         self.component_by_id == expected.component_by_id
             && self.wire_by_id == expected.wire_by_id
             && self.junction_by_id == expected.junction_by_id
-            && self.attached_wires_by_component == expected.attached_wires_by_component
+    }
+}
+
+/// Runtime attachment graph used by move/rotate and endpoint editing. It is
+/// deliberately separate from electrical connectivity: it answers which
+/// saved wire endpoints follow which physical symbol pins.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AttachmentIndex {
+    wires_by_component: HashMap<u64, Vec<u64>>,
+    wires_by_pin: HashMap<PinRef, Vec<u64>>,
+    endpoint_pins_by_wire: HashMap<u64, Vec<PinRef>>,
+}
+
+impl AttachmentIndex {
+    pub(crate) fn rebuild(&mut self, components: &[Component], wires: &[Wire]) {
+        self.wires_by_component.clear();
+        self.wires_by_pin.clear();
+        self.endpoint_pins_by_wire.clear();
+        let pin_grid = pin_grid(components);
+        for wire in wires {
+            self.add_wire_with_grid(wire, &pin_grid);
+        }
+    }
+
+    fn add_wire_with_grid(
+        &mut self,
+        wire: &Wire,
+        pin_grid: &HashMap<(i32, i32), Vec<(PinRef, egui::Pos2)>>,
+    ) {
+        let endpoints = [
+            (&wire.start, wire.points.first().copied()),
+            (&wire.end, wire.points.last().copied()),
+        ];
+        let mut pins = Vec::new();
+        for (endpoint, position) in endpoints {
+            let pin = match endpoint {
+                WireEndpoint::Pin(pin) => Some(pin.clone()),
+                _ => position.and_then(|position| nearest_pin(position, pin_grid, 20.0)),
+            };
+            let Some(pin) = pin else {
+                continue;
+            };
+            self.wires_by_component
+                .entry(pin.component_id)
+                .or_default()
+                .push(wire.id);
+            self.wires_by_pin
+                .entry(pin.clone())
+                .or_default()
+                .push(wire.id);
+            pins.push(pin);
+        }
+        pins.sort_by(|left, right| {
+            (left.component_id, left.pin_name.as_str())
+                .cmp(&(right.component_id, right.pin_name.as_str()))
+        });
+        pins.dedup();
+        if !pins.is_empty() {
+            self.endpoint_pins_by_wire.insert(wire.id, pins);
+        }
+        dedup_map_values(&mut self.wires_by_component);
+        dedup_map_values(&mut self.wires_by_pin);
+    }
+
+    pub(crate) fn add_wire(&mut self, wire: &Wire, components: &[Component]) {
+        self.remove_wire(wire.id);
+        self.add_wire_with_grid(wire, &pin_grid(components));
+    }
+
+    pub(crate) fn remove_wire(&mut self, wire_id: u64) {
+        self.endpoint_pins_by_wire.remove(&wire_id);
+        self.wires_by_component.retain(|_, wires| {
+            wires.retain(|id| *id != wire_id);
+            !wires.is_empty()
+        });
+        self.wires_by_pin.retain(|_, wires| {
+            wires.retain(|id| *id != wire_id);
+            !wires.is_empty()
+        });
+    }
+
+    pub(crate) fn remove_component(&mut self, component_id: u64) {
+        let wire_ids = self
+            .wires_by_component
+            .remove(&component_id)
+            .unwrap_or_default();
+        self.wires_by_pin
+            .retain(|pin, _| pin.component_id != component_id);
+        for wire_id in wire_ids {
+            let Some(pins) = self.endpoint_pins_by_wire.get_mut(&wire_id) else {
+                continue;
+            };
+            pins.retain(|pin| pin.component_id != component_id);
+            if pins.is_empty() {
+                self.endpoint_pins_by_wire.remove(&wire_id);
+            }
+        }
+    }
+
+    pub(crate) fn attached_wires(&self, component_id: u64) -> &[u64] {
+        self.wires_by_component
+            .get(&component_id)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    #[allow(dead_code)] // Exposed for pin-level inspection and endpoint diagnostics.
+    pub(crate) fn attached_wires_for_pin(&self, pin: &PinRef) -> &[u64] {
+        self.wires_by_pin.get(pin).map_or(&[], Vec::as_slice)
+    }
+
+    #[allow(dead_code)] // Exposed for pin-level inspection and endpoint diagnostics.
+    pub(crate) fn endpoint_pins(&self, wire_id: u64) -> &[PinRef] {
+        self.endpoint_pins_by_wire
+            .get(&wire_id)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_consistent(&self, components: &[Component], wires: &[Wire]) -> bool {
+        let mut expected = Self::default();
+        expected.rebuild(components, wires);
+        self.wires_by_component == expected.wires_by_component
+            && self.wires_by_pin == expected.wires_by_pin
+            && self.endpoint_pins_by_wire == expected.endpoint_pins_by_wire
+    }
+}
+
+fn pin_grid(components: &[Component]) -> HashMap<(i32, i32), Vec<(PinRef, egui::Pos2)>> {
+    let mut grid = HashMap::new();
+    for component in components {
+        for pin in component_pin_defs(component) {
+            grid.entry(pin_cell(pin.pos))
+                .or_insert_with(Vec::new)
+                .push((
+                    PinRef {
+                        component_id: component.id,
+                        pin_name: pin.label.to_string(),
+                    },
+                    pin.pos,
+                ));
+        }
+    }
+    grid
+}
+
+fn nearest_pin(
+    position: egui::Pos2,
+    grid: &HashMap<(i32, i32), Vec<(PinRef, egui::Pos2)>>,
+    tolerance: f32,
+) -> Option<PinRef> {
+    let origin = pin_cell(position);
+    let mut best: Option<(&PinRef, f32)> = None;
+    for x in (origin.0 - 1)..=(origin.0 + 1) {
+        for y in (origin.1 - 1)..=(origin.1 + 1) {
+            for (pin, pin_position) in grid.get(&(x, y)).into_iter().flatten() {
+                let distance = position.distance(*pin_position);
+                if distance <= tolerance
+                    && best.is_none_or(|(_, best_distance)| distance < best_distance)
+                {
+                    best = Some((pin, distance));
+                }
+            }
+        }
+    }
+    best.map(|(pin, _)| pin.clone())
+}
+
+fn dedup_map_values<K: std::hash::Hash + Eq>(map: &mut HashMap<K, Vec<u64>>) {
+    for values in map.values_mut() {
+        values.sort_unstable();
+        values.dedup();
     }
 }
 
@@ -231,18 +375,30 @@ mod tests {
         assert_eq!(index.component(2), Some(1));
         assert_eq!(index.wire(10), Some(0));
         assert_eq!(index.junction(JunctionId(30)), Some(0));
-        assert_eq!(index.attached_wires(1), &[10]);
+        let mut attachments = AttachmentIndex::default();
+        attachments.rebuild(&components, &wires);
+        assert_eq!(attachments.attached_wires(1), &[10]);
+        assert_eq!(attachments.endpoint_pins(10).len(), 2);
+        assert_eq!(
+            attachments.attached_wires_for_pin(&PinRef {
+                component_id: 1,
+                pin_name: "A".to_string(),
+            }),
+            &[10]
+        );
 
         components.swap(0, 2);
         components.remove(1);
         components.push(component(4));
-        wires.insert(0, Wire::new(11, vec![Pos2::ZERO, Pos2::X]));
+        wires.insert(0, Wire::new(11, vec![Pos2::ZERO, Pos2::new(1.0, 0.0)]));
         annotations.junction_dots.push(JunctionDot {
             id: JunctionId(31),
-            position: Pos2::X,
+            position: Pos2::new(1.0, 0.0),
         });
         index.rebuild(&components, &wires, &annotations);
+        attachments.rebuild(&components, &wires);
         assert!(index.is_consistent(&components, &wires, &annotations));
+        assert!(attachments.is_consistent(&components, &wires));
         assert_eq!(index.component(3), Some(0));
         assert_eq!(index.component(4), Some(2));
         assert_eq!(index.wire(10), Some(1));

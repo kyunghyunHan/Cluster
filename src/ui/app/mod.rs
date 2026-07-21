@@ -27,10 +27,7 @@ use crate::ui::canvas::current_flow::{
     CurrentFlowCache, CurrentFlowSettings, FlowCacheKey, FlowRenderInput, render_current_flow,
 };
 use crate::ui::canvas::interaction::{SmartWireTone, assess_pin_pair};
-use crate::ui::canvas::{
-    CanvasView, draw_grid, draw_probe_card, hit_test, hit_test_component, hit_test_wire,
-    hit_test_wire_control_point, selection_summary,
-};
+use crate::ui::canvas::{CanvasView, draw_grid, draw_probe_card, selection_summary};
 use crate::ui::canvas_overlay::draw_simulation_legend;
 use crate::ui::left_palette::{
     PaletteAction, PaletteTemplate, render_parts_palette, selected_part,
@@ -278,6 +275,8 @@ pub(crate) struct AnalysisState {
     pub(crate) current_flow_cache: CurrentFlowCache,
     pub(crate) schematic_entity_index: crate::model::SchematicEntityIndex,
     pub(crate) schematic_entity_revision: u64,
+    pub(crate) attachment_index: crate::model::AttachmentIndex,
+    pub(crate) attachment_revision: u64,
     pub(crate) schematic_spatial_index: crate::ui::canvas::spatial_index::SchematicSpatialIndex,
     pub(crate) schematic_spatial_revision: u64,
     pub(crate) pcb_cad: Option<crate::model::cad::CadProjectData>,
@@ -321,6 +320,8 @@ impl Default for AnalysisState {
             current_flow_cache: CurrentFlowCache::default(),
             schematic_entity_index: Default::default(),
             schematic_entity_revision: 0,
+            attachment_index: Default::default(),
+            attachment_revision: 0,
             schematic_spatial_index: Default::default(),
             schematic_spatial_revision: 0,
             pcb_cad: None,
@@ -416,6 +417,15 @@ impl MetricSummary {
 #[derive(Debug, Default)]
 pub(crate) struct PerformanceStats {
     pub(crate) frame: MetricSummary,
+    pub(crate) top_panel_ms: f64,
+    pub(crate) left_panel_ms: f64,
+    pub(crate) right_panel_ms: f64,
+    pub(crate) bottom_panels_ms: f64,
+    pub(crate) canvas_ms: f64,
+    pub(crate) canvas_prepare_ms: f64,
+    pub(crate) wire_paint_ms: f64,
+    pub(crate) symbol_paint_ms: f64,
+    pub(crate) overlay_and_interaction_ms: f64,
     pub(crate) mna_ms: f64,
     pub(crate) erc_ms: f64,
     pub(crate) netlist_ms: f64,
@@ -556,13 +566,111 @@ impl CircuitApp {
         self.pan = canvas_center.to_vec2() - world_center * self.zoom;
     }
 
+    fn sync_schematic_indices(&mut self) {
+        if self.analysis.schematic_entity_revision != self.analysis.revisions.schematic_geometry {
+            self.analysis.schematic_entity_index.rebuild(
+                &self.document.components,
+                &self.document.wires,
+                &self.document.annotations,
+            );
+            self.analysis.schematic_entity_revision = self.analysis.revisions.schematic_geometry;
+        }
+        if self.analysis.attachment_revision != self.analysis.revisions.schematic_geometry {
+            self.analysis
+                .attachment_index
+                .rebuild(&self.document.components, &self.document.wires);
+            self.analysis.attachment_revision = self.analysis.revisions.schematic_geometry;
+        }
+        if self.analysis.schematic_spatial_revision != self.analysis.revisions.schematic_geometry {
+            self.analysis
+                .schematic_spatial_index
+                .sync(&self.document.components, &self.document.wires);
+            self.analysis.schematic_spatial_revision = self.analysis.revisions.schematic_geometry;
+        }
+    }
+
+    fn component_by_id(&self, id: u64) -> Option<&Component> {
+        self.analysis
+            .schematic_entity_index
+            .component(id)
+            .and_then(|index| self.document.components.get(index))
+            .filter(|component| component.id == id)
+    }
+
+    fn wire_by_id(&self, id: u64) -> Option<&Wire> {
+        self.analysis
+            .schematic_entity_index
+            .wire(id)
+            .and_then(|index| self.document.wires.get(index))
+            .filter(|wire| wire.id == id)
+    }
+
+    fn indexed_component_hit(&self, position: Pos2) -> Option<Selection> {
+        let candidates = self
+            .analysis
+            .schematic_spatial_index
+            .query_components(position, position);
+        candidates
+            .into_iter()
+            .filter_map(|id| {
+                let index = self.analysis.schematic_entity_index.component(id)?;
+                component_bounds(self.document.components.get(index)?)
+                    .contains(position)
+                    .then_some((index, id))
+            })
+            .max_by_key(|(index, _)| *index)
+            .map(|(_, id)| Selection::Component(id))
+    }
+
+    fn indexed_wire_hit(&self, position: Pos2) -> Option<Selection> {
+        let radius = Vec2::splat(10.0);
+        self.analysis
+            .schematic_spatial_index
+            .query_wires(position - radius, position + radius)
+            .into_iter()
+            .filter_map(|id| {
+                let index = self.analysis.schematic_entity_index.wire(id)?;
+                let wire = self.document.wires.get(index)?;
+                wire.points
+                    .windows(2)
+                    .any(|segment| distance_to_segment(position, segment[0], segment[1]) <= 10.0)
+                    .then_some((index, id))
+            })
+            .max_by_key(|(index, _)| *index)
+            .map(|(_, id)| Selection::Wire(id))
+    }
+
+    fn indexed_hit(&self, position: Pos2) -> Option<Selection> {
+        self.indexed_component_hit(position)
+            .or_else(|| self.indexed_wire_hit(position))
+    }
+
+    fn indexed_wire_control_point_hit(&self, position: Pos2) -> Option<(u64, usize)> {
+        let radius = Vec2::splat(14.0);
+        self.analysis
+            .schematic_spatial_index
+            .query_wires(position - radius, position + radius)
+            .into_iter()
+            .filter_map(|id| {
+                let wire_index = self.analysis.schematic_entity_index.wire(id)?;
+                let wire = self.document.wires.get(wire_index)?;
+                let point_index = wire
+                    .points
+                    .iter()
+                    .position(|point| position.distance(*point) <= 14.0)?;
+                Some((wire_index, id, point_index))
+            })
+            .max_by_key(|(wire_index, _, _)| *wire_index)
+            .map(|(_, id, point_index)| (id, point_index))
+    }
+
     fn handle_validation_panel_action(&mut self, action: ValidationPanelAction) {
         match action {
             ValidationPanelAction::SelectComponent(id) => {
                 self.editor.selected = Some(Selection::Component(id));
                 self.highlighted_net_wires.clear();
                 self.hovered_net_wire = None;
-                if let Some(comp) = self.components.iter().find(|component| component.id == id) {
+                if let Some(comp) = self.component_by_id(id) {
                     let canvas_center = self.canvas.rect.center();
                     self.pan = canvas_center.to_vec2() - comp.pos.to_vec2() * self.zoom;
                 }
@@ -571,7 +679,7 @@ impl CircuitApp {
                 self.editor.selected = Some(Selection::Wire(id));
                 self.hovered_net_wire = Some(id);
                 self.highlighted_net_wires = self.same_net_wires(id);
-                if let Some(wire) = self.wires.iter().find(|wire| wire.id == id) {
+                if let Some(wire) = self.wire_by_id(id) {
                     let canvas_center = self.canvas.rect.center();
                     self.pan = canvas_center.to_vec2() - wire_midpoint(wire).to_vec2() * self.zoom;
                 }
@@ -589,6 +697,16 @@ impl CircuitApp {
     /// performance and regression tests.
     pub(crate) fn update_ui(&mut self, ctx: &egui::Context) {
         let frame_started = std::time::Instant::now();
+        self.performance.top_panel_ms = 0.0;
+        self.performance.left_panel_ms = 0.0;
+        self.performance.right_panel_ms = 0.0;
+        self.performance.bottom_panels_ms = 0.0;
+        self.performance.canvas_ms = 0.0;
+        self.performance.canvas_prepare_ms = 0.0;
+        self.performance.wire_paint_ms = 0.0;
+        self.performance.symbol_paint_ms = 0.0;
+        self.performance.overlay_and_interaction_ms = 0.0;
+        self.sync_schematic_indices();
         self.poll_analysis_worker();
         if self.automated_capture_path.is_some() && !self.automated_capture_requested {
             self.automated_capture_requested = true;
@@ -647,6 +765,7 @@ impl CircuitApp {
         let inspector_netlist = self.current_netlist();
         let pcb_summary = self.pcb_dock_summary();
 
+        let panel_started = std::time::Instant::now();
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             let toolbar_action = render_top_toolbar(
                 ui,
@@ -721,7 +840,9 @@ impl CircuitApp {
             }
             ui.add_space(4.0);
         });
+        self.performance.top_panel_ms = panel_started.elapsed().as_secs_f64() * 1_000.0;
 
+        let panel_started = std::time::Instant::now();
         egui::SidePanel::left("palette")
             .default_width(180.0)
             .width_range(160.0..=260.0)
@@ -1069,7 +1190,9 @@ impl CircuitApp {
                         });
                     });
             });
+        self.performance.left_panel_ms = panel_started.elapsed().as_secs_f64() * 1_000.0;
 
+        let panel_started = std::time::Instant::now();
         egui::SidePanel::right("inspector")
             .default_width(248.0)
             .resizable(true)
@@ -1086,8 +1209,7 @@ impl CircuitApp {
                         let mut inspector_changed = false;
                         let mut inspector_status: Option<String> = None;
                         let mut edited_properties = None;
-                        if let Some(mut component) =
-                            self.components.iter().find(|c| c.id == id).cloned()
+                        if let Some(mut component) = self.component_by_id(id).cloned()
                         {
                             let metadata = electrical_metadata(component.kind);
                             status_pill(
@@ -1388,7 +1510,7 @@ impl CircuitApp {
                         }
                     }
                     Some(Selection::Wire(id)) => {
-                        if let Some(wire) = self.wires.iter().find(|w| w.id == id) {
+                        if let Some(wire) = self.wire_by_id(id) {
                             status_pill(ui, "Wire / Net", StatusTone::Neutral);
                             ui.add_space(8.0);
                             if self.inspector_ui.active_tab == InspectorTab::Properties {
@@ -1486,8 +1608,10 @@ impl CircuitApp {
                     }
                 }
             });
+        self.performance.right_panel_ms = panel_started.elapsed().as_secs_f64() * 1_000.0;
 
         // ── Page tabs (bottom strip above status bar) ────────────────────────
+        let bottom_panels_started = std::time::Instant::now();
         egui::TopBottomPanel::bottom("page_tabs").show(ctx, |ui| {
             let page_names = self
                 .pages
@@ -1626,7 +1750,9 @@ impl CircuitApp {
                     }
                 });
         }
+        self.performance.bottom_panels_ms = bottom_panels_started.elapsed().as_secs_f64() * 1_000.0;
 
+        let canvas_started = std::time::Instant::now();
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.workspace_state.workspace == Workspace::Pcb {
                 let nets = self
@@ -1789,7 +1915,7 @@ impl CircuitApp {
             {
                 self.analysis
                     .schematic_spatial_index
-                    .sync(&self.document.wires);
+                    .sync(&self.document.components, &self.document.wires);
                 self.analysis.schematic_spatial_revision =
                     self.analysis.revisions.schematic_geometry;
             }
@@ -1799,8 +1925,12 @@ impl CircuitApp {
             let indexed_visible_wires = self
                 .analysis
                 .schematic_spatial_index
-                .query_rect(world_min, world_max);
+                .query_wires(world_min, world_max);
             self.performance.rendered_wire_segments = 0;
+            let mut visible_wire_segments = Vec::new();
+            self.performance.canvas_prepare_ms =
+                canvas_started.elapsed().as_secs_f64() * 1_000.0;
+            let wire_paint_started = std::time::Instant::now();
             for wire in &self.document.wires {
                 if !indexed_visible_wires.contains(&wire.id) {
                     continue;
@@ -1818,6 +1948,11 @@ impl CircuitApp {
                     continue;
                 }
                 self.performance.rendered_wire_segments += wire.points.len().saturating_sub(1);
+                visible_wire_segments.extend(
+                    wire.points
+                        .windows(2)
+                        .map(|segment| (segment[0], segment[1])),
+                );
                 let energized = simulation.energized_wires.contains(&wire.id);
                 let net_highlighted = self.highlighted_net_wires.contains(&wire.id)
                     && !self.highlighted_net_wires.is_empty();
@@ -1851,6 +1986,8 @@ impl CircuitApp {
                     view,
                 );
             }
+            self.performance.wire_paint_ms =
+                wire_paint_started.elapsed().as_secs_f64() * 1_000.0;
 
             let flow_rebuilt = self.analysis.current_flow_cache.rebuild_if_needed(
                 FlowCacheKey {
@@ -1903,6 +2040,7 @@ impl CircuitApp {
             // expensive on larger circuits, so it is cached by circuit revision.
             let connected_pins = self.current_connected_pins();
 
+            let symbol_paint_started = std::time::Instant::now();
             self.performance.rendered_components = 0;
             for component in &self.document.components {
                 let cid = component.id;
@@ -1938,6 +2076,8 @@ impl CircuitApp {
                     self.simulation_ui.show_dc_overlay && self.simulate && self.zoom >= 0.48,
                 );
             }
+            self.performance.symbol_paint_ms =
+                symbol_paint_started.elapsed().as_secs_f64() * 1_000.0;
 
             // Multi-select highlight boxes
             for comp in &self.components {
@@ -1979,7 +2119,7 @@ impl CircuitApp {
                 );
             }
 
-            draw_junctions(&painter, &self.wires, view);
+            draw_junctions(&painter, &visible_wire_segments, view);
 
             // ── Node voltage circles at wire junctions ─────────────────
             if self.simulation_ui.show_dc_overlay
@@ -2260,7 +2400,7 @@ impl CircuitApp {
 
                 // Net highlight: update hovered wire in select mode
                 if in_select_mode {
-                    let hov_wire = hit_test_wire(world_hover, &self.wires).and_then(|s| {
+                    let hov_wire = self.indexed_wire_hit(world_hover).and_then(|s| {
                         if let Selection::Wire(id) = s {
                             Some(id)
                         } else {
@@ -2284,8 +2424,8 @@ impl CircuitApp {
                 // Component hover tooltip + glow ring
                 if in_select_mode {
                     if let Some(Selection::Component(hov_id)) =
-                        hit_test_component(world_hover, &self.components)
-                        && let Some(comp) = self.components.iter().find(|c| c.id == hov_id)
+                        self.indexed_component_hit(world_hover)
+                        && let Some(comp) = self.component_by_id(hov_id)
                     {
                         // Glow ring around hovered component
                         let bounds = component_bounds(comp);
@@ -2409,11 +2549,10 @@ impl CircuitApp {
                 match self.editor.tool {
                     Tool::Select => {
                         let ctrl = ctx.input(|i| i.modifiers.command);
-                        if let Some(sel) = hit_test(world_raw, &self.components, &self.wires) {
+                        if let Some(sel) = self.indexed_hit(world_raw) {
                             // Toggle switch/button on single click
                             if let Selection::Component(cid) = sel {
-                                let comp_kind =
-                                    self.components.iter().find(|c| c.id == cid).map(|c| c.kind);
+                                let comp_kind = self.component_by_id(cid).map(|c| c.kind);
                                 if let Some(kind) = comp_kind
                                     && component_is_switch(kind)
                                 {
@@ -2493,7 +2632,7 @@ impl CircuitApp {
                     if let Some(raw_pos) = pointer_in_rect {
                         let world = view.to_world(raw_pos);
                         if let Some(Selection::Component(cid)) =
-                            hit_test_component(world, &self.components)
+                            self.indexed_component_hit(world)
                         {
                             self.editor.selected = Some(Selection::Component(cid));
                             self.context_menu = Some((raw_pos, cid));
@@ -2577,7 +2716,7 @@ impl CircuitApp {
                             self.duplicate_selected();
                         }
                         2 => {
-                            if let Some(comp) = self.components.iter().find(|c| c.id == menu_cid) {
+                            if let Some(comp) = self.component_by_id(menu_cid) {
                                 self.inline_edit = Some((menu_cid, comp.value.clone()));
                             }
                         }
@@ -2610,8 +2749,8 @@ impl CircuitApp {
                 && let Some(raw_pos) = pointer_in_rect
             {
                 let world = view.to_world(raw_pos);
-                if let Some(Selection::Component(cid)) = hit_test_component(world, &self.components)
-                    && let Some(comp) = self.components.iter().find(|c| c.id == cid)
+                if let Some(Selection::Component(cid)) = self.indexed_component_hit(world)
+                    && let Some(comp) = self.component_by_id(cid)
                 {
                     self.inline_edit = Some((cid, comp.value.clone()));
                 }
@@ -2692,7 +2831,7 @@ impl CircuitApp {
             {
                 let world = view.to_world(pos);
                 if let Some((wire_id, point_index)) =
-                    hit_test_wire_control_point(world, &self.wires)
+                    self.indexed_wire_control_point_hit(world)
                 {
                     self.record_history();
                     self.editor.drag = Some(DragState::WirePoint {
@@ -2700,17 +2839,17 @@ impl CircuitApp {
                         point_index,
                     });
                     self.editor.selected = Some(Selection::Wire(wire_id));
-                } else if hit_test_wire(world, &self.wires).is_some() {
+                } else if self.indexed_wire_hit(world).is_some() {
                     self.execute_editor_command(crate::commands::EditorCommand::Wiring(
                         crate::commands::wiring::WiringCommand::InsertControlPoint {
                             position: world,
                         },
                     ));
                 } else if let Some(Selection::Component(id)) =
-                    hit_test_component(world, &self.components)
+                    self.indexed_component_hit(world)
                 {
                     self.record_history();
-                    if let Some(component) = self.components.iter().find(|c| c.id == id) {
+                    if let Some(component) = self.component_by_id(id) {
                         self.editor.drag = Some(DragState::Component {
                             id,
                             offset: world - component.pos,
@@ -2745,8 +2884,7 @@ impl CircuitApp {
                         let in_multi =
                             self.editor.multi_selected.len() > 1 && self.editor.multi_selected.contains(&id);
                         if in_multi {
-                            let old_pos =
-                                self.components.iter().find(|c| c.id == id).map(|c| c.pos);
+                            let old_pos = self.component_by_id(id).map(|c| c.pos);
                             if let Some(old_pos) = old_pos {
                                 let mut delta = snapped - offset - old_pos;
                                 let ids = self.editor.multi_selected.clone();
@@ -2778,7 +2916,8 @@ impl CircuitApp {
                                     )
                                     .persistence_changed;
                             }
-                        } else if let Some(index) = self.components.iter().position(|c| c.id == id)
+                        } else if let Some(index) =
+                            self.analysis.schematic_entity_index.component(id)
                         {
                             let old_pins = component_pins(&self.components[index]);
                             let mut new_pos = snapped - offset;
@@ -2836,8 +2975,10 @@ impl CircuitApp {
 
             let primary_down = ctx.input(|i| i.pointer.primary_down());
             if !primary_down {
-                if self.editor.drag.is_some() {
+                let finished_drag = self.editor.drag.is_some();
+                if finished_drag {
                     self.finish_history_transaction();
+                    self.dispatch_changes(crate::commands::ChangeSet::schematic());
                 }
                 self.editor.drag = None;
                 if let Some(start) = self.editor.rect_select_start.take()
@@ -2846,17 +2987,26 @@ impl CircuitApp {
                 {
                     let sel = Rect::from_two_pos(start, end);
                     let selected_ids = self
-                        .document
-                        .components
-                        .iter()
-                        .filter(|component| sel.contains(component.pos))
-                        .map(|component| component.id)
+                        .analysis
+                        .schematic_spatial_index
+                        .query_components(sel.min, sel.max)
+                        .into_iter()
+                        .filter(|id| {
+                            self.component_by_id(*id)
+                                .is_some_and(|component| sel.contains(component.pos))
+                        })
                         .collect::<Vec<_>>();
                     self.editor.multi_selected.extend(selected_ids);
                     self.status = format!("{} component(s) selected.", self.editor.multi_selected.len());
                 }
             }
         });
+        self.performance.canvas_ms = canvas_started.elapsed().as_secs_f64() * 1_000.0;
+        self.performance.overlay_and_interaction_ms = (self.performance.canvas_ms
+            - self.performance.canvas_prepare_ms
+            - self.performance.wire_paint_ms
+            - self.performance.symbol_paint_ms)
+            .max(0.0);
 
         // ── Keyboard shortcuts ────────────────────────────────────────────
         let backspace = ctx.input(|i| i.key_pressed(egui::Key::Backspace));
@@ -3566,7 +3716,7 @@ impl CircuitApp {
                         let cur_id = self.find_results[self.find_result_idx];
                         self.editor.selected = Some(Selection::Component(cur_id));
                         // Center canvas on the found component
-                        if let Some(comp) = self.components.iter().find(|c| c.id == cur_id) {
+                        if let Some(comp) = self.component_by_id(cur_id) {
                             let canvas_center = self.canvas.rect.center().to_vec2();
                             self.pan = canvas_center - comp.pos.to_vec2() * self.zoom;
                         }

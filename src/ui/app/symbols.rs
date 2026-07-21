@@ -1789,22 +1789,19 @@ pub(crate) fn draw_ic_box(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[allow(clippy::needless_range_loop)] // Pairwise crossing detection uses stable indices.
-pub(crate) fn draw_junctions(painter: &egui::Painter, wires: &[Wire], view: CanvasView) {
+pub(crate) fn draw_junctions(painter: &egui::Painter, segments: &[(Pos2, Pos2)], view: CanvasView) {
     let mut junction_keys: HashSet<(i32, i32)> = HashSet::new();
     let mut junctions: Vec<Pos2> = Vec::new();
 
     // Pass 1: shared vertices + collect unique endpoint keys in one scan
-    let mut counts: HashMap<(i32, i32), (Pos2, u32)> = HashMap::with_capacity(wires.len() * 3);
-    let mut endpoint_keys: HashSet<(i32, i32)> = HashSet::with_capacity(wires.len() * 2);
-    for wire in wires {
-        let n = wire.points.len();
-        for (idx, &point) in wire.points.iter().enumerate() {
+    let mut counts: HashMap<(i32, i32), (Pos2, u32)> = HashMap::with_capacity(segments.len() * 2);
+    let mut endpoint_keys: HashSet<(i32, i32)> = HashSet::with_capacity(segments.len() * 2);
+    for &(start, end) in segments {
+        for point in [start, end] {
             let key = (point.x.round() as i32, point.y.round() as i32);
             let entry = counts.entry(key).or_insert((point, 0));
             entry.1 += 1;
-            if idx == 0 || idx + 1 == n {
-                endpoint_keys.insert(key);
-            }
+            endpoint_keys.insert(key);
         }
     }
     for (&key, &(pos, count)) in &counts {
@@ -1814,17 +1811,12 @@ pub(crate) fn draw_junctions(painter: &egui::Painter, wires: &[Wire], view: Canv
     }
 
     // Pass 2: T-intersections — flatten all segments for cache-friendly scan
-    let segments: Vec<(Pos2, Pos2)> = wires
-        .iter()
-        .flat_map(|w| w.points.windows(2).map(|s| (s[0], s[1])))
-        .collect();
-
     for &ep_key in &endpoint_keys {
         if junction_keys.contains(&ep_key) {
             continue;
         }
         let ep = counts[&ep_key].0;
-        'seg: for &(sa, sb) in &segments {
+        'seg: for &(sa, sb) in segments {
             if ep.distance(sa) > 1.5
                 && ep.distance(sb) > 1.5
                 && distance_to_segment(ep, sa, sb) < 1.5

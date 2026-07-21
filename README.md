@@ -401,18 +401,85 @@ serialization plus filesystem I/O no longer blocks the UI thread. PCB hit
 testing, culling, snapping, routing targets and DRC use entity/spatial indexes.
 The debug performance overlay shows live frame p50/p95/max and cache state.
 
+### 2026-07-22 hot-path pass (`c554858` working tree)
+
+`frame_*` was renamed to `synthetic_canvas_cpu_*`; it is intentionally retained
+as a small CPU microbenchmark and is no longer presented as a UI frame. The new
+`egui_frame_*` fixtures execute the production `CircuitApp::update_ui`, panel
+layout, canvas paint and tessellation path in an offscreen `egui::Context`.
+
+| Offscreen state | Total p50 / p95 / max | Update p50 | Tessellate p50 |
+| --- | ---: | ---: | ---: |
+| Empty | 0.426 / 0.568 / 0.568 ms | 0.314 ms | 0.102 ms |
+| Small schematic | 1.084 / 1.309 / 1.309 ms | 0.834 ms | 0.240 ms |
+| Medium schematic | 2.188 / 2.444 / 2.444 ms | 1.575 ms | 0.585 ms |
+| Large schematic | 3.089 / 3.277 / 3.277 ms | 2.078 ms | 0.969 ms |
+| Validation open | 1.608 / 4.096 / 4.096 ms | 1.290 ms | 0.292 ms |
+| Inspector selection | 1.518 / 1.904 / 1.904 ms | 1.201 ms | 0.300 ms |
+| Simulation animation | 1.289 / 1.497 / 1.497 ms | 0.996 ms | 0.283 ms |
+| PCB workspace | 0.622 / 0.776 / 0.776 ms | 0.506 ms | 0.111 ms |
+| Breadboard workspace | 1.565 / 1.747 / 1.747 ms | 1.185 ms | 0.344 ms |
+
+The large-frame p50 breakdown is top/left/right/bottom panels
+`0.036/0.314/0.011/0.021 ms`, canvas preparation `0.095 ms`, wire paint
+`0.144 ms`, symbol paint `0.304 ms`, and remaining overlays/input `1.149 ms`.
+The large viewport renders 130 components and 242 wire segments into 11,155
+shapes and 16 tessellated primitives.
+
+The local release probe before this pass and the final probe report the
+following p50 values. The aggregate ERC/MNA rows include canonical connectivity;
+their regression is recorded rather than hidden and remains follow-up work.
+
+| Large 1,000-component / 5,000-segment workload | Before | After |
+| --- | ---: | ---: |
+| Connectivity | 72.95 ms | 59.73 ms |
+| ERC | 163.54 ms | 198.68 ms |
+| MNA aggregate workload | 166.41 ms | 187.82 ms |
+| Peak incremental heap | 5,993,292 B | 5,993,308 B |
+
+Contact candidate/exact/union work is now performed once and its split points
+are reused by canonical wire-segment construction. The first staged probe was
+`84.51 ms` total with `31.28 ms` repeated normalization checks; after reuse it
+is `57.05 ms` total with candidate lookup `26.22 ms`, exact checks `2.90 ms`,
+junction union `7.09 ms`, initial union-find `4.99 ms`, labels `0.19 ms`, net
+construction `10.73 ms`, sorting `0.16 ms`, and diagnostics `2.92 ms`.
+
+The solvable mixed nonlinear MNA fixture reports compilation/node indexing/
+allocation/stamping/nonlinear/solve/convergence/result/wire mapping as
+`2.00/0.02/0.01/0.00/0.11/0.09/0.03/0.49/0.26 ms` (`2.60 ms` total).
+Topology/parameter structural reuse is not implemented yet.
+
+Actual command + undo + redo + undo p50 values improved as follows:
+
+| Command | Before | After |
+| --- | ---: | ---: |
+| Move one component | 82.08 ms | 0.76 ms |
+| Move 100 components | 74.18 ms | 1.76 ms |
+| Rotate component | 71.68 ms | 0.68 ms |
+| Edit property | 66.56 ms | 0.09 ms |
+| Add/split wire | 64.88 ms | 79.11 ms |
+| Route PCB track | 74.12 ms | 0.35 ms |
+| Add via | 69.94 ms | 0.34 ms |
+| Move footprint | 82.69 ms | 0.33 ms |
+
+Move/rotate/property/control-point commands capture only affected entities and
+history navigation refreshes only affected spatial/attachment entries. Add,
+paste, delete, alignment, document/page and drag transactions still have a full
+snapshot fallback; add/split wire is visibly the remaining worst path.
+
 ## Roadmap
 
 ### Completed
 
 - Beginner example gallery and I2C Breadboard View wiring assistant
 - Canonical deterministic multi-page netlist and registry-based beginner ERC
-- PCB editor MVP: footprint move/rotate/flip, two-layer 45°/90° routing, vias,
-  copper editing, outline editing, selection and undo/redo
+- PCB editor MVP: footprint move/rotate/flip, track endpoint/segment drag,
+  two-layer 45°/90° routing, vias, copper editing, outline editing, selection and undo/redo
 - CAD/PCB model, project-folder round trip, DRC-gated fabrication scaffolding,
   Gerber/Excellon and BOM/CPL export
 - Indexed, delta-based command/history boundary and revision-tagged analysis worker
 - Optional ngspice transient export/run/import backend selectable from the toolbar
+- Tag release workflow for Linux/macOS/Windows archives, SHA-256 checksums and notes
 
 ### In Progress
 
@@ -420,13 +487,14 @@ The debug performance overlay shows live frame p50/p95/max and cache state.
 - Clickable pad/hole/silkscreen/mask DRC navigation in the PCB workspace
 - Editable physical breadboard jumpers, rails and pin highlighting
 - Library manager phase 2: project libraries, footprint editor and part editor
+- Incremental connectivity, partial ERC execution and MNA topology caching
 
 ### Next
 
 - `.cluster` project bundle, recent projects, thumbnails and crash-recovery browser
-- Interactive track endpoint and pad-to-pad routing edits
+- Pad-to-pad routing collision guidance and copper-zone refill
 - Export wizard and ngspice result plots
-- Guided tutorials with repair hints and code/simulation checkpoints
+- Connect the data-driven lesson checkpoints to guided tutorial UI and persistence
 
 ### Long Term
 

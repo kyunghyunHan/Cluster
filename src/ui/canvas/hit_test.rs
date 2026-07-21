@@ -5,6 +5,7 @@ use crate::model::{Component, Wire, distance_to_segment};
 use crate::ui::app::component_bounds;
 use egui::Pos2;
 
+#[allow(dead_code)] // Brute-force benchmark/reference implementation.
 pub(crate) fn hit_test(pos: Pos2, components: &[Component], wires: &[Wire]) -> Option<Selection> {
     hit_test_component(pos, components).or_else(|| hit_test_wire(pos, wires))
 }
@@ -29,6 +30,7 @@ pub(crate) fn hit_test_wire(pos: Pos2, wires: &[Wire]) -> Option<Selection> {
         .map(|wire| Selection::Wire(wire.id))
 }
 
+#[allow(dead_code)] // Brute-force benchmark/reference implementation.
 pub(crate) fn hit_test_wire_control_point(pos: Pos2, wires: &[Wire]) -> Option<(u64, usize)> {
     wires.iter().rev().find_map(|wire| {
         wire.points

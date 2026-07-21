@@ -1,12 +1,13 @@
 use crate::app::{EditorDocumentState, Selection, Tool};
 use crate::model::cad::{CadNet, NetClass, Point2, SymbolInstance};
 use crate::model::{
-    Component, ComponentKind, IdAllocator, PinRef, ProjectDocument, SchematicEntityIndex, Wire,
-    WireEndpoint, component_pin_defs, component_pins, distance_to_segment,
+    AttachmentIndex, Component, ComponentKind, IdAllocator, ProjectDocument, SchematicEntityIndex,
+    Wire, WireEndpoint, component_pins, distance_to_segment,
 };
 use crate::pcb::board::{BoardOutline, RemovedFootprintPolicy};
 use crate::pcb::track::TrackSegment;
 use crate::pcb::via::Via;
+use crate::ui::canvas::spatial_index::SchematicSpatialIndex;
 use egui::{Pos2, Vec2};
 use std::collections::HashSet;
 
@@ -20,6 +21,8 @@ pub(crate) struct CommandContext<'a> {
     editor: &'a mut EditorDocumentState,
     allocator: &'a mut IdAllocator,
     entity_index: &'a mut SchematicEntityIndex,
+    attachment_index: &'a mut AttachmentIndex,
+    spatial_index: &'a mut SchematicSpatialIndex,
 }
 
 impl<'a> CommandContext<'a> {
@@ -28,12 +31,16 @@ impl<'a> CommandContext<'a> {
         editor: &'a mut EditorDocumentState,
         allocator: &'a mut IdAllocator,
         entity_index: &'a mut SchematicEntityIndex,
+        attachment_index: &'a mut AttachmentIndex,
+        spatial_index: &'a mut SchematicSpatialIndex,
     ) -> Self {
         Self {
             document,
             editor,
             allocator,
             entity_index,
+            attachment_index,
+            spatial_index,
         }
     }
 
@@ -43,6 +50,8 @@ impl<'a> CommandContext<'a> {
             &self.document.wires,
             &self.document.annotations,
         );
+        self.attachment_index
+            .rebuild(&self.document.components, &self.document.wires);
     }
 
     pub(crate) fn components(&self) -> &[Component] {
@@ -85,35 +94,54 @@ impl<'a> CommandContext<'a> {
             value,
             part_id,
         });
-        self.rebuild_entity_index();
+        if let Some(component) = self.document.components.last() {
+            self.spatial_index.update_component(component);
+            self.entity_index
+                .insert_component(component.id, self.document.components.len() - 1);
+        }
         id
     }
 
     pub(crate) fn insert_component(&mut self, component: Component) {
         self.document.components.push(component);
-        self.rebuild_entity_index();
+        if let Some(component) = self.document.components.last() {
+            self.spatial_index.update_component(component);
+            self.entity_index
+                .insert_component(component.id, self.document.components.len() - 1);
+        }
     }
 
     pub(crate) fn insert_wire(&mut self, wire: Wire) {
         self.document.wires.push(wire);
-        self.rebuild_entity_index();
+        if let Some(wire) = self.document.wires.last() {
+            self.spatial_index.update_wire(wire);
+            self.entity_index
+                .insert_wire(wire.id, self.document.wires.len() - 1);
+            self.attachment_index
+                .add_wire(wire, &self.document.components);
+        }
     }
 
     pub(crate) fn remove_components(&mut self, ids: &HashSet<u64>) -> usize {
-        let before = self.document.components.len();
-        self.document
-            .components
-            .retain(|component| !ids.contains(&component.id));
-        self.rebuild_entity_index();
-        before - self.document.components.len()
+        ids.iter()
+            .copied()
+            .filter(|id| self.remove_component(*id))
+            .count()
     }
 
     pub(crate) fn remove_component(&mut self, id: u64) -> bool {
         let Some(index) = self.entity_index.component(id) else {
             return false;
         };
-        self.document.components.remove(index);
-        self.rebuild_entity_index();
+        self.document.components.swap_remove(index);
+        let moved = self
+            .document
+            .components
+            .get(index)
+            .map(|component| (component.id, index));
+        self.spatial_index.remove_component(id);
+        self.entity_index.remove_component(id, moved);
+        self.attachment_index.remove_component(id);
         true
     }
 
@@ -121,8 +149,11 @@ impl<'a> CommandContext<'a> {
         let Some(index) = self.entity_index.wire(id) else {
             return false;
         };
-        self.document.wires.remove(index);
-        self.rebuild_entity_index();
+        self.document.wires.swap_remove(index);
+        let moved = self.document.wires.get(index).map(|wire| (wire.id, index));
+        self.spatial_index.remove_wire(id);
+        self.entity_index.remove_wire(id, moved);
+        self.attachment_index.remove_wire(id);
         true
     }
 
@@ -135,6 +166,8 @@ impl<'a> CommandContext<'a> {
             return false;
         };
         update(&mut self.document.components[index]);
+        self.spatial_index
+            .update_component(&self.document.components[index]);
         true
     }
 
@@ -153,18 +186,19 @@ impl<'a> CommandContext<'a> {
             .collect::<Vec<_>>();
         let attached_wire_ids = ids
             .iter()
-            .flat_map(|id| self.entity_index.attached_wires(*id))
+            .flat_map(|id| self.attachment_index.attached_wires(*id))
             .copied()
             .collect::<HashSet<_>>();
         for &index in &indices {
             self.document.components[index].pos += delta;
+            self.spatial_index
+                .update_component(&self.document.components[index]);
         }
         let new_pins = indices
             .iter()
             .flat_map(|&index| component_pins(&self.document.components[index]))
             .collect::<Vec<_>>();
         self.move_attached_wires(&attached_wire_ids, &old_pins, &new_pins);
-        self.rebuild_entity_index();
         true
     }
 
@@ -174,16 +208,17 @@ impl<'a> CommandContext<'a> {
         };
         let old_pins = component_pins(&self.document.components[index]);
         let attached_wire_ids = self
-            .entity_index
+            .attachment_index
             .attached_wires(id)
             .iter()
             .copied()
             .collect::<HashSet<_>>();
         self.document.components[index].rotation =
             (self.document.components[index].rotation + 90) % 360;
+        self.spatial_index
+            .update_component(&self.document.components[index]);
         let new_pins = component_pins(&self.document.components[index]);
         self.move_attached_wires(&attached_wire_ids, &old_pins, &new_pins);
-        self.rebuild_entity_index();
         true
     }
 
@@ -201,9 +236,11 @@ impl<'a> CommandContext<'a> {
             let wire = &mut self.document.wires[index];
             crate::move_attached_wire_endpoints(std::slice::from_mut(wire), old_pins, new_pins);
             if wire.points.len() <= 2 {
+                self.spatial_index.update_wire(wire);
                 continue;
             }
             crate::tidy_wire_points(wire);
+            self.spatial_index.update_wire(wire);
         }
     }
 
@@ -223,36 +260,33 @@ impl<'a> CommandContext<'a> {
     }
 
     pub(crate) fn infer_wire_endpoint(&self, point: Pos2) -> WireEndpoint {
-        for component in &self.document.components {
-            for pin in component_pin_defs(component) {
-                if point.distance(pin.pos) <= 1.0 {
-                    return WireEndpoint::Pin(PinRef {
-                        component_id: component.id,
-                        pin_name: pin.label.to_string(),
-                    });
-                }
-            }
+        if let Some(pin) = self.spatial_index.nearest_pin(point, 1.0) {
+            return WireEndpoint::Pin(pin);
         }
         WireEndpoint::FreePoint(point)
     }
 
     pub(crate) fn split_wire_at_point(&mut self, point: Pos2) {
-        let split_target = self
-            .document
-            .wires
-            .iter()
-            .enumerate()
-            .find_map(|(wire_index, wire)| {
-                wire.points
-                    .windows(2)
-                    .enumerate()
-                    .find(|(_, pair)| {
-                        distance_to_segment(point, pair[0], pair[1]) < 2.5
-                            && point.distance(pair[0]) > 5.0
-                            && point.distance(pair[1]) > 5.0
-                    })
-                    .map(|(segment_index, _)| (wire_index, segment_index))
-            });
+        let radius = Vec2::splat(2.5);
+        let mut candidates = self
+            .spatial_index
+            .query_wires(point - radius, point + radius)
+            .into_iter()
+            .filter_map(|wire_id| self.entity_index.wire(wire_id))
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        let split_target = candidates.into_iter().find_map(|wire_index| {
+            let wire = &self.document.wires[wire_index];
+            wire.points
+                .windows(2)
+                .enumerate()
+                .find(|(_, pair)| {
+                    distance_to_segment(point, pair[0], pair[1]) < 2.5
+                        && point.distance(pair[0]) > 5.0
+                        && point.distance(pair[1]) > 5.0
+                })
+                .map(|(segment_index, _)| (wire_index, segment_index))
+        });
         let Some((wire_index, segment_index)) = split_target else {
             return;
         };
@@ -272,7 +306,19 @@ impl<'a> CommandContext<'a> {
             start: WireEndpoint::FreePoint(point),
             end: old_end,
         });
-        self.rebuild_entity_index();
+        self.spatial_index
+            .update_wire(&self.document.wires[wire_index]);
+        if let Some(wire) = self.document.wires.last() {
+            self.spatial_index.update_wire(wire);
+            self.entity_index
+                .insert_wire(wire.id, self.document.wires.len() - 1);
+        }
+        self.attachment_index
+            .add_wire(&self.document.wires[wire_index], &self.document.components);
+        if let Some(wire) = self.document.wires.last() {
+            self.attachment_index
+                .add_wire(wire, &self.document.components);
+        }
     }
 
     pub(crate) fn move_wire_control_point(
@@ -287,17 +333,65 @@ impl<'a> CommandContext<'a> {
         if point_index >= self.document.wires[wire_index].points.len() {
             return false;
         }
-        crate::ui::app::move_wire_control_point(
-            &mut self.document.wires,
-            wire_id,
-            point_index,
-            position,
-        );
+        let wire = &mut self.document.wires[wire_index];
+        wire.points[point_index] = position;
+        let is_endpoint = point_index == 0 || point_index + 1 == wire.points.len();
+        if !is_endpoint {
+            crate::ui::app::straighten_neighbor_segments(wire, point_index);
+        }
+        self.spatial_index
+            .update_wire(&self.document.wires[wire_index]);
+        self.attachment_index
+            .add_wire(&self.document.wires[wire_index], &self.document.components);
         true
     }
 
     pub(crate) fn insert_wire_control_point(&mut self, position: Pos2) -> Option<(u64, usize)> {
-        crate::ui::app::insert_wire_control_point(position, &mut self.document.wires)
+        let radius = Vec2::splat(10.0);
+        let wire_ids = self
+            .spatial_index
+            .query_wires(position - radius, position + radius);
+        for wire_id in wire_ids {
+            let Some(index) = self.entity_index.wire(wire_id) else {
+                continue;
+            };
+            let segment_index = self.document.wires[index]
+                .points
+                .windows(2)
+                .position(|segment| distance_to_segment(position, segment[0], segment[1]) <= 10.0);
+            let Some(segment_index) = segment_index else {
+                continue;
+            };
+            let segment = &self.document.wires[index].points[segment_index..=segment_index + 1];
+            let inserted = if (segment[0].y - segment[1].y).abs() <= 0.5 {
+                Pos2::new(
+                    position.x.clamp(
+                        segment[0].x.min(segment[1].x),
+                        segment[0].x.max(segment[1].x),
+                    ),
+                    segment[0].y,
+                )
+            } else if (segment[0].x - segment[1].x).abs() <= 0.5 {
+                Pos2::new(
+                    segment[0].x,
+                    position.y.clamp(
+                        segment[0].y.min(segment[1].y),
+                        segment[0].y.max(segment[1].y),
+                    ),
+                )
+            } else {
+                crate::ui::app::closest_point_on_segment(position, segment[0], segment[1])
+            };
+            let point_index = segment_index + 1;
+            self.document.wires[index]
+                .points
+                .insert(point_index, inserted);
+            self.spatial_index.update_wire(&self.document.wires[index]);
+            self.attachment_index
+                .add_wire(&self.document.wires[index], &self.document.components);
+            return Some((wire_id, point_index));
+        }
+        None
     }
 
     pub(crate) fn tidy_wires(&mut self, wire_id: Option<u64>) -> usize {
@@ -305,6 +399,7 @@ impl<'a> CommandContext<'a> {
         for wire in &mut self.document.wires {
             if wire_id.is_none_or(|id| id == wire.id) {
                 crate::tidy_wire_points(wire);
+                self.spatial_index.update_wire(wire);
                 count += 1;
             }
         }
@@ -354,6 +449,8 @@ impl<'a> CommandContext<'a> {
         self.editor.wire_from_select = false;
         self.editor.snap_target = None;
         self.editor.tool = Tool::Select;
+        self.rebuild_entity_index();
+        self.spatial_index.sync(&[], &[]);
     }
 
     pub(crate) fn move_footprint(&mut self, footprint_id: u64, position: Point2) -> bool {
@@ -387,8 +484,7 @@ impl<'a> CommandContext<'a> {
     }
 
     pub(crate) fn set_outline(&mut self, outline: BoardOutline) {
-        self.document.board.outline = outline;
-        self.document.board.rebuild_entity_index();
+        self.document.board.set_outline(outline);
     }
 
     pub(crate) fn set_board_geometry(
@@ -408,11 +504,7 @@ impl<'a> CommandContext<'a> {
         for updated in vias {
             changed |= self.document.board.edit_via(updated);
         }
-        changed |= self.document.board.outline != outline;
-        self.document.board.outline = outline;
-        if changed {
-            self.document.board.rebuild_entity_index();
-        }
+        changed |= self.document.board.set_outline(outline);
         changed
     }
 

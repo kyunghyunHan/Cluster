@@ -44,6 +44,7 @@ impl crate::CircuitApp {
         self.editor.selected = None;
         self.editor.drag = None;
         self.editor.draft_wire.clear();
+        self.rebuild_schematic_derived_indices();
     }
 
     pub(crate) fn mark_dirty(&mut self) {
@@ -171,10 +172,14 @@ impl crate::CircuitApp {
             .undo_memory_bytes
             .saturating_sub(entry.memory_cost);
         let description = entry.description;
+        let changes = entry.delta.change_set();
         entry.delta.undo(&mut self.document);
         self.reset_editor_after_history_navigation();
+        self.dispatch_changes(changes);
+        if changes.schematic_geometry_changed {
+            self.refresh_schematic_derived_for_delta(&entry.delta);
+        }
         self.editor.history.redo.push_back(entry);
-        self.dispatch_changes(crate::commands::ChangeSet::restored_document());
         self.status = format!("Undo: {description}.");
     }
 
@@ -185,6 +190,7 @@ impl crate::CircuitApp {
             return;
         };
         let description = entry.description;
+        let changes = entry.delta.change_set();
         entry.delta.apply(&mut self.document);
         self.reset_editor_after_history_navigation();
         self.editor.history.undo_memory_bytes = self
@@ -192,8 +198,11 @@ impl crate::CircuitApp {
             .history
             .undo_memory_bytes
             .saturating_add(entry.memory_cost);
+        self.dispatch_changes(changes);
+        if changes.schematic_geometry_changed {
+            self.refresh_schematic_derived_for_delta(&entry.delta);
+        }
         self.editor.history.undo.push_back(entry);
-        self.dispatch_changes(crate::commands::ChangeSet::restored_document());
         self.status = format!("Redo: {description}.");
     }
 
@@ -202,5 +211,63 @@ impl crate::CircuitApp {
         self.editor.multi_selected.clear();
         self.editor.drag = None;
         self.editor.draft_wire.clear();
+    }
+
+    fn rebuild_schematic_derived_indices(&mut self) {
+        self.analysis.schematic_entity_index.rebuild(
+            &self.document.components,
+            &self.document.wires,
+            &self.document.annotations,
+        );
+        self.analysis
+            .attachment_index
+            .rebuild(&self.document.components, &self.document.wires);
+        self.analysis
+            .schematic_spatial_index
+            .sync(&self.document.components, &self.document.wires);
+        self.analysis.schematic_entity_revision = self.analysis.revisions.schematic_geometry;
+        self.analysis.attachment_revision = self.analysis.revisions.schematic_geometry;
+        self.analysis.schematic_spatial_revision = self.analysis.revisions.schematic_geometry;
+    }
+
+    fn refresh_schematic_derived_for_delta(&mut self, delta: &DocumentDelta) {
+        if delta.requires_full_schematic_index_rebuild() {
+            self.rebuild_schematic_derived_indices();
+            return;
+        }
+        self.analysis.schematic_entity_index.rebuild(
+            &self.document.components,
+            &self.document.wires,
+            &self.document.annotations,
+        );
+        for component_id in delta.schematic_component_ids() {
+            if let Some(index) = self.analysis.schematic_entity_index.component(component_id) {
+                self.analysis
+                    .schematic_spatial_index
+                    .update_component(&self.document.components[index]);
+            } else {
+                self.analysis
+                    .schematic_spatial_index
+                    .remove_component(component_id);
+                self.analysis
+                    .attachment_index
+                    .remove_component(component_id);
+            }
+        }
+        for wire_id in delta.schematic_wire_ids() {
+            if let Some(index) = self.analysis.schematic_entity_index.wire(wire_id) {
+                let wire = &self.document.wires[index];
+                self.analysis.schematic_spatial_index.update_wire(wire);
+                self.analysis
+                    .attachment_index
+                    .add_wire(wire, &self.document.components);
+            } else {
+                self.analysis.schematic_spatial_index.remove_wire(wire_id);
+                self.analysis.attachment_index.remove_wire(wire_id);
+            }
+        }
+        self.analysis.schematic_entity_revision = self.analysis.revisions.schematic_geometry;
+        self.analysis.attachment_revision = self.analysis.revisions.schematic_geometry;
+        self.analysis.schematic_spatial_revision = self.analysis.revisions.schematic_geometry;
     }
 }

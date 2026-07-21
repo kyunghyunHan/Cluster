@@ -5,11 +5,29 @@ use super::connectivity::endpoint_index::EndpointIndex;
 use super::connectivity::geometry::{normalized_wire_segments, wire_endpoint_contact_points};
 use super::connectivity::junctions::resolve_contacts;
 use super::connectivity::labels::merge_key as label_merge_key;
+use super::connectivity::spatial_index::SegmentSpatialIndex;
 use super::connectivity::union_find::{ConnectivityNodes, ConnectivityUnionFind};
 use crate::model::*;
 #[cfg(test)]
 use egui::Pos2;
 use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ConnectivityStageProfile {
+    pub(crate) endpoint_extraction_ms: f64,
+    pub(crate) segment_spatial_index_build_ms: f64,
+    pub(crate) pin_spatial_index_build_ms: f64,
+    pub(crate) intersection_candidate_lookup_ms: f64,
+    pub(crate) exact_intersection_checks_ms: f64,
+    pub(crate) junction_application_ms: f64,
+    pub(crate) endpoint_on_segment_contacts_ms: f64,
+    pub(crate) union_find_ms: f64,
+    pub(crate) label_merge_ms: f64,
+    pub(crate) net_construction_ms: f64,
+    pub(crate) deterministic_sorting_ms: f64,
+    pub(crate) diagnostics_ms: f64,
+    pub(crate) total_ms: f64,
+}
 
 pub(crate) fn build_circuit_netlist(components: &[Component], wires: &[Wire]) -> CircuitNetlist {
     build_canonical_connectivity(components, wires).netlist
@@ -36,6 +54,14 @@ pub(crate) fn build_canonical_connectivity_with_annotations(
     wires: &[Wire],
     annotations: &NetlistAnnotations,
 ) -> CanonicalConnectivity {
+    build_canonical_connectivity_profiled(components, wires, annotations).0
+}
+
+pub(crate) fn build_canonical_connectivity_profiled(
+    components: &[Component],
+    wires: &[Wire],
+    annotations: &NetlistAnnotations,
+) -> (CanonicalConnectivity, ConnectivityStageProfile) {
     build_canonical_connectivity_with_page_scopes(components, wires, annotations, &HashMap::new())
 }
 
@@ -44,8 +70,11 @@ fn build_canonical_connectivity_with_page_scopes(
     wires: &[Wire],
     annotations: &NetlistAnnotations,
     component_pages: &HashMap<u64, usize>,
-) -> CanonicalConnectivity {
+) -> (CanonicalConnectivity, ConnectivityStageProfile) {
+    let total_started = std::time::Instant::now();
+    let mut profile = ConnectivityStageProfile::default();
     // Canonical construction never depends on caller collection order.
+    let stage_started = std::time::Instant::now();
     let mut ordered_components = components.to_vec();
     ordered_components.sort_by_key(|component| component.id);
     let components = ordered_components.as_slice();
@@ -56,16 +85,33 @@ fn build_canonical_connectivity_with_page_scopes(
     explicit_junctions.extend(annotations.junction_endpoints.values().copied());
     explicit_junctions.sort_by_key(|position| ConnectivityPoint::from(*position));
     explicit_junctions.dedup_by(|left, right| left.distance(*right) <= 1.0);
+    profile.deterministic_sorting_ms = stage_started.elapsed().as_secs_f64() * 1_000.0;
 
     // Stage 1: geometry normalization. Saved geometry is not mutated; invalid
     // spans become diagnostics while valid polylines retain source identity.
+    let stage_started = std::time::Instant::now();
+    let segment_index = SegmentSpatialIndex::new(wires);
+    profile.segment_spatial_index_build_ms = stage_started.elapsed().as_secs_f64() * 1_000.0;
+    let stage_started = std::time::Instant::now();
     let mut diagnostics = geometry_diagnostics(wires);
-    diagnostics.extend(crossing_diagnostics(wires, &explicit_junctions));
-    diagnostics.extend(orphan_junction_diagnostics(wires, &explicit_junctions));
+    diagnostics.extend(crossing_diagnostics(
+        wires,
+        &explicit_junctions,
+        &segment_index,
+    ));
+    diagnostics.extend(orphan_junction_diagnostics(
+        wires,
+        &explicit_junctions,
+        &segment_index,
+    ));
+    profile.diagnostics_ms = stage_started.elapsed().as_secs_f64() * 1_000.0;
     let mut nodes = ConnectivityNodes::default();
     let mut nets = ConnectivityUnionFind::default();
+    let stage_started = std::time::Instant::now();
     let endpoints = EndpointIndex::new(components);
+    profile.pin_spatial_index_build_ms = stage_started.elapsed().as_secs_f64() * 1_000.0;
 
+    let stage_started = std::time::Instant::now();
     for wire in wires {
         for point in &wire.points {
             let node = nodes.node_for(*point);
@@ -94,6 +140,7 @@ fn build_canonical_connectivity_with_page_scopes(
             }
         }
     }
+    profile.union_find_ms = stage_started.elapsed().as_secs_f64() * 1_000.0;
 
     // Stage 2: typed endpoint resolution. Electrical identity follows the
     // stored PinRef even if legacy geometry has not yet been moved with a pin.
@@ -140,16 +187,27 @@ fn build_canonical_connectivity_with_page_scopes(
 
     // Stage 3: junction resolution. Endpoints on segment interiors form T
     // junctions; an ordinary crossing only joins when explicitly annotated.
-    resolve_contacts(
+    let stage_started = std::time::Instant::now();
+    let endpoint_contacts = wire_endpoint_contact_points(wires);
+    profile.endpoint_extraction_ms = stage_started.elapsed().as_secs_f64() * 1_000.0;
+    let stage_started = std::time::Instant::now();
+    let contact_resolution = resolve_contacts(
         wires,
-        wire_endpoint_contact_points(wires)
+        &segment_index,
+        endpoint_contacts
             .into_iter()
             .chain(explicit_junctions.iter().copied()),
         &mut nodes,
         &mut nets,
     );
+    let contact_total_ms = stage_started.elapsed().as_secs_f64() * 1_000.0;
+    profile.intersection_candidate_lookup_ms = contact_resolution.candidate_lookup_ms;
+    profile.exact_intersection_checks_ms = contact_resolution.exact_checks_ms;
+    profile.junction_application_ms = contact_resolution.union_ms;
+    profile.endpoint_on_segment_contacts_ms = contact_total_ms;
 
     // Stages 4-5: label resolution and page/global merge.
+    let stage_started = std::time::Instant::now();
     let mut label_nodes: HashMap<String, Vec<usize>> = HashMap::new();
     let mut label_occurrences: HashMap<String, usize> = HashMap::new();
     for component in components {
@@ -197,7 +255,9 @@ fn build_canonical_connectivity_with_page_scopes(
             nets.union(pair[0], pair[1]);
         }
     }
+    profile.label_merge_ms = stage_started.elapsed().as_secs_f64() * 1_000.0;
 
+    let stage_started = std::time::Instant::now();
     let mut root_has_wire = HashSet::new();
     let mut wire_root_sets: HashMap<u64, HashSet<usize>> = HashMap::new();
     for wire in wires {
@@ -325,7 +385,7 @@ fn build_canonical_connectivity_with_page_scopes(
         }
     }
 
-    let wire_segments = normalized_wire_segments(wires, &explicit_junctions)
+    let wire_segments = normalized_wire_segments(wires, contact_resolution.splits)
         .into_iter()
         .filter_map(|segment| {
             let root = nets.find(nodes.node_for(segment.points[0]));
@@ -338,7 +398,6 @@ fn build_canonical_connectivity_with_page_scopes(
             })
         })
         .collect();
-
     let netlist = CircuitNetlist {
         nets: net_rows,
         pins,
@@ -398,14 +457,17 @@ fn build_canonical_connectivity_with_page_scopes(
 
     // Stage 8: diagnostics are data; malformed connectivity does not abort the
     // graph or prevent unaffected nets from being consumed.
-    CanonicalConnectivity {
+    let connectivity = CanonicalConnectivity {
         netlist,
         pin_nets,
         junction_id_nets,
         junction_nets,
         wire_segment_nets,
         diagnostics,
-    }
+    };
+    profile.net_construction_ms = stage_started.elapsed().as_secs_f64() * 1_000.0;
+    profile.total_ms = total_started.elapsed().as_secs_f64() * 1_000.0;
+    (connectivity, profile)
 }
 
 #[allow(dead_code)]
@@ -443,6 +505,7 @@ pub(crate) fn build_multi_page_circuit_netlist_with_annotations(
         annotations,
         &component_pages,
     )
+    .0
     .netlist
 }
 

@@ -168,6 +168,17 @@ impl PcbSpatialIndex {
         self.vias.remove_value(&id);
     }
 
+    pub(crate) fn update_outline(&mut self, outline: &BoardOutline) {
+        self.board_edges = Grid::default();
+        for (edge, pair) in outline.points.windows(2).enumerate() {
+            self.board_edges.insert_bounds(
+                edge,
+                Point2::new(pair[0].x.min(pair[1].x), pair[0].y.min(pair[1].y)),
+                Point2::new(pair[0].x.max(pair[1].x), pair[0].y.max(pair[1].y)),
+            );
+        }
+    }
+
     pub(crate) fn footprint_candidates(&self, point: Point2) -> Vec<u64> {
         self.footprints.query_point(point)
     }
