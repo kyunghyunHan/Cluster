@@ -5,6 +5,14 @@ use crate::model::IdAllocator;
 impl crate::CircuitApp {
     pub(crate) fn execute_editor_command(&mut self, command: EditorCommand) -> ChangeSet {
         self.editor.document.grid = self.grid;
+        if self.analysis.schematic_entity_revision != self.analysis.revisions.schematic_geometry {
+            self.analysis.schematic_entity_index.rebuild(
+                &self.document.components,
+                &self.document.wires,
+                &self.document.annotations,
+            );
+            self.analysis.schematic_entity_revision = self.analysis.revisions.schematic_geometry;
+        }
         let description = command.description();
         let merge_key = command.merge_key();
         let pcb_local_impact = command.pcb_local_analysis_impact(&self.document.board);
@@ -17,6 +25,7 @@ impl crate::CircuitApp {
             &mut self.document,
             &mut self.editor.document,
             &mut allocator,
+            &mut self.analysis.schematic_entity_index,
         ));
         allocator.commit(&mut self.document.next_id, &mut self.document.counters);
         let changes = outcome.changes;
@@ -49,11 +58,20 @@ impl crate::CircuitApp {
         command: EditorCommand,
     ) -> ChangeSet {
         self.editor.document.grid = self.grid;
+        if self.analysis.schematic_entity_revision != self.analysis.revisions.schematic_geometry {
+            self.analysis.schematic_entity_index.rebuild(
+                &self.document.components,
+                &self.document.wires,
+                &self.document.annotations,
+            );
+            self.analysis.schematic_entity_revision = self.analysis.revisions.schematic_geometry;
+        }
         let mut allocator = IdAllocator::new(self.document.next_id, self.document.counters.clone());
         let outcome = command.apply(&mut CommandContext::new(
             &mut self.document,
             &mut self.editor.document,
             &mut allocator,
+            &mut self.analysis.schematic_entity_index,
         ));
         allocator.commit(&mut self.document.next_id, &mut self.document.counters);
         let changes = outcome.changes;

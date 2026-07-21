@@ -1,5 +1,7 @@
+use super::spatial_index::SegmentSpatialIndex;
 use crate::model::Wire;
 use egui::Pos2;
+use std::collections::HashMap;
 
 pub(in crate::engine) struct NormalizedWireSegment {
     pub(in crate::engine) id: u64,
@@ -24,24 +26,50 @@ pub(in crate::engine) fn normalized_wire_segments(
         .into_iter()
         .chain(explicit_junctions.iter().copied())
         .collect::<Vec<_>>();
+    let cumulative_by_wire = wires
+        .iter()
+        .map(|wire| {
+            let mut cumulative = vec![0.0f32; wire.points.len()];
+            for index in 1..wire.points.len() {
+                cumulative[index] =
+                    cumulative[index - 1] + wire.points[index - 1].distance(wire.points[index]);
+            }
+            cumulative
+        })
+        .collect::<Vec<_>>();
+    let index = SegmentSpatialIndex::new(wires);
+    let mut splits_by_wire: HashMap<usize, Vec<(f32, Pos2)>> = HashMap::new();
+    for contact in contacts {
+        for candidate in index.candidates(contact) {
+            let wire = &wires[candidate.wire_index];
+            let segment = &wire.points[candidate.segment_index..=candidate.segment_index + 1];
+            let delta = segment[1] - segment[0];
+            let length_squared = delta.length_sq();
+            if length_squared <= f32::EPSILON {
+                continue;
+            }
+            let factor = (delta.dot(contact - segment[0]) / length_squared).clamp(0.0, 1.0);
+            let projected = segment[0] + delta * factor;
+            if projected.distance(contact) > 1.0 {
+                continue;
+            }
+            let parameter = cumulative_by_wire[candidate.wire_index][candidate.segment_index]
+                + factor * length_squared.sqrt();
+            splits_by_wire
+                .entry(candidate.wire_index)
+                .or_default()
+                .push((parameter, contact));
+        }
+    }
+
     let mut output = Vec::new();
     let mut next_id = 1u64;
-
-    for wire in wires {
+    for (wire_index, wire) in wires.iter().enumerate() {
         if wire.points.len() < 2 {
             continue;
         }
-        let mut cumulative = vec![0.0f32; wire.points.len()];
-        for index in 1..wire.points.len() {
-            cumulative[index] =
-                cumulative[index - 1] + wire.points[index - 1].distance(wire.points[index]);
-        }
-        let mut splits = contacts
-            .iter()
-            .filter_map(|&contact| {
-                polyline_parameter(&wire.points, contact, 1.0).map(|parameter| (parameter, contact))
-            })
-            .collect::<Vec<_>>();
+        let cumulative = &cumulative_by_wire[wire_index];
+        let mut splits = splits_by_wire.remove(&wire_index).unwrap_or_default();
         splits.sort_by(|left, right| left.0.total_cmp(&right.0));
         splits.dedup_by(|left, right| (left.0 - right.0).abs() <= 0.001);
 
@@ -68,22 +96,4 @@ pub(in crate::engine) fn normalized_wire_segments(
         }
     }
     output
-}
-
-fn polyline_parameter(points: &[Pos2], position: Pos2, tolerance: f32) -> Option<f32> {
-    let mut cumulative = 0.0;
-    for segment in points.windows(2) {
-        let delta = segment[1] - segment[0];
-        let length_squared = delta.length_sq();
-        if length_squared <= f32::EPSILON {
-            continue;
-        }
-        let factor = (delta.dot(position - segment[0]) / length_squared).clamp(0.0, 1.0);
-        let length = length_squared.sqrt();
-        if (segment[0] + delta * factor).distance(position) <= tolerance {
-            return Some(cumulative + factor * length);
-        }
-        cumulative += length;
-    }
-    None
 }

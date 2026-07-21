@@ -1,8 +1,8 @@
 use crate::app::{EditorDocumentState, Selection, Tool};
 use crate::model::cad::{CadNet, NetClass, Point2, SymbolInstance};
 use crate::model::{
-    Component, ComponentKind, IdAllocator, PinRef, ProjectDocument, Wire, WireEndpoint,
-    component_pin_defs, component_pins, distance_to_segment,
+    Component, ComponentKind, IdAllocator, PinRef, ProjectDocument, SchematicEntityIndex, Wire,
+    WireEndpoint, component_pin_defs, component_pins, distance_to_segment,
 };
 use crate::pcb::board::{BoardOutline, RemovedFootprintPolicy};
 use crate::pcb::track::TrackSegment;
@@ -19,6 +19,7 @@ pub(crate) struct CommandContext<'a> {
     document: &'a mut ProjectDocument,
     editor: &'a mut EditorDocumentState,
     allocator: &'a mut IdAllocator,
+    entity_index: &'a mut SchematicEntityIndex,
 }
 
 impl<'a> CommandContext<'a> {
@@ -26,12 +27,22 @@ impl<'a> CommandContext<'a> {
         document: &'a mut ProjectDocument,
         editor: &'a mut EditorDocumentState,
         allocator: &'a mut IdAllocator,
+        entity_index: &'a mut SchematicEntityIndex,
     ) -> Self {
         Self {
             document,
             editor,
             allocator,
+            entity_index,
         }
+    }
+
+    fn rebuild_entity_index(&mut self) {
+        self.entity_index.rebuild(
+            &self.document.components,
+            &self.document.wires,
+            &self.document.annotations,
+        );
     }
 
     pub(crate) fn components(&self) -> &[Component] {
@@ -74,15 +85,18 @@ impl<'a> CommandContext<'a> {
             value,
             part_id,
         });
+        self.rebuild_entity_index();
         id
     }
 
     pub(crate) fn insert_component(&mut self, component: Component) {
         self.document.components.push(component);
+        self.rebuild_entity_index();
     }
 
     pub(crate) fn insert_wire(&mut self, wire: Wire) {
         self.document.wires.push(wire);
+        self.rebuild_entity_index();
     }
 
     pub(crate) fn remove_components(&mut self, ids: &HashSet<u64>) -> usize {
@@ -90,21 +104,26 @@ impl<'a> CommandContext<'a> {
         self.document
             .components
             .retain(|component| !ids.contains(&component.id));
+        self.rebuild_entity_index();
         before - self.document.components.len()
     }
 
     pub(crate) fn remove_component(&mut self, id: u64) -> bool {
-        let before = self.document.components.len();
-        self.document
-            .components
-            .retain(|component| component.id != id);
-        before != self.document.components.len()
+        let Some(index) = self.entity_index.component(id) else {
+            return false;
+        };
+        self.document.components.remove(index);
+        self.rebuild_entity_index();
+        true
     }
 
     pub(crate) fn remove_wire(&mut self, id: u64) -> bool {
-        let before = self.document.wires.len();
-        self.document.wires.retain(|wire| wire.id != id);
-        before != self.document.wires.len()
+        let Some(index) = self.entity_index.wire(id) else {
+            return false;
+        };
+        self.document.wires.remove(index);
+        self.rebuild_entity_index();
+        true
     }
 
     pub(crate) fn update_component(
@@ -112,77 +131,79 @@ impl<'a> CommandContext<'a> {
         id: u64,
         update: impl FnOnce(&mut Component),
     ) -> bool {
-        let Some(component) = self
-            .document
-            .components
-            .iter_mut()
-            .find(|component| component.id == id)
-        else {
+        let Some(index) = self.entity_index.component(id) else {
             return false;
         };
-        update(component);
+        update(&mut self.document.components[index]);
         true
     }
 
     pub(crate) fn move_components(&mut self, ids: &HashSet<u64>, delta: Vec2) -> bool {
-        let old_pins = self
-            .document
-            .components
+        let mut indices = ids
             .iter()
-            .filter(|component| ids.contains(&component.id))
-            .flat_map(component_pins)
+            .filter_map(|id| self.entity_index.component(*id))
             .collect::<Vec<_>>();
-        if old_pins.is_empty() && !self.document.components.iter().any(|c| ids.contains(&c.id)) {
+        indices.sort_unstable();
+        if indices.is_empty() {
             return false;
         }
-        for component in &mut self.document.components {
-            if ids.contains(&component.id) {
-                component.pos += delta;
-            }
-        }
-        let new_pins = self
-            .document
-            .components
+        let old_pins = indices
             .iter()
-            .filter(|component| ids.contains(&component.id))
-            .flat_map(component_pins)
+            .flat_map(|&index| component_pins(&self.document.components[index]))
             .collect::<Vec<_>>();
-        self.move_attached_wires(&old_pins, &new_pins);
+        let attached_wire_ids = ids
+            .iter()
+            .flat_map(|id| self.entity_index.attached_wires(*id))
+            .copied()
+            .collect::<HashSet<_>>();
+        for &index in &indices {
+            self.document.components[index].pos += delta;
+        }
+        let new_pins = indices
+            .iter()
+            .flat_map(|&index| component_pins(&self.document.components[index]))
+            .collect::<Vec<_>>();
+        self.move_attached_wires(&attached_wire_ids, &old_pins, &new_pins);
+        self.rebuild_entity_index();
         true
     }
 
     pub(crate) fn rotate_component(&mut self, id: u64) -> bool {
-        let Some(index) = self
-            .document
-            .components
-            .iter()
-            .position(|component| component.id == id)
-        else {
+        let Some(index) = self.entity_index.component(id) else {
             return false;
         };
         let old_pins = component_pins(&self.document.components[index]);
+        let attached_wire_ids = self
+            .entity_index
+            .attached_wires(id)
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
         self.document.components[index].rotation =
             (self.document.components[index].rotation + 90) % 360;
         let new_pins = component_pins(&self.document.components[index]);
-        self.move_attached_wires(&old_pins, &new_pins);
+        self.move_attached_wires(&attached_wire_ids, &old_pins, &new_pins);
+        self.rebuild_entity_index();
         true
     }
 
-    fn move_attached_wires(&mut self, old_pins: &[Pos2], new_pins: &[Pos2]) {
-        crate::move_attached_wire_endpoints(&mut self.document.wires, old_pins, new_pins);
-        for wire in &mut self.document.wires {
+    fn move_attached_wires(
+        &mut self,
+        attached_wire_ids: &HashSet<u64>,
+        old_pins: &[Pos2],
+        new_pins: &[Pos2],
+    ) {
+        let wire_indices = attached_wire_ids
+            .iter()
+            .filter_map(|id| self.entity_index.wire(*id))
+            .collect::<Vec<_>>();
+        for index in wire_indices {
+            let wire = &mut self.document.wires[index];
+            crate::move_attached_wire_endpoints(std::slice::from_mut(wire), old_pins, new_pins);
             if wire.points.len() <= 2 {
                 continue;
             }
-            let first = wire.points[0];
-            let Some(&last) = wire.points.last() else {
-                continue;
-            };
-            if old_pins.iter().any(|pin| first.distance(*pin) <= 20.0)
-                || old_pins.iter().any(|pin| last.distance(*pin) <= 20.0)
-            {
-                crate::tidy_wire_points(wire);
-            }
+            crate::tidy_wire_points(wire);
         }
     }
 
@@ -251,6 +272,7 @@ impl<'a> CommandContext<'a> {
             start: WireEndpoint::FreePoint(point),
             end: old_end,
         });
+        self.rebuild_entity_index();
     }
 
     pub(crate) fn move_wire_control_point(
@@ -259,12 +281,10 @@ impl<'a> CommandContext<'a> {
         point_index: usize,
         position: Pos2,
     ) -> bool {
-        let exists = self
-            .document
-            .wires
-            .iter()
-            .any(|wire| wire.id == wire_id && point_index < wire.points.len());
-        if !exists {
+        let Some(wire_index) = self.entity_index.wire(wire_id) else {
+            return false;
+        };
+        if point_index >= self.document.wires[wire_index].points.len() {
             return false;
         }
         crate::ui::app::move_wire_control_point(

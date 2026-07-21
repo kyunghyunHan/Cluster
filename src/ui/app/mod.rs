@@ -276,6 +276,8 @@ pub(crate) struct AnalysisState {
     pub(crate) simulation_revision: u64,
     pub(crate) cached_connected_pins: ConnectedPinsCache,
     pub(crate) current_flow_cache: CurrentFlowCache,
+    pub(crate) schematic_entity_index: crate::model::SchematicEntityIndex,
+    pub(crate) schematic_entity_revision: u64,
     pub(crate) schematic_spatial_index: crate::ui::canvas::spatial_index::SchematicSpatialIndex,
     pub(crate) schematic_spatial_revision: u64,
     pub(crate) pcb_cad: Option<crate::model::cad::CadProjectData>,
@@ -317,6 +319,8 @@ impl Default for AnalysisState {
             simulation_revision: 0,
             cached_connected_pins: None,
             current_flow_cache: CurrentFlowCache::default(),
+            schematic_entity_index: Default::default(),
+            schematic_entity_revision: 0,
             schematic_spatial_index: Default::default(),
             schematic_spatial_revision: 0,
             pcb_cad: None,
@@ -579,8 +583,11 @@ impl CircuitApp {
     }
 }
 
-impl eframe::App for CircuitApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl CircuitApp {
+    /// Render one complete application frame. Kept separate from the native
+    /// frame wrapper so the exact same update path can run in offscreen
+    /// performance and regression tests.
+    pub(crate) fn update_ui(&mut self, ctx: &egui::Context) {
         let frame_started = std::time::Instant::now();
         self.poll_analysis_worker();
         if self.automated_capture_path.is_some() && !self.automated_capture_requested {
@@ -3584,6 +3591,12 @@ impl eframe::App for CircuitApp {
         self.performance
             .frame
             .record(frame_started.elapsed().as_secs_f64() * 1_000.0);
+    }
+}
+
+impl eframe::App for CircuitApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.update_ui(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
