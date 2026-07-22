@@ -36,8 +36,6 @@ impl crate::CircuitApp {
         } else {
             None
         };
-        let snapshot =
-            (board_capture.is_none() && schematic_capture.is_none()).then(|| self.snapshot());
         let mut allocator = IdAllocator::new(self.document.next_id, self.document.counters.clone());
         let outcome = command.apply(&mut CommandContext::new(
             &mut self.document,
@@ -57,8 +55,6 @@ impl crate::CircuitApp {
                 )
             } else if let Some(capture) = schematic_capture {
                 crate::editor::delta::DocumentDelta::from_schematic_capture(capture, &self.document)
-            } else if let Some(snapshot) = snapshot.as_ref() {
-                crate::editor::delta::DocumentDelta::between(snapshot, &self.snapshot())
             } else {
                 debug_assert!(false, "persistent command did not capture a delta basis");
                 crate::editor::delta::DocumentDelta::empty()
@@ -75,6 +71,8 @@ impl crate::CircuitApp {
             self.refresh_local_pcb_analysis(&impact.track_ids, &impact.net_ids);
         }
         self.apply_command_outcome(outcome);
+        #[cfg(debug_assertions)]
+        self.assert_editor_invariants();
         changes
     }
 
@@ -88,45 +86,135 @@ impl crate::CircuitApp {
         use crate::commands::wiring::WiringCommand;
         use std::collections::HashSet;
 
-        let (component_ids, wire_ids) = match command {
+        use crate::editor::delta::SchematicDeltaScope;
+
+        let mut scope = SchematicDeltaScope::default();
+        let attached_wires = |component_ids: &HashSet<u64>| {
+            component_ids
+                .iter()
+                .flat_map(|id| self.analysis.attachment_index.attached_wires(*id))
+                .copied()
+                .collect::<HashSet<_>>()
+        };
+        match command {
+            EditorCommand::Component(
+                ComponentCommand::Place { .. } | ComponentCommand::PlaceCustom { .. },
+            ) => {
+                scope.capture_new_components = true;
+                scope.capture_metadata = true;
+            }
+            EditorCommand::Component(ComponentCommand::Paste { .. }) => {
+                scope.capture_new_components = true;
+                scope.capture_new_wires = true;
+                scope.capture_metadata = true;
+            }
             EditorCommand::Component(ComponentCommand::Move { component_ids, .. }) => {
-                let wire_ids = component_ids
-                    .iter()
-                    .flat_map(|id| self.analysis.attachment_index.attached_wires(*id))
-                    .copied()
-                    .collect();
-                (component_ids.clone(), wire_ids)
+                scope.component_ids.clone_from(component_ids);
+                scope.wire_ids.extend(attached_wires(component_ids));
             }
             EditorCommand::Properties(
                 PropertiesCommand::SetComponentValue { component_id, .. }
                 | PropertiesCommand::SetComponentProperties { component_id, .. }
                 | PropertiesCommand::ToggleSwitch { component_id },
-            ) => (HashSet::from([*component_id]), HashSet::new()),
+            ) => {
+                scope.component_ids.insert(*component_id);
+            }
             EditorCommand::Selection(SelectionCommand::Rotate) => {
                 let crate::app::Selection::Component(component_id) = self.editor.selected? else {
                     return None;
                 };
-                let wire_ids = self
-                    .analysis
-                    .attachment_index
-                    .attached_wires(component_id)
-                    .iter()
-                    .copied()
-                    .collect();
-                (HashSet::from([component_id]), wire_ids)
+                scope.component_ids.insert(component_id);
+                scope
+                    .wire_ids
+                    .extend(attached_wires(&HashSet::from([component_id])));
             }
             EditorCommand::Wiring(WiringCommand::MoveControlPoint { wire_id, .. }) => {
-                (HashSet::new(), HashSet::from([*wire_id]))
+                scope.wire_ids.insert(*wire_id);
             }
-            _ => return None,
-        };
-        Some(
-            crate::editor::delta::DocumentDelta::capture_schematic_entities(
-                &self.document,
-                component_ids,
-                wire_ids,
-            ),
-        )
+            EditorCommand::Wiring(WiringCommand::Add { points }) => {
+                scope.capture_new_wires = true;
+                scope.capture_metadata = true;
+                for point in points.first().into_iter().chain(points.last()) {
+                    scope.wire_ids.extend(
+                        self.analysis
+                            .schematic_spatial_index
+                            .wire_segments_near(*point, 0.5)
+                            .into_iter()
+                            .map(|segment| segment.wire_id),
+                    );
+                }
+            }
+            EditorCommand::Wiring(WiringCommand::InsertControlPoint { position }) => {
+                scope.wire_ids.extend(
+                    self.analysis
+                        .schematic_spatial_index
+                        .wire_segments_near(*position, 20.0)
+                        .into_iter()
+                        .map(|segment| segment.wire_id),
+                );
+            }
+            EditorCommand::Wiring(WiringCommand::Tidy { wire_id }) => match wire_id {
+                Some(id) => {
+                    scope.wire_ids.insert(*id);
+                }
+                None => scope
+                    .wire_ids
+                    .extend(self.document.wires.iter().map(|wire| wire.id)),
+            },
+            EditorCommand::Selection(SelectionCommand::Delete) => {
+                if !self.editor.multi_selected.is_empty() {
+                    scope.component_ids.clone_from(&self.editor.multi_selected);
+                    scope
+                        .wire_ids
+                        .extend(attached_wires(&self.editor.multi_selected));
+                } else if let Some(selection) = self.editor.selected {
+                    match selection {
+                        crate::app::Selection::Component(id) => {
+                            scope.component_ids.insert(id);
+                            scope.wire_ids.extend(attached_wires(&HashSet::from([id])));
+                        }
+                        crate::app::Selection::Wire(id) => {
+                            scope.wire_ids.insert(id);
+                        }
+                    }
+                }
+            }
+            EditorCommand::Selection(SelectionCommand::Duplicate) => {
+                scope.capture_new_components = true;
+                scope.capture_metadata = true;
+            }
+            EditorCommand::Selection(
+                SelectionCommand::Align(_) | SelectionCommand::Distribute { .. },
+            ) => {
+                if self.editor.multi_selected.is_empty() {
+                    if let Some(crate::app::Selection::Component(id)) = self.editor.selected {
+                        scope.component_ids.insert(id);
+                    }
+                } else {
+                    scope.component_ids.clone_from(&self.editor.multi_selected);
+                }
+                let ids = scope.component_ids.clone();
+                scope.wire_ids.extend(attached_wires(&ids));
+            }
+            EditorCommand::Document(crate::commands::document::DocumentCommand::Reset) => {
+                scope.component_ids.extend(
+                    self.document
+                        .components
+                        .iter()
+                        .map(|component| component.id),
+                );
+                scope
+                    .wire_ids
+                    .extend(self.document.wires.iter().map(|wire| wire.id));
+                scope.capture_annotations = true;
+                scope.capture_metadata = true;
+            }
+            EditorCommand::Pcb(_) => return None,
+        }
+        Some(crate::editor::delta::DocumentDelta::capture_schematic(
+            &self.document,
+            scope,
+        ))
     }
 
     pub(crate) fn execute_continuous_editor_command(
@@ -169,7 +257,71 @@ impl crate::CircuitApp {
         // immediately for visual feedback, but persistent revisions and heavy
         // connectivity/ERC/simulation invalidation happen once on release.
         self.apply_command_outcome(outcome);
+        #[cfg(debug_assertions)]
+        self.assert_editor_invariants();
         changes
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn assert_editor_invariants(&self) {
+        let document_invariants = crate::model::validate_document_invariants(
+            &self.document,
+            &self.analysis.schematic_entity_index,
+        );
+        debug_assert!(
+            document_invariants.is_ok(),
+            "document invariant violation: {document_invariants:?}"
+        );
+        let board_invariants = self.document.board.validate_invariants();
+        debug_assert!(
+            board_invariants.is_ok(),
+            "board invariant violation: {board_invariants:?}"
+        );
+        debug_assert!(self.editor.selected.is_none_or(|selection| {
+            match selection {
+                crate::app::Selection::Component(id) => self
+                    .document
+                    .components
+                    .iter()
+                    .any(|component| component.id == id),
+                crate::app::Selection::Wire(id) => {
+                    self.document.wires.iter().any(|wire| wire.id == id)
+                }
+            }
+        }));
+        debug_assert!(self.editor.multi_selected.iter().all(|id| {
+            self.document
+                .components
+                .iter()
+                .any(|component| component.id == *id)
+        }));
+        debug_assert!(self.editor.drag.as_ref().is_none_or(|drag| {
+            match drag {
+                crate::model::DragState::Component { id, .. } => self
+                    .document
+                    .components
+                    .iter()
+                    .any(|component| component.id == *id),
+                crate::model::DragState::WirePoint {
+                    wire_id,
+                    point_index,
+                } => self
+                    .document
+                    .wires
+                    .iter()
+                    .find(|wire| wire.id == *wire_id)
+                    .is_some_and(|wire| *point_index < wire.points.len()),
+            }
+        }));
+        debug_assert_eq!(
+            self.editor.history.undo_memory_bytes,
+            self.editor
+                .history
+                .undo
+                .iter()
+                .map(|entry| entry.memory_cost)
+                .sum::<usize>()
+        );
     }
 
     fn apply_command_outcome(&mut self, outcome: CommandOutcome) {
@@ -314,7 +466,11 @@ mod tests {
         }));
         let id = app.components[0].id;
         let revision = app.analysis.revisions;
-        app.begin_history_transaction("Move component", None);
+        app.begin_schematic_history_transaction(
+            "Move component",
+            [id].into_iter().collect(),
+            std::collections::HashSet::new(),
+        );
         let changes = app.execute_continuous_editor_command(EditorCommand::Component(
             ComponentCommand::Move {
                 component_ids: [id].into_iter().collect(),
@@ -372,6 +528,99 @@ mod tests {
             &app.document.wires,
             &app.document.annotations,
         ));
+    }
+
+    #[test]
+    fn deterministic_random_command_sequence_matches_linear_document_state() {
+        use crate::commands::selection::SelectionCommand;
+        use crate::commands::wiring::WiringCommand;
+
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            *seed
+        }
+
+        fn assert_consistent(app: &crate::CircuitApp) {
+            assert!(app.analysis.schematic_entity_index.is_consistent(
+                &app.document.components,
+                &app.document.wires,
+                &app.document.annotations,
+            ));
+            assert!(
+                app.analysis
+                    .attachment_index
+                    .is_consistent(&app.document.components, &app.document.wires)
+            );
+            assert!(
+                app.analysis
+                    .schematic_spatial_index
+                    .is_consistent(&app.document.components, &app.document.wires)
+            );
+            assert!(
+                crate::model::validate_document_invariants(
+                    &app.document,
+                    &app.analysis.schematic_entity_index,
+                )
+                .is_ok()
+            );
+            for (expected, component) in app.document.components.iter().enumerate() {
+                assert_eq!(
+                    app.analysis.schematic_entity_index.component(component.id),
+                    Some(expected)
+                );
+            }
+            for (expected, wire) in app.document.wires.iter().enumerate() {
+                assert_eq!(
+                    app.analysis.schematic_entity_index.wire(wire.id),
+                    Some(expected)
+                );
+            }
+        }
+
+        let mut app = crate::CircuitApp::new();
+        let mut seed = 0x5eed_cafe_f00d_u64;
+        for step in 0..240 {
+            match next(&mut seed) % 7 {
+                0 | 1 => {
+                    let x = (next(&mut seed) % 40) as f32 * 20.0;
+                    let y = (next(&mut seed) % 30) as f32 * 20.0;
+                    app.execute_editor_command(EditorCommand::Component(ComponentCommand::Place {
+                        kind: ComponentKind::Resistor,
+                        position: Pos2::new(x, y),
+                        value: "1k".to_string(),
+                    }));
+                }
+                2 if !app.components.is_empty() => {
+                    let index = next(&mut seed) as usize % app.components.len();
+                    let id = app.components[index].id;
+                    app.execute_editor_command(EditorCommand::Component(ComponentCommand::Move {
+                        component_ids: [id].into_iter().collect(),
+                        delta: egui::vec2(20.0, 0.0),
+                    }));
+                }
+                3 if !app.components.is_empty() => {
+                    let index = next(&mut seed) as usize % app.components.len();
+                    app.editor.selected =
+                        Some(crate::app::Selection::Component(app.components[index].id));
+                    app.execute_editor_command(EditorCommand::Selection(SelectionCommand::Rotate));
+                }
+                4 => {
+                    let base = (step % 30) as f32 * 20.0;
+                    app.execute_editor_command(EditorCommand::Wiring(WiringCommand::Add {
+                        points: vec![Pos2::new(base, 700.0), Pos2::new(base + 20.0, 700.0)],
+                    }));
+                }
+                5 if !app.components.is_empty() => {
+                    let index = next(&mut seed) as usize % app.components.len();
+                    app.editor.selected =
+                        Some(crate::app::Selection::Component(app.components[index].id));
+                    app.execute_editor_command(EditorCommand::Selection(SelectionCommand::Delete));
+                }
+                _ if next(&mut seed).is_multiple_of(2) => app.undo(),
+                _ => app.redo(),
+            }
+            assert_consistent(&app);
+        }
     }
 
     #[test]

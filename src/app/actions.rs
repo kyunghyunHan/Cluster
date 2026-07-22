@@ -1039,8 +1039,9 @@ impl crate::CircuitApp {
         let saved = serde_json::from_str::<SavedCircuit>(&schematic_json)
             .map_err(|error| format!("Parse schematic.json: {error}"))?;
         let (snapshot, load_notes) = saved.into_snapshot()?;
-        let board = serde_json::from_str::<Board>(&board_json)
+        let mut board = serde_json::from_str::<Board>(&board_json)
             .map_err(|error| format!("Parse board.json: {error}"))?;
+        board.rebuild_entity_index();
         let mut cad = serde_json::from_str::<CadProjectData>(&project_json)
             .map_err(|error| format!("Parse project.json: {error}"))?;
         cad.board = Some(board.clone());
@@ -1048,7 +1049,29 @@ impl crate::CircuitApp {
         self.record_history();
         self.restore_snapshot(snapshot);
         self.document.board = board;
-        self.document.board.rebuild_entity_index();
+        let document_invariant_warnings = crate::model::validate_document_invariants(
+            &self.document,
+            &self.analysis.schematic_entity_index,
+        )
+        .err()
+        .map_or(0, |violations| violations.len());
+        let schematic_derived_warnings = usize::from(
+            !self
+                .analysis
+                .attachment_index
+                .is_consistent(&self.document.components, &self.document.wires),
+        ) + usize::from(
+            !self
+                .analysis
+                .schematic_spatial_index
+                .is_consistent(&self.document.components, &self.document.wires),
+        );
+        let board_invariant_warnings = self
+            .document
+            .board
+            .validate_invariants()
+            .err()
+            .map_or(0, |violations| violations.len());
         self.finish_history_transaction();
         self.dispatch_changes(crate::commands::ChangeSet::restored_document());
         self.analysis.pcb_cad = Some(cad.clone());
@@ -1063,11 +1086,16 @@ impl crate::CircuitApp {
         self.analysis.dirty_flags.simulation_dirty = true;
         self.analysis.dirty_flags.pcb_sync_dirty = false;
         self.pending_fit = true;
-        if !load_notes.is_empty() {
+        let invariant_warnings =
+            document_invariant_warnings + schematic_derived_warnings + board_invariant_warnings;
+        if !load_notes.is_empty() || invariant_warnings > 0 {
             self.status = format!(
-                "Loaded project with {} schematic repair note(s).",
-                load_notes.len()
+                "Loaded project with {} repair note(s) and {} invariant warning(s).",
+                load_notes.len(),
+                invariant_warnings,
             );
+        } else {
+            self.status = "Loaded project.".to_string();
         }
         Ok(())
     }
@@ -1712,6 +1740,25 @@ impl crate::CircuitApp {
             Ok((snapshot, load_notes)) => {
                 self.record_history();
                 self.restore_snapshot(snapshot);
+                let invariant_warnings = crate::model::validate_document_invariants(
+                    &self.document,
+                    &self.analysis.schematic_entity_index,
+                )
+                .err()
+                .map_or(0, |violations| violations.len());
+                let invariant_warnings = invariant_warnings
+                    + usize::from(
+                        !self
+                            .analysis
+                            .attachment_index
+                            .is_consistent(&self.document.components, &self.document.wires),
+                    )
+                    + usize::from(
+                        !self
+                            .analysis
+                            .schematic_spatial_index
+                            .is_consistent(&self.document.components, &self.document.wires),
+                    );
                 self.finish_history_transaction();
                 self.dispatch_changes(crate::commands::ChangeSet::restored_document());
                 if recovery {
@@ -1720,13 +1767,14 @@ impl crate::CircuitApp {
                     self.editor.history.dirty = false;
                     self.last_autorecover_revision = self.analysis.revisions.persistence;
                 }
-                self.status = if load_notes.is_empty() {
+                self.status = if load_notes.is_empty() && invariant_warnings == 0 {
                     format!("Loaded {}.", path.display())
                 } else {
                     format!(
-                        "Loaded {} with {} repair(s).",
+                        "Loaded {} with {} repair(s) and {} invariant warning(s).",
                         path.display(),
-                        load_notes.len()
+                        load_notes.len(),
+                        invariant_warnings,
                     )
                 };
                 self.pending_fit = true;
@@ -1981,6 +2029,9 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn poll_analysis_worker(&mut self) {
+        if let Some(error) = self.analysis.worker.take_failure() {
+            self.status = error;
+        }
         while let Some(result) = self.analysis.worker.try_recv() {
             if result.document_revision != self.analysis.revisions.persistence {
                 continue;

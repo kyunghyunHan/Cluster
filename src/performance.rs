@@ -22,7 +22,9 @@ use crate::ui::canvas::{hit_test_component, hit_test_wire};
 use crate::ui::current_flow::{CurrentFlowCache, FlowCacheKey};
 use egui::{Pos2, Rect};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,6 +469,105 @@ pub struct SchematicFixture {
     spatial_index: SchematicSpatialIndex,
 }
 
+/// A schematic fixture whose canonical connectivity has already been built.
+///
+/// Keeping this boundary explicit prevents ERC and MNA micro-benchmarks from
+/// accidentally charging connectivity construction to the rule evaluator or
+/// solver. End-to-end benchmarks remain available on `SchematicFixture`.
+pub struct PreparedSchematicAnalysis<'a> {
+    components: &'a [Component],
+    wires: &'a [Wire],
+    connectivity: crate::CanonicalConnectivity,
+}
+
+pub struct PreparedSaveFixture {
+    saved: SavedCircuit,
+    json: String,
+    path: PathBuf,
+}
+
+impl PreparedSaveFixture {
+    pub fn serialization_len(&self) -> usize {
+        serde_json::to_vec(&self.saved).map_or(0, |json| json.len())
+    }
+
+    pub fn atomic_write_len(&self) -> usize {
+        let Some(path) = self.path.to_str() else {
+            return 0;
+        };
+        crate::storage::save::write_with_backup(path, &self.json)
+            .map(|()| self.json.len())
+            .unwrap_or(0)
+    }
+}
+
+impl Drop for PreparedSaveFixture {
+    fn drop(&mut self) {
+        for suffix in ["", ".tmp", ".bak", ".bak.1", ".bak.2", ".bak.3"] {
+            let _ = std::fs::remove_file(format!("{}{}", self.path.display(), suffix));
+        }
+    }
+}
+
+pub struct PreparedAutosaveFixture {
+    app: crate::CircuitApp,
+}
+
+impl PreparedAutosaveFixture {
+    /// Measures the work still performed on the UI thread before enqueueing an
+    /// autosave job: materializing the schema DTO from the live document.
+    pub fn ui_thread_snapshot_len(&self) -> usize {
+        let saved = SavedCircuit::from_app(&self.app);
+        saved.components.len()
+            + saved.wires.len()
+            + saved
+                .pages
+                .iter()
+                .map(|page| page.components.len() + page.wires.len())
+                .sum::<usize>()
+    }
+}
+
+impl PreparedSchematicAnalysis<'_> {
+    pub fn erc_evaluation_checksum(&self) -> usize {
+        crate::run_erc_with_netlist(
+            self.components,
+            self.wires,
+            &Simulation::default(),
+            &self.connectivity.netlist,
+        )
+        .len()
+    }
+
+    /// Evaluates only rules whose result can change when component values or
+    /// switch state change. Connectivity is prepared and topology rules are
+    /// intentionally excluded.
+    pub fn erc_values_only_checksum(&self) -> usize {
+        crate::engine::validation::validate_beginner_rules_for(
+            &self.connectivity.netlist,
+            &[crate::engine::erc::ErcDependency::Values],
+        )
+        .len()
+    }
+
+    /// Evaluates the topology-dependent rule set against a prepared netlist.
+    pub fn erc_topology_only_checksum(&self) -> usize {
+        crate::engine::validation::validate_beginner_rules_for(
+            &self.connectivity.netlist,
+            &[crate::engine::erc::ErcDependency::Topology],
+        )
+        .len()
+    }
+
+    pub fn mna_solver_checksum(&self) -> usize {
+        mna::solve_dc_detailed_with_connectivity(self.components, self.wires, &self.connectivity)
+            .map_or_else(
+                |_| self.connectivity.netlist.nets.len(),
+                |dc| dc.node_voltages.len(),
+            )
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ConnectivityStageMetrics {
     pub endpoint_extraction_ms: f64,
@@ -589,6 +690,48 @@ impl SchematicFixture {
         )
     }
 
+    pub fn prepare_analysis(&self) -> PreparedSchematicAnalysis<'_> {
+        PreparedSchematicAnalysis {
+            components: &self.components,
+            wires: &self.wires,
+            connectivity: self.connectivity(),
+        }
+    }
+
+    fn save_app(&self) -> crate::CircuitApp {
+        let mut app = crate::CircuitApp::new();
+        app.document.components.clone_from(&self.components);
+        app.document.wires.clone_from(&self.wires);
+        app.document.next_id = self
+            .components
+            .iter()
+            .map(|component| component.id)
+            .chain(self.wires.iter().map(|wire| wire.id))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        app
+    }
+
+    pub fn prepare_save(&self) -> PreparedSaveFixture {
+        static SAVE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let app = self.save_app();
+        let saved = SavedCircuit::from_app(&app);
+        let json = serde_json::to_string(&saved).unwrap_or_default();
+        let sequence = SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "cluster-performance-{}-{sequence}.json",
+            std::process::id()
+        ));
+        PreparedSaveFixture { saved, json, path }
+    }
+
+    pub fn prepare_autosave(&self) -> PreparedAutosaveFixture {
+        PreparedAutosaveFixture {
+            app: self.save_app(),
+        }
+    }
+
     pub fn connectivity_checksum(&self) -> usize {
         let result = self.connectivity();
         result.netlist.nets.len()
@@ -617,7 +760,7 @@ impl SchematicFixture {
         }
     }
 
-    pub fn erc_checksum(&self) -> usize {
+    pub fn connectivity_plus_erc_checksum(&self) -> usize {
         let connectivity = self.connectivity();
         crate::run_erc_with_netlist(
             &self.components,
@@ -628,13 +771,23 @@ impl SchematicFixture {
         .len()
     }
 
-    pub fn mna_checksum(&self) -> usize {
+    pub fn connectivity_plus_mna_checksum(&self) -> usize {
         let connectivity = self.connectivity();
         mna::solve_dc_detailed_with_connectivity(&self.components, &self.wires, &connectivity)
             .map_or_else(
                 |_| connectivity.netlist.nets.len(),
                 |dc| dc.node_voltages.len(),
             )
+    }
+
+    #[deprecated(note = "use connectivity_plus_erc_checksum for an explicit timing boundary")]
+    pub fn erc_checksum(&self) -> usize {
+        self.connectivity_plus_erc_checksum()
+    }
+
+    #[deprecated(note = "use connectivity_plus_mna_checksum for an explicit timing boundary")]
+    pub fn mna_checksum(&self) -> usize {
+        self.connectivity_plus_mna_checksum()
     }
 
     pub fn hit_test_checksum(&self) -> u64 {
@@ -751,10 +904,7 @@ impl SchematicFixture {
     }
 
     pub fn serialization_len(&self) -> usize {
-        let mut app = crate::CircuitApp::new();
-        app.document.components.clone_from(&self.components);
-        app.document.wires.clone_from(&self.wires);
-        serde_json::to_vec(&SavedCircuit::from_app(&app)).map_or(0, |json| json.len())
+        self.prepare_save().serialization_len()
     }
 }
 
@@ -1188,6 +1338,7 @@ pub enum CommandHistoryScenario {
     MoveHundredComponents,
     RotateComponent,
     EditProperty,
+    AddWire,
     AddAndSplitWire,
     RoutePcbTrack,
     AddVia,
@@ -1252,6 +1403,12 @@ impl CommandHistoryFixture {
                     value: "2.2k".to_string(),
                 })
             }
+            CommandHistoryScenario::AddWire => EditorCommand::Wiring(WiringCommand::Add {
+                points: vec![
+                    egui::pos2(-2_000.0, -2_000.0),
+                    egui::pos2(-1_960.0, -2_000.0),
+                ],
+            }),
             CommandHistoryScenario::AddAndSplitWire => {
                 let first = &self.app.document.wires[0];
                 let midpoint = first.points[0].lerp(first.points[1], 0.5);
@@ -1401,6 +1558,7 @@ mod tests {
             CommandHistoryScenario::MoveHundredComponents,
             CommandHistoryScenario::RotateComponent,
             CommandHistoryScenario::EditProperty,
+            CommandHistoryScenario::AddWire,
             CommandHistoryScenario::AddAndSplitWire,
             CommandHistoryScenario::RoutePcbTrack,
             CommandHistoryScenario::AddVia,

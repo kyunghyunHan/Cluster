@@ -65,13 +65,22 @@ pub(crate) struct BoundedAnalysisWorker {
     schematic: CancellationToken,
     drc: CancellationToken,
     autosave: CancellationToken,
+    pending_autosave: Option<Job>,
+    failure: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkerSubmitError {
+    QueueFull,
+    Disconnected,
+    StartupFailed(String),
 }
 
 impl BoundedAnalysisWorker {
     pub(crate) fn new() -> Self {
         let (jobs_tx, jobs_rx) = sync_channel::<Job>(2);
         let (results_tx, results_rx) = sync_channel::<AnalysisResult>(2);
-        let _worker_thread = std::thread::Builder::new()
+        let worker_thread = std::thread::Builder::new()
             .name("cluster-analysis".to_string())
             .spawn(move || {
                 let mut cache = WorkerCache::default();
@@ -88,12 +97,17 @@ impl BoundedAnalysisWorker {
                     }
                 }
             });
+        let failure = worker_thread
+            .err()
+            .map(|error| format!("Analysis worker failed to start: {error}"));
         Self {
             jobs: jobs_tx,
             results: results_rx,
             schematic: CancellationToken::default(),
             drc: CancellationToken::default(),
             autosave: CancellationToken::default(),
+            pending_autosave: None,
+            failure,
         }
     }
 
@@ -101,7 +115,11 @@ impl BoundedAnalysisWorker {
         &mut self,
         document_revision: u64,
         request: AnalysisRequest,
-    ) -> Result<(), ()> {
+    ) -> Result<(), WorkerSubmitError> {
+        self.flush_pending_autosave();
+        if let Some(error) = &self.failure {
+            return Err(WorkerSubmitError::StartupFailed(error.clone()));
+        }
         let active = match &request {
             AnalysisRequest::Schematic { .. } => &mut self.schematic,
             AnalysisRequest::FullDrc { .. } => &mut self.drc,
@@ -118,12 +136,44 @@ impl BoundedAnalysisWorker {
                 *active = cancellation;
                 Ok(())
             }
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => Err(()),
+            Err(TrySendError::Full(job))
+                if matches!(&job.request, AnalysisRequest::Autosave { .. }) =>
+            {
+                *active = cancellation;
+                self.pending_autosave = Some(job);
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => Err(WorkerSubmitError::QueueFull),
+            Err(TrySendError::Disconnected(_)) => Err(WorkerSubmitError::Disconnected),
         }
     }
 
-    pub(crate) fn try_recv(&self) -> Option<AnalysisResult> {
+    pub(crate) fn try_recv(&mut self) -> Option<AnalysisResult> {
+        self.flush_pending_autosave();
         self.results.try_recv().ok()
+    }
+
+    pub(crate) fn take_failure(&mut self) -> Option<String> {
+        self.failure.take()
+    }
+
+    fn flush_pending_autosave(&mut self) {
+        let Some(job) = self.pending_autosave.take() else {
+            return;
+        };
+        if job.cancellation.is_cancelled() {
+            return;
+        }
+        match self.jobs.try_send(job) {
+            Ok(()) => {}
+            Err(TrySendError::Full(job)) => self.pending_autosave = Some(job),
+            Err(TrySendError::Disconnected(job)) => {
+                self.pending_autosave = Some(job);
+                self.failure = Some(
+                    "Analysis worker disconnected; pending autosave was retained.".to_string(),
+                );
+            }
+        }
     }
 }
 
@@ -265,5 +315,65 @@ fn execute(
                 });
             AnalysisPayload::Autosave(result)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Counters;
+
+    fn empty_autosave(revision: u64) -> AnalysisRequest {
+        AnalysisRequest::Autosave {
+            saved: Box::new(SavedCircuit {
+                schema_version: 4,
+                next_id: revision + 1,
+                counters: Counters::default(),
+                components: Vec::new(),
+                wires: Vec::new(),
+                junction_dots: Vec::new(),
+                no_connect_markers: Vec::new(),
+                pages: Vec::new(),
+                current_page: 0,
+            }),
+            path: PathBuf::from(format!("autosave-{revision}.json")),
+        }
+    }
+
+    #[test]
+    fn full_queue_retains_latest_autosave_until_worker_has_capacity() {
+        let (jobs, jobs_rx) = sync_channel::<Job>(0);
+        let (_results_tx, results) = sync_channel::<AnalysisResult>(1);
+        let mut worker = BoundedAnalysisWorker {
+            jobs,
+            results,
+            schematic: CancellationToken::default(),
+            drc: CancellationToken::default(),
+            autosave: CancellationToken::default(),
+            pending_autosave: None,
+            failure: None,
+        };
+
+        assert!(worker.submit(1, empty_autosave(1)).is_ok());
+        assert_eq!(
+            worker
+                .pending_autosave
+                .as_ref()
+                .map(|job| job.document_revision),
+            Some(1)
+        );
+        assert!(worker.submit(2, empty_autosave(2)).is_ok());
+        assert_eq!(
+            worker
+                .pending_autosave
+                .as_ref()
+                .map(|job| job.document_revision),
+            Some(2)
+        );
+
+        drop(jobs_rx);
+        worker.flush_pending_autosave();
+        assert!(worker.pending_autosave.is_some());
+        assert!(worker.take_failure().is_some());
     }
 }

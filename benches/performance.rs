@@ -10,6 +10,12 @@ fn schematic_benchmarks(c: &mut Criterion) {
     let small = SchematicFixture::generate(SchematicSize::Small);
     let medium = SchematicFixture::generate(SchematicSize::Medium);
     let large = SchematicFixture::generate(SchematicSize::Large);
+    let prepared_small = small.prepare_analysis();
+    let prepared_medium = medium.prepare_analysis();
+    let prepared_large = large.prepare_analysis();
+    let save_small = small.prepare_save();
+    let save_large = large.prepare_save();
+    let autosave_large = large.prepare_autosave();
 
     for (name, fixture) in [
         ("connectivity_small", &small),
@@ -21,12 +27,29 @@ fn schematic_benchmarks(c: &mut Criterion) {
         });
     }
     for (name, fixture) in [
-        ("erc_small", &small),
-        ("erc_medium", &medium),
-        ("erc_large", &large),
+        ("connectivity_plus_erc_small", &small),
+        ("connectivity_plus_erc_medium", &medium),
+        ("connectivity_plus_erc_large", &large),
     ] {
-        c.bench_function(name, |b| b.iter(|| black_box(fixture).erc_checksum()));
+        c.bench_function(name, |b| {
+            b.iter(|| black_box(fixture).connectivity_plus_erc_checksum())
+        });
     }
+    for (name, prepared) in [
+        ("erc_rules_only_small", &prepared_small),
+        ("erc_rules_only_medium", &prepared_medium),
+        ("erc_rules_only_large", &prepared_large),
+    ] {
+        c.bench_function(name, |b| {
+            b.iter(|| black_box(prepared).erc_evaluation_checksum())
+        });
+    }
+    c.bench_function("erc_values_only_large", |b| {
+        b.iter(|| black_box(&prepared_large).erc_values_only_checksum())
+    });
+    c.bench_function("erc_topology_only_large", |b| {
+        b.iter(|| black_box(&prepared_large).erc_topology_only_checksum())
+    });
     c.bench_function("component_hit_first", |b| {
         b.iter(|| black_box(&large).component_hit_checksum(0))
     });
@@ -79,9 +102,17 @@ fn schematic_benchmarks(c: &mut Criterion) {
     c.bench_function("indexed_hit_test", |b| {
         b.iter(|| black_box(&large).indexed_hit_test_checksum())
     });
-    c.bench_function("mna_small", |b| b.iter(|| black_box(&small).mna_checksum()));
-    c.bench_function("mna_medium", |b| {
-        b.iter(|| black_box(&medium).mna_checksum())
+    c.bench_function("connectivity_plus_mna_small", |b| {
+        b.iter(|| black_box(&small).connectivity_plus_mna_checksum())
+    });
+    c.bench_function("connectivity_plus_mna_medium", |b| {
+        b.iter(|| black_box(&medium).connectivity_plus_mna_checksum())
+    });
+    c.bench_function("mna_solver_only_small", |b| {
+        b.iter(|| black_box(&prepared_small).mna_solver_checksum())
+    });
+    c.bench_function("mna_solver_only_medium", |b| {
+        b.iter(|| black_box(&prepared_medium).mna_solver_checksum())
     });
     c.bench_function("flow_path_generation", |b| {
         b.iter(|| black_box(&large).flow_path_checksum())
@@ -141,10 +172,16 @@ fn schematic_benchmarks(c: &mut Criterion) {
         c.bench_function(name, |b| b.iter(|| black_box(frame.checksum())));
     }
     c.bench_function("save_small", |b| {
-        b.iter(|| black_box(&small).serialization_len())
+        b.iter(|| black_box(&save_small).serialization_len())
     });
     c.bench_function("save_large", |b| {
-        b.iter(|| black_box(&large).serialization_len())
+        b.iter(|| black_box(&save_large).serialization_len())
+    });
+    c.bench_function("save_atomic_write_large", |b| {
+        b.iter(|| black_box(&save_large).atomic_write_len())
+    });
+    c.bench_function("autosave_ui_snapshot_large", |b| {
+        b.iter(|| black_box(&autosave_large).ui_thread_snapshot_len())
     });
 }
 
@@ -233,6 +270,10 @@ fn history_benchmarks(c: &mut Criterion) {
         (
             "command_property_undo_redo",
             CommandHistoryScenario::EditProperty,
+        ),
+        (
+            "command_add_wire_undo_redo",
+            CommandHistoryScenario::AddWire,
         ),
         (
             "command_add_split_wire_undo_redo",

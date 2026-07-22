@@ -7,7 +7,160 @@
 use super::{Component, Counters, PinRef, SchematicAnnotations, Wire, component_pin_defs};
 use super::{JunctionId, WireEndpoint};
 use crate::pcb::board::Board;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DocumentInvariantViolation {
+    NoPages,
+    CurrentPageOutOfRange {
+        current: usize,
+        page_count: usize,
+    },
+    DuplicateEntityId {
+        id: u64,
+    },
+    DuplicateJunctionId {
+        id: JunctionId,
+    },
+    NextIdNotAboveExisting {
+        next_id: u64,
+        maximum_id: u64,
+    },
+    WireHasTooFewPoints {
+        wire_id: u64,
+        point_count: usize,
+    },
+    NonFiniteComponentPosition {
+        component_id: u64,
+    },
+    NonFiniteWirePoint {
+        wire_id: u64,
+        point_index: usize,
+    },
+    MissingEndpointComponent {
+        wire_id: u64,
+        component_id: u64,
+    },
+    MissingEndpointPin {
+        wire_id: u64,
+        component_id: u64,
+        pin_name: String,
+    },
+    MissingEndpointJunction {
+        wire_id: u64,
+        junction_id: JunctionId,
+    },
+    EntityIndexMismatch,
+}
+
+pub(crate) fn validate_document_invariants(
+    document: &ProjectDocument,
+    index: &SchematicEntityIndex,
+) -> Result<(), Vec<DocumentInvariantViolation>> {
+    let mut violations = Vec::new();
+    if document.pages.is_empty() {
+        violations.push(DocumentInvariantViolation::NoPages);
+    }
+    if document.current_page >= document.pages.len() {
+        violations.push(DocumentInvariantViolation::CurrentPageOutOfRange {
+            current: document.current_page,
+            page_count: document.pages.len(),
+        });
+    }
+
+    let mut ids = HashSet::new();
+    let mut maximum_id = 0;
+    for id in document
+        .components
+        .iter()
+        .map(|component| component.id)
+        .chain(document.wires.iter().map(|wire| wire.id))
+    {
+        maximum_id = maximum_id.max(id);
+        if !ids.insert(id) {
+            violations.push(DocumentInvariantViolation::DuplicateEntityId { id });
+        }
+    }
+    let mut junction_ids = HashSet::new();
+    for junction in &document.annotations.junction_dots {
+        if !junction_ids.insert(junction.id) {
+            violations.push(DocumentInvariantViolation::DuplicateJunctionId { id: junction.id });
+        }
+    }
+    if !ids.is_empty() && document.next_id <= maximum_id {
+        violations.push(DocumentInvariantViolation::NextIdNotAboveExisting {
+            next_id: document.next_id,
+            maximum_id,
+        });
+    }
+
+    let components = document
+        .components
+        .iter()
+        .map(|component| (component.id, component))
+        .collect::<HashMap<_, _>>();
+    let junctions = junction_ids;
+    for component in &document.components {
+        if !component.pos.x.is_finite() || !component.pos.y.is_finite() {
+            violations.push(DocumentInvariantViolation::NonFiniteComponentPosition {
+                component_id: component.id,
+            });
+        }
+    }
+    for wire in &document.wires {
+        if wire.points.len() < 2 {
+            violations.push(DocumentInvariantViolation::WireHasTooFewPoints {
+                wire_id: wire.id,
+                point_count: wire.points.len(),
+            });
+        }
+        for (point_index, point) in wire.points.iter().enumerate() {
+            if !point.x.is_finite() || !point.y.is_finite() {
+                violations.push(DocumentInvariantViolation::NonFiniteWirePoint {
+                    wire_id: wire.id,
+                    point_index,
+                });
+            }
+        }
+        for endpoint in [&wire.start, &wire.end] {
+            match endpoint {
+                WireEndpoint::Pin(pin) => match components.get(&pin.component_id) {
+                    None => violations.push(DocumentInvariantViolation::MissingEndpointComponent {
+                        wire_id: wire.id,
+                        component_id: pin.component_id,
+                    }),
+                    Some(component)
+                        if !component_pin_defs(component)
+                            .iter()
+                            .any(|definition| definition.label == pin.pin_name) =>
+                    {
+                        violations.push(DocumentInvariantViolation::MissingEndpointPin {
+                            wire_id: wire.id,
+                            component_id: pin.component_id,
+                            pin_name: pin.pin_name.clone(),
+                        });
+                    }
+                    Some(_) => {}
+                },
+                WireEndpoint::Junction(id) if !junctions.contains(id) => {
+                    violations.push(DocumentInvariantViolation::MissingEndpointJunction {
+                        wire_id: wire.id,
+                        junction_id: *id,
+                    });
+                }
+                WireEndpoint::Junction(_) | WireEndpoint::FreePoint(_) => {}
+            }
+        }
+    }
+    if !index.is_consistent(&document.components, &document.wires, &document.annotations) {
+        violations.push(DocumentInvariantViolation::EntityIndexMismatch);
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations)
+    }
+}
 
 /// Runtime-only direct lookup tables for schematic entities.
 ///
@@ -99,7 +252,6 @@ impl SchematicEntityIndex {
         }
     }
 
-    #[cfg(debug_assertions)]
     pub(crate) fn is_consistent(
         &self,
         components: &[Component],
@@ -246,7 +398,6 @@ impl AttachmentIndex {
             .map_or(&[], Vec::as_slice)
     }
 
-    #[cfg(debug_assertions)]
     pub(crate) fn is_consistent(&self, components: &[Component], wires: &[Wire]) -> bool {
         let mut expected = Self::default();
         expected.rebuild(components, wires);
@@ -457,5 +608,54 @@ mod tests {
         assert_eq!(index.component(4), Some(2));
         assert_eq!(index.wire(10), Some(1));
         assert_eq!(index.junction(JunctionId(31)), Some(1));
+    }
+
+    #[test]
+    fn document_validator_reports_structured_identity_and_endpoint_failures() {
+        let document = ProjectDocument {
+            components: vec![component(1), component(1)],
+            wires: vec![Wire::with_endpoints(
+                2,
+                vec![Pos2::ZERO],
+                WireEndpoint::Pin(PinRef {
+                    component_id: 99,
+                    pin_name: "missing".to_string(),
+                }),
+                WireEndpoint::Junction(JunctionId(77)),
+            )],
+            next_id: 2,
+            ..Default::default()
+        };
+        let index = SchematicEntityIndex::default();
+
+        let violations = validate_document_invariants(&document, &index)
+            .expect_err("malformed document must be rejected");
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            DocumentInvariantViolation::DuplicateEntityId { id: 1 }
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            DocumentInvariantViolation::NextIdNotAboveExisting { .. }
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            DocumentInvariantViolation::WireHasTooFewPoints { wire_id: 2, .. }
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            DocumentInvariantViolation::MissingEndpointComponent {
+                wire_id: 2,
+                component_id: 99
+            }
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            DocumentInvariantViolation::MissingEndpointJunction {
+                wire_id: 2,
+                junction_id: JunctionId(77)
+            }
+        )));
+        assert!(violations.contains(&DocumentInvariantViolation::EntityIndexMismatch));
     }
 }

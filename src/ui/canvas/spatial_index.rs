@@ -320,7 +320,6 @@ impl SchematicSpatialIndex {
         ))
     }
 
-    #[cfg(debug_assertions)]
     pub(crate) fn is_consistent(&self, components: &[Component], wires: &[Wire]) -> bool {
         let expected_wire_geometry = wires
             .iter()

@@ -33,7 +33,10 @@ pub(crate) use pin_defs::{
     component_pin_defs, component_pins, component_size, module_pin_y, rotate_point,
 };
 pub use project::DocumentRevisions;
-pub(crate) use project::{AttachmentIndex, ProjectDocument, ProjectPage, SchematicEntityIndex};
+pub(crate) use project::{
+    AttachmentIndex, ProjectDocument, ProjectPage, SchematicEntityIndex,
+    validate_document_invariants,
+};
 pub(crate) use wire::{
     Wire, WireEndpoint, WireSegmentId, distance_to_segment, point_touches_wire_segment,
 };

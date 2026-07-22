@@ -544,8 +544,9 @@ pub(crate) fn validate_dc_rules(
 // ─── Individual rule implementations ────────────────────────────────────────
 
 fn check_power_gnd_short(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let pins_by_net = group_pins_by_net(netlist);
     for net in &netlist.nets {
-        let pins: Vec<&NetlistPin> = netlist.pins.iter().filter(|p| p.net_id == net.id).collect();
+        let pins = pins_by_net.get(&net.id).map_or(&[][..], Vec::as_slice);
 
         let power_pin = pins.iter().find(|p| pin_is_power_positive(p));
         let gnd_pin = pins.iter().find(|p| {
@@ -672,8 +673,9 @@ fn check_reversed_diode(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
 }
 
 fn check_5v_on_3v3(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let pins_by_net = group_pins_by_net(netlist);
     for net in &netlist.nets {
-        let pins: Vec<&NetlistPin> = netlist.pins.iter().filter(|p| p.net_id == net.id).collect();
+        let pins = pins_by_net.get(&net.id).map_or(&[][..], Vec::as_slice);
         let has_5v = pins.iter().any(|p| pin_is_5v_source(p));
         let target_3v3 = pins.iter().find(|p| pin_name_is_3v3(&p.pin_name));
         if has_5v && let Some(target) = target_3v3 {
@@ -697,8 +699,9 @@ fn check_gpio_direct_loads(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) 
         ComponentKind::Lamp,
     ];
     let mut seen = HashSet::new();
+    let pins_by_net = group_pins_by_net(netlist);
     for net in &netlist.nets {
-        let pins = pins_on_net(netlist, net.id);
+        let pins = pins_by_net.get(&net.id).map_or(&[][..], Vec::as_slice);
         let gpios = pins
             .iter()
             .filter(|pin| pin_is_microcontroller_gpio(pin))
@@ -747,8 +750,9 @@ fn check_gpio_direct_loads(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) 
 }
 
 fn check_esp_gpio_overvoltage(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let pins_by_net = group_pins_by_net(netlist);
     for net in &netlist.nets {
-        let pins = pins_on_net(netlist, net.id);
+        let pins = pins_by_net.get(&net.id).map_or(&[][..], Vec::as_slice);
         if !pins.iter().any(|pin| pin_is_5v_source(pin)) {
             continue;
         }
@@ -778,8 +782,9 @@ fn check_esp_gpio_overvoltage(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation
 }
 
 fn check_power_rail_conflicts(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let pins_by_net = group_pins_by_net(netlist);
     for net in &netlist.nets {
-        let pins = pins_on_net(netlist, net.id);
+        let pins = pins_by_net.get(&net.id).map_or(&[][..], Vec::as_slice);
         let has_5v = pins
             .iter()
             .any(|pin| pin.pin_name.eq_ignore_ascii_case("5V") || pin_is_5v_source(pin));
@@ -935,8 +940,9 @@ fn check_symbolic_components(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>
 }
 
 fn check_oled_sda_scl_swap(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let pins_by_net = group_pins_by_net(netlist);
     for net in &netlist.nets {
-        let pins: Vec<&NetlistPin> = netlist.pins.iter().filter(|p| p.net_id == net.id).collect();
+        let pins = pins_by_net.get(&net.id).map_or(&[][..], Vec::as_slice);
 
         let oled_sda = pins.iter().any(|p| {
             p.component_kind == ComponentKind::Oled && p.pin_name.eq_ignore_ascii_case("SDA")
@@ -982,8 +988,9 @@ fn check_oled_sda_scl_swap(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) 
 
 fn check_uart_tx_rx_swap(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
     let mut reported = HashSet::new();
+    let pins_by_net = group_pins_by_net(netlist);
     for net in &netlist.nets {
-        let pins = pins_on_net(netlist, net.id);
+        let pins = pins_by_net.get(&net.id).map_or(&[][..], Vec::as_slice);
         let tx_pins = pins
             .iter()
             .filter(|pin| pin_is_uart_tx(pin))
@@ -1044,10 +1051,11 @@ fn check_uart_tx_rx_swap(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
 }
 
 fn check_spi_signal_mismatch(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let pins_by_net = group_pins_by_net(netlist);
     for net in &netlist.nets {
-        let pins = pins_on_net(netlist, net.id);
+        let pins = pins_by_net.get(&net.id).map_or(&[][..], Vec::as_slice);
         let mut roles: HashMap<&'static str, Vec<&NetlistPin>> = HashMap::new();
-        for pin in pins {
+        for &pin in pins {
             if let Some(role) = spi_role(pin) {
                 roles.entry(role).or_default().push(pin);
             }
@@ -1079,8 +1087,9 @@ fn check_spi_signal_mismatch(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>
 }
 
 fn check_adc_overvoltage(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let pins_by_net = group_pins_by_net(netlist);
     for net in &netlist.nets {
-        let pins = pins_on_net(netlist, net.id);
+        let pins = pins_by_net.get(&net.id).map_or(&[][..], Vec::as_slice);
         if !pins.iter().any(|pin| pin_is_5v_source(pin)) {
             continue;
         }
@@ -1333,13 +1342,10 @@ fn check_floating_dc_nets(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
     let graph = dc_net_graph(netlist, true);
     let referenced = reachable_net_ids(&graph, ground_nets.iter().copied());
     let wired_nets = netlist.wire_nets.values().copied().collect::<HashSet<_>>();
+    let pins_by_net = group_pins_by_net(netlist);
 
     for net in &netlist.nets {
-        let pins_on_net = netlist
-            .pins
-            .iter()
-            .filter(|pin| pin.net_id == net.id)
-            .collect::<Vec<_>>();
+        let pins_on_net = pins_by_net.get(&net.id).map_or(&[][..], Vec::as_slice);
         if referenced.contains(&net.id) || !wired_nets.contains(&net.id) || pins_on_net.is_empty() {
             continue;
         }
@@ -1596,12 +1602,12 @@ fn reachable_net_ids(
     seen
 }
 
-fn pins_on_net(netlist: &CircuitNetlist, net_id: usize) -> Vec<&NetlistPin> {
-    netlist
-        .pins
-        .iter()
-        .filter(|pin| pin.net_id == net_id)
-        .collect()
+fn group_pins_by_net(netlist: &CircuitNetlist) -> HashMap<usize, Vec<&NetlistPin>> {
+    let mut pins_by_net: HashMap<usize, Vec<&NetlistPin>> = HashMap::new();
+    for pin in &netlist.pins {
+        pins_by_net.entry(pin.net_id).or_default().push(pin);
+    }
+    pins_by_net
 }
 
 fn net_has_component_kind(netlist: &CircuitNetlist, net_id: usize, kind: ComponentKind) -> bool {
@@ -1711,13 +1717,15 @@ fn normalized_pin_name(name: &str) -> String {
 
 /// Two driven Output pins on the same net will fight each other; report an error.
 fn check_output_output_conflict(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let pins_by_net = group_pins_by_net(netlist);
     for net in &netlist.nets {
-        let drivers: Vec<&NetlistPin> = netlist
-            .pins
+        let drivers: Vec<&NetlistPin> = pins_by_net
+            .get(&net.id)
+            .map_or(&[][..], Vec::as_slice)
             .iter()
+            .copied()
             .filter(|pin| {
-                pin.net_id == net.id
-                    && pin.connected_by_wire
+                pin.connected_by_wire
                     && pin.electrical_type.is_driver()
                     // Power supply outputs naturally share rails — only warn on logic outputs
                     && !matches!(
@@ -1750,12 +1758,15 @@ fn check_output_output_conflict(netlist: &CircuitNetlist, v: &mut Vec<ErcViolati
 
 /// A PowerIn pin that shares a net with no PowerOutput means the rail has no supply.
 fn check_power_input_not_driven(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation>) {
+    let pins_by_net = group_pins_by_net(netlist);
     for net in &netlist.nets {
-        let pins_here: Vec<&NetlistPin> = netlist
-            .pins
+        let pins_here = pins_by_net
+            .get(&net.id)
+            .map_or(&[][..], Vec::as_slice)
             .iter()
-            .filter(|p| p.net_id == net.id && p.connected_by_wire)
-            .collect();
+            .copied()
+            .filter(|p| p.connected_by_wire)
+            .collect::<Vec<_>>();
 
         let has_power_in = pins_here
             .iter()
@@ -2092,8 +2103,9 @@ fn check_gpio_current_limit(
     dc: &crate::engine::mna::DcResult,
     v: &mut Vec<ErcViolation>,
 ) {
+    let pins_by_net = group_pins_by_net(netlist);
     for net in &netlist.nets {
-        let pins = pins_on_net(netlist, net.id);
+        let pins = pins_by_net.get(&net.id).map_or(&[][..], Vec::as_slice);
         let gpio_pins: Vec<&NetlistPin> = pins
             .iter()
             .filter(|p| pin_is_microcontroller_gpio(p))
@@ -2105,7 +2117,7 @@ fn check_gpio_current_limit(
 
         // For each component on this net, check if its current exceeds GPIO max
         let mut seen_comp: HashSet<u64> = HashSet::new();
-        for comp_pin in &pins {
+        for comp_pin in pins {
             if !seen_comp.insert(comp_pin.component_id) {
                 continue;
             }

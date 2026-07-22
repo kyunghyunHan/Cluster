@@ -362,10 +362,20 @@ The repository includes deterministic Criterion fixtures in
 
 ```text
 cargo bench --bench performance
-CLUSTER_PERF_SAMPLES=9 cargo run --release --example performance_probe
+CLUSTER_PERF_SAMPLES=21 cargo run --release --example performance_probe
 ```
 
-The following p50 values compare `e613665` with this change on arm64 macOS.
+The current reproducible three-run baseline and audit protocol are recorded in
+`docs/architecture/commercial-completion-audit-2026-07-23.md`. The probe now
+reports ERC rule evaluation and MNA solver time separately from their
+connectivity-inclusive aggregate workloads, plus value-only and topology-only
+ERC. In the 2026-07-23 completion slice, net-indexed ERC evaluation reduced the
+large rules-only p95 from `97.8833 ms` to `4.3620 ms`, and scoped command deltas
+reduced add/split-wire p95 from `10.6827 ms` to `0.8900 ms`. Large offscreen
+egui p95 was `2.5437 ms`; UI-thread autosave DTO p95 was `1.3058 ms`. MNA
+topology reuse and local incremental connectivity remain open and are not
+reported as complete. The following historical p50 values
+compare `e613665` with the earlier change on arm64 macOS.
 Each circuit row uses the exact component/segment count shown. Times are
 milliseconds; the local-DRC baseline used the old truncated-board approximation,
 whereas the new result validates 128 affected tracks against the complete board.

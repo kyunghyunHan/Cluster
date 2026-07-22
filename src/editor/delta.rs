@@ -100,8 +100,24 @@ pub(crate) struct BoardDeltaCapture {
 pub(crate) struct SchematicDeltaCapture {
     component_ids: HashSet<u64>,
     wire_ids: HashSet<u64>,
+    component_ids_before: HashSet<u64>,
+    wire_ids_before: HashSet<u64>,
     before_components: HashMap<u64, ListValue<Component>>,
     before_wires: HashMap<u64, ListValue<Wire>>,
+    before_annotations: Option<SchematicAnnotations>,
+    before_metadata: Option<DocumentMetadata>,
+    capture_new_components: bool,
+    capture_new_wires: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct SchematicDeltaScope {
+    pub(crate) component_ids: HashSet<u64>,
+    pub(crate) wire_ids: HashSet<u64>,
+    pub(crate) capture_new_components: bool,
+    pub(crate) capture_new_wires: bool,
+    pub(crate) capture_annotations: bool,
+    pub(crate) capture_metadata: bool,
 }
 
 /// Common reversible command behavior used by schematic and PCB history.
@@ -152,18 +168,40 @@ impl DocumentDelta {
         }
     }
 
-    pub(crate) fn capture_schematic_entities(
+    pub(crate) fn capture_schematic(
         document: &ProjectDocument,
-        component_ids: HashSet<u64>,
-        wire_ids: HashSet<u64>,
+        scope: SchematicDeltaScope,
     ) -> SchematicDeltaCapture {
         SchematicDeltaCapture {
-            before_components: capture_values(&document.components, &component_ids, |value| {
-                value.id
+            before_components: capture_values(
+                &document.components,
+                &scope.component_ids,
+                |value| value.id,
+            ),
+            before_wires: capture_values(&document.wires, &scope.wire_ids, |value| value.id),
+            component_ids_before: if scope.capture_new_components {
+                document.components.iter().map(|value| value.id).collect()
+            } else {
+                Default::default()
+            },
+            wire_ids_before: if scope.capture_new_wires {
+                document.wires.iter().map(|value| value.id).collect()
+            } else {
+                Default::default()
+            },
+            before_annotations: scope
+                .capture_annotations
+                .then(|| document.annotations.clone()),
+            before_metadata: scope.capture_metadata.then(|| DocumentMetadata {
+                next_id: document.next_id,
+                counters: document.counters.clone(),
+                pages: document.pages.clone(),
+                current_page: document.current_page,
             }),
-            before_wires: capture_values(&document.wires, &wire_ids, |value| value.id),
-            component_ids,
-            wire_ids,
+            component_ids: scope.component_ids,
+            wire_ids: scope.wire_ids,
+            capture_new_components: scope.capture_new_components,
+            capture_new_wires: scope.capture_new_wires,
         }
     }
 
@@ -171,20 +209,46 @@ impl DocumentDelta {
         capture: SchematicDeltaCapture,
         document: &ProjectDocument,
     ) -> Self {
+        let mut component_ids = capture.component_ids;
+        if capture.capture_new_components {
+            component_ids.extend(
+                document
+                    .components
+                    .iter()
+                    .filter(|value| !capture.component_ids_before.contains(&value.id))
+                    .map(|value| value.id),
+            );
+        }
+        let mut wire_ids = capture.wire_ids;
+        if capture.capture_new_wires {
+            wire_ids.extend(
+                document
+                    .wires
+                    .iter()
+                    .filter(|value| !capture.wire_ids_before.contains(&value.id))
+                    .map(|value| value.id),
+            );
+        }
         let after_components =
-            capture_values(&document.components, &capture.component_ids, |value| {
-                value.id
-            });
-        let after_wires = capture_values(&document.wires, &capture.wire_ids, |value| value.id);
+            capture_values(&document.components, &component_ids, |value| value.id);
+        let after_wires = capture_values(&document.wires, &wire_ids, |value| value.id);
+        let before_metadata = capture.before_metadata;
+        let after_metadata = before_metadata.as_ref().map(|_| DocumentMetadata {
+            next_id: document.next_id,
+            counters: document.counters.clone(),
+            pages: document.pages.clone(),
+            current_page: document.current_page,
+        });
         Self {
-            components: diff_captured(
-                capture.before_components,
-                after_components,
-                &capture.component_ids,
-            ),
-            wires: diff_captured(capture.before_wires, after_wires, &capture.wire_ids),
-            annotations: None,
-            metadata: None,
+            components: diff_captured(capture.before_components, after_components, &component_ids),
+            wires: diff_captured(capture.before_wires, after_wires, &wire_ids),
+            annotations: capture
+                .before_annotations
+                .map(|before| (before, document.annotations.clone()))
+                .filter(|(before, after)| before != after),
+            metadata: before_metadata
+                .zip(after_metadata)
+                .filter(|(before, after)| before != after),
             board_footprints: Vec::new(),
             board_tracks: Vec::new(),
             board_vias: Vec::new(),

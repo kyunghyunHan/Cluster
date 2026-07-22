@@ -144,12 +144,41 @@ fn main() {
         measure(&format!("connectivity_{label}"), samples, || {
             fixture.connectivity_checksum()
         });
-        measure(&format!("erc_{label}"), samples, || fixture.erc_checksum());
-        measure(&format!("mna_{label}"), samples, || fixture.mna_checksum());
-        measure(&format!("save_{label}"), samples, || {
-            fixture.serialization_len()
+        let prepared = fixture.prepare_analysis();
+        measure(&format!("erc_rules_only_{label}"), samples, || {
+            prepared.erc_evaluation_checksum()
+        });
+        if label == "1000c_5000s" {
+            measure("erc_values_only_1000c_5000s", samples, || {
+                prepared.erc_values_only_checksum()
+            });
+            measure("erc_topology_only_1000c_5000s", samples, || {
+                prepared.erc_topology_only_checksum()
+            });
+        }
+        measure(&format!("connectivity_plus_erc_{label}"), samples, || {
+            fixture.connectivity_plus_erc_checksum()
+        });
+        measure(&format!("mna_solver_only_{label}"), samples, || {
+            prepared.mna_solver_checksum()
+        });
+        measure(&format!("connectivity_plus_mna_{label}"), samples, || {
+            fixture.connectivity_plus_mna_checksum()
+        });
+        let save = fixture.prepare_save();
+        measure(&format!("save_json_{label}"), samples, || {
+            save.serialization_len()
         });
     }
+
+    let save = large.prepare_save();
+    measure("save_atomic_write_1000c_5000s", samples, || {
+        save.atomic_write_len()
+    });
+    let autosave = large.prepare_autosave();
+    measure("autosave_ui_snapshot_1000c_5000s", samples, || {
+        autosave.ui_thread_snapshot_len()
+    });
 
     let connectivity = large.connectivity_stage_profile();
     println!(
@@ -205,6 +234,7 @@ fn main() {
         ),
         ("cmd_rotate", CommandHistoryScenario::RotateComponent),
         ("cmd_property", CommandHistoryScenario::EditProperty),
+        ("cmd_add_wire", CommandHistoryScenario::AddWire),
         (
             "cmd_add_split_wire",
             CommandHistoryScenario::AddAndSplitWire,

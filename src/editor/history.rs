@@ -82,9 +82,33 @@ impl crate::CircuitApp {
             return;
         }
         self.editor.history.pending = Some(crate::ui::app::PendingHistory {
-            snapshot: self.snapshot(),
+            basis: crate::ui::app::PendingHistoryBasis::Snapshot(Box::new(self.snapshot())),
             description,
             merge_key,
+        });
+    }
+
+    pub(crate) fn begin_schematic_history_transaction(
+        &mut self,
+        description: &'static str,
+        component_ids: std::collections::HashSet<u64>,
+        wire_ids: std::collections::HashSet<u64>,
+    ) {
+        if self.editor.history.pending.is_some() {
+            return;
+        }
+        let capture = DocumentDelta::capture_schematic(
+            &self.document,
+            crate::editor::delta::SchematicDeltaScope {
+                component_ids,
+                wire_ids,
+                ..Default::default()
+            },
+        );
+        self.editor.history.pending = Some(crate::ui::app::PendingHistory {
+            basis: crate::ui::app::PendingHistoryBasis::Schematic(Box::new(capture)),
+            description,
+            merge_key: None,
         });
     }
 
@@ -92,7 +116,14 @@ impl crate::CircuitApp {
         let Some(pending) = self.editor.history.pending.take() else {
             return;
         };
-        let delta = DocumentDelta::between(&pending.snapshot, &self.snapshot());
+        let delta = match pending.basis {
+            crate::ui::app::PendingHistoryBasis::Snapshot(snapshot) => {
+                DocumentDelta::between(&snapshot, &self.snapshot())
+            }
+            crate::ui::app::PendingHistoryBasis::Schematic(capture) => {
+                DocumentDelta::from_schematic_capture(*capture, &self.document)
+            }
+        };
         self.push_history_delta(delta, pending.description, pending.merge_key);
     }
 
@@ -181,6 +212,8 @@ impl crate::CircuitApp {
         }
         self.editor.history.redo.push_back(entry);
         self.status = format!("Undo: {description}.");
+        #[cfg(debug_assertions)]
+        self.assert_editor_invariants();
     }
 
     pub(crate) fn redo(&mut self) {
@@ -204,6 +237,8 @@ impl crate::CircuitApp {
         }
         self.editor.history.undo.push_back(entry);
         self.status = format!("Redo: {description}.");
+        #[cfg(debug_assertions)]
+        self.assert_editor_invariants();
     }
 
     fn reset_editor_after_history_navigation(&mut self) {

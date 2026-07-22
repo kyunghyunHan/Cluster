@@ -425,6 +425,7 @@ mod tests {
             end: Point2::new(10.0, 0.0),
             width_mm: 0.1,
         });
+        board.rebuild_entity_index();
 
         let violations = run_drc(&board);
 
@@ -455,6 +456,7 @@ mod tests {
             end: Point2::new(10.0, 0.1),
             width_mm: 0.25,
         });
+        board.rebuild_entity_index();
 
         let violations = run_drc(&board);
 
@@ -516,6 +518,7 @@ mod tests {
             ],
             class_id: "Default".to_string(),
         }];
+        board.rebuild_entity_index();
 
         let violations = run_drc_with_nets(&board, &nets);
 
@@ -551,6 +554,7 @@ mod tests {
             end: Point2::new(10.0, 10.0),
             width_mm: 0.25,
         });
+        board.rebuild_entity_index();
 
         let violations = run_drc(&board);
         assert!(

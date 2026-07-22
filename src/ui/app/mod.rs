@@ -210,9 +210,14 @@ pub(crate) struct HistoryEntry {
 }
 
 pub(crate) struct PendingHistory {
-    pub(crate) snapshot: CircuitSnapshot,
+    pub(crate) basis: PendingHistoryBasis,
     pub(crate) description: &'static str,
     pub(crate) merge_key: Option<crate::commands::CommandMergeKey>,
+}
+
+pub(crate) enum PendingHistoryBasis {
+    Snapshot(Box<CircuitSnapshot>),
+    Schematic(Box<crate::editor::delta::SchematicDeltaCapture>),
 }
 
 #[derive(Default)]
@@ -2828,7 +2833,11 @@ impl CircuitApp {
                 if let Some((wire_id, point_index)) =
                     self.indexed_wire_control_point_hit(world)
                 {
-                    self.record_history();
+                    self.begin_schematic_history_transaction(
+                        "Move wire point",
+                        std::collections::HashSet::new(),
+                        std::collections::HashSet::from([wire_id]),
+                    );
                     self.editor.drag = Some(DragState::WirePoint {
                         wire_id,
                         point_index,
@@ -2843,7 +2852,22 @@ impl CircuitApp {
                 } else if let Some(Selection::Component(id)) =
                     self.indexed_component_hit(world)
                 {
-                    self.record_history();
+                    let mut component_ids = self.editor.multi_selected.clone();
+                    component_ids.insert(id);
+                    let wire_ids = component_ids
+                        .iter()
+                        .flat_map(|component_id| {
+                            self.analysis
+                                .attachment_index
+                                .attached_wires(*component_id)
+                        })
+                        .copied()
+                        .collect();
+                    self.begin_schematic_history_transaction(
+                        "Move component",
+                        component_ids,
+                        wire_ids,
+                    );
                     if let Some(component) = self.component_by_id(id) {
                         self.editor.drag = Some(DragState::Component {
                             id,

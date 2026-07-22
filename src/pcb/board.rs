@@ -158,6 +158,20 @@ struct BoardEntityIndex {
     vias: HashMap<u64, usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BoardInvariantViolation {
+    DuplicateFootprintId { id: u64 },
+    DuplicateTrackId { id: u64 },
+    DuplicateViaId { id: u64 },
+    DuplicateZoneId { id: u64 },
+    EntityIndexMismatch,
+    InvalidOutline,
+    NonFiniteGeometry { entity: &'static str, id: u64 },
+    InvalidTrackWidth { id: u64 },
+    InvalidViaDimensions { id: u64 },
+    MissingLayer { entity: &'static str, id: u64 },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RatsnestEdge {
     pub(crate) net_id: usize,
@@ -330,7 +344,6 @@ impl Board {
             .footprints
             .get(&id)
             .and_then(|index| self.footprints.get(*index))
-            .or_else(|| self.footprints.iter().find(|footprint| footprint.id == id))
     }
 
     pub(crate) fn track_mut(&mut self, id: u64) -> Option<&mut TrackSegment> {
@@ -344,7 +357,6 @@ impl Board {
             .tracks
             .get(&id)
             .and_then(|index| self.tracks.get(*index))
-            .or_else(|| self.tracks.iter().find(|track| track.id == id))
     }
 
     pub(crate) fn via(&self, id: u64) -> Option<&Via> {
@@ -352,7 +364,6 @@ impl Board {
             .vias
             .get(&id)
             .and_then(|index| self.vias.get(*index))
-            .or_else(|| self.vias.iter().find(|via| via.id == id))
     }
 
     pub(crate) fn via_mut(&mut self, id: u64) -> Option<&mut Via> {
@@ -489,6 +500,99 @@ impl Board {
                 .all(|(index, via)| self.entity_index.vias.get(&via.id) == Some(&index))
     }
 
+    pub(crate) fn validate_invariants(&self) -> Result<(), Vec<BoardInvariantViolation>> {
+        let mut violations = Vec::new();
+        collect_duplicate_ids(
+            self.footprints.iter().map(|entity| entity.id),
+            |id| BoardInvariantViolation::DuplicateFootprintId { id },
+            &mut violations,
+        );
+        collect_duplicate_ids(
+            self.tracks.iter().map(|entity| entity.id),
+            |id| BoardInvariantViolation::DuplicateTrackId { id },
+            &mut violations,
+        );
+        collect_duplicate_ids(
+            self.vias.iter().map(|entity| entity.id),
+            |id| BoardInvariantViolation::DuplicateViaId { id },
+            &mut violations,
+        );
+        collect_duplicate_ids(
+            self.zones.iter().map(|entity| entity.id),
+            |id| BoardInvariantViolation::DuplicateZoneId { id },
+            &mut violations,
+        );
+        if !self.entity_index_is_consistent() {
+            violations.push(BoardInvariantViolation::EntityIndexMismatch);
+        }
+        if self.outline.points.len() < 4
+            || self.outline.points.iter().any(|point| !finite(*point))
+            || self.outline.points.first() != self.outline.points.last()
+        {
+            violations.push(BoardInvariantViolation::InvalidOutline);
+        }
+        for footprint in &self.footprints {
+            if !finite(footprint.position) || !footprint.rotation_deg.is_finite() {
+                violations.push(BoardInvariantViolation::NonFiniteGeometry {
+                    entity: "footprint",
+                    id: footprint.id,
+                });
+            }
+        }
+        for track in &self.tracks {
+            if !finite(track.start) || !finite(track.end) {
+                violations.push(BoardInvariantViolation::NonFiniteGeometry {
+                    entity: "track",
+                    id: track.id,
+                });
+            }
+            if !track.width_mm.is_finite() || track.width_mm <= 0.0 {
+                violations.push(BoardInvariantViolation::InvalidTrackWidth { id: track.id });
+            }
+            if !self.layers.contains(&track.layer) {
+                violations.push(BoardInvariantViolation::MissingLayer {
+                    entity: "track",
+                    id: track.id,
+                });
+            }
+        }
+        for via in &self.vias {
+            if !finite(via.position) {
+                violations.push(BoardInvariantViolation::NonFiniteGeometry {
+                    entity: "via",
+                    id: via.id,
+                });
+            }
+            if !via.diameter_mm.is_finite()
+                || !via.drill_mm.is_finite()
+                || via.diameter_mm <= 0.0
+                || via.drill_mm <= 0.0
+                || via.drill_mm >= via.diameter_mm
+            {
+                violations.push(BoardInvariantViolation::InvalidViaDimensions { id: via.id });
+            }
+        }
+        for zone in &self.zones {
+            if zone.outline.len() < 3 || zone.outline.iter().any(|point| !finite(*point)) {
+                violations.push(BoardInvariantViolation::NonFiniteGeometry {
+                    entity: "zone",
+                    id: zone.id,
+                });
+            }
+            if !self.layers.contains(&zone.layer) {
+                violations.push(BoardInvariantViolation::MissingLayer {
+                    entity: "zone",
+                    id: zone.id,
+                });
+            }
+        }
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(violations)
+        }
+    }
+
     pub(crate) fn footprint_candidates(&self, point: Point2) -> Vec<u64> {
         self.spatial_index.footprint_candidates(point)
     }
@@ -502,29 +606,11 @@ impl Board {
     }
 
     pub(crate) fn track_candidates_in_bounds(&self, min: Point2, max: Point2) -> Vec<u64> {
-        if self.entity_index_is_consistent() {
-            self.spatial_index.track_candidates_in_bounds(min, max)
-        } else {
-            // Compatibility for construction/import code that fills public
-            // vectors before calling `rebuild_entity_index`.
-            self.tracks.iter().map(|track| track.id).collect()
-        }
+        self.spatial_index.track_candidates_in_bounds(min, max)
     }
 
     pub(crate) fn track_candidate_pairs(&self) -> Vec<(u64, u64)> {
-        if self.entity_index_is_consistent() {
-            self.spatial_index.track_candidate_pairs()
-        } else {
-            self.tracks
-                .iter()
-                .enumerate()
-                .flat_map(|(index, left)| {
-                    self.tracks[index + 1..]
-                        .iter()
-                        .map(move |right| (left.id, right.id))
-                })
-                .collect()
-        }
+        self.spatial_index.track_candidate_pairs()
     }
 
     pub(crate) fn via_candidates(&self, point: Point2) -> Vec<u64> {
@@ -890,6 +976,23 @@ impl Board {
             }
         }
         islands
+    }
+}
+
+fn finite(point: Point2) -> bool {
+    point.x.is_finite() && point.y.is_finite()
+}
+
+fn collect_duplicate_ids(
+    ids: impl IntoIterator<Item = u64>,
+    violation: impl Fn(u64) -> BoardInvariantViolation,
+    output: &mut Vec<BoardInvariantViolation>,
+) {
+    let mut seen = HashSet::new();
+    for id in ids {
+        if !seen.insert(id) {
+            output.push(violation(id));
+        }
     }
 }
 
@@ -1321,5 +1424,32 @@ mod tests {
         assert_eq!(board.remove_track(41).map(|track| track.id), Some(41));
         assert!(board.track_candidates(Point2::new(52.0, 40.0)).is_empty());
         assert!(board.entity_index_is_consistent());
+    }
+
+    #[test]
+    fn board_validator_reports_corrupt_geometry_and_index() {
+        let mut board = Board::new_two_layer(80.0, 50.0);
+        board.tracks.push(TrackSegment {
+            id: 9,
+            net_id: 1,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(f32::NAN, 1.0),
+            end: Point2::new(2.0, 1.0),
+            width_mm: 0.0,
+        });
+        board.tracks.push(board.tracks[0].clone());
+
+        let violations = board
+            .validate_invariants()
+            .expect_err("malformed board must be rejected");
+        assert!(violations.contains(&BoardInvariantViolation::DuplicateTrackId { id: 9 }));
+        assert!(violations.contains(&BoardInvariantViolation::EntityIndexMismatch));
+        assert!(
+            violations.contains(&BoardInvariantViolation::NonFiniteGeometry {
+                entity: "track",
+                id: 9,
+            })
+        );
+        assert!(violations.contains(&BoardInvariantViolation::InvalidTrackWidth { id: 9 }));
     }
 }
