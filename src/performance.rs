@@ -690,13 +690,8 @@ impl SchematicFixture {
     }
 
     pub fn indexed_viewport_checksum(&self, viewport: Rect) -> usize {
-        self.spatial_index
-            .query_components(viewport.min, viewport.max)
-            .len()
-            + self
-                .spatial_index
-                .query_wires(viewport.min, viewport.max)
-                .len()
+        self.spatial_index.components_in_viewport(viewport).len()
+            + self.spatial_index.wire_segments_in_viewport(viewport).len()
     }
 
     pub fn viewport_query_checksum(&self) -> usize {

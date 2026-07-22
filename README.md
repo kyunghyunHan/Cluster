@@ -451,21 +451,43 @@ Topology/parameter structural reuse is not implemented yet.
 
 Actual command + undo + redo + undo p50 values improved as follows:
 
-| Command | Before | After |
-| --- | ---: | ---: |
-| Move one component | 82.08 ms | 0.76 ms |
-| Move 100 components | 74.18 ms | 1.76 ms |
-| Rotate component | 71.68 ms | 0.68 ms |
-| Edit property | 66.56 ms | 0.09 ms |
-| Add/split wire | 64.88 ms | 79.11 ms |
-| Route PCB track | 74.12 ms | 0.35 ms |
-| Add via | 69.94 ms | 0.34 ms |
-| Move footprint | 82.69 ms | 0.33 ms |
+| Command | Before | `d67dde5` | Current |
+| --- | ---: | ---: | ---: |
+| Move one component | 82.08 ms | 0.76 ms | 0.76 ms |
+| Move 100 components | 74.18 ms | 1.76 ms | 1.76 ms |
+| Rotate component | 71.68 ms | 0.68 ms | 0.68 ms |
+| Edit property | 66.56 ms | 0.09 ms | 0.09 ms |
+| Add/split wire | 64.88 ms | 79.11 ms | 16.12 ms |
+| Route PCB track | 74.12 ms | 0.35 ms | 0.35 ms |
+| Add via | 69.94 ms | 0.34 ms | 0.34 ms |
+| Move footprint | 82.69 ms | 0.33 ms | 0.33 ms |
 
 Move/rotate/property/control-point commands capture only affected entities and
-history navigation refreshes only affected spatial/attachment entries. Add,
-paste, delete, alignment, document/page and drag transactions still have a full
-snapshot fallback; add/split wire is visibly the remaining worst path.
+history navigation refreshes only affected spatial/attachment entries. The
+shared schematic index now stores individual wire segments, uses deterministic
+pin candidates, and updates attachment keys without rebuilding every component
+pin or sorting every attachment map. Command commits retag all three derived
+indexes only after debug invariant checks, so the following command does not
+silently rebuild them again. Add, paste, delete, alignment, document/page and
+drag transactions still have a full snapshot fallback; add/split remains the
+slowest measured schematic command even after the 74% follow-up improvement.
+
+PCB footprint rotation and back-side flip now share one `FootprintTransform`
+for pad lookup and the PCB spatial index. Gerber pad flashes and Excellon drill
+coordinates use the same transform; Excellon emits actual via/pad tool sizes,
+and CPL records bottom-side placement. Quadrant/flip, transformed Gerber,
+Excellon, and CPL coordinate tests cover this fabrication boundary. Copper-zone
+fill, mask expansion, and full external golden-file fixtures remain incomplete.
+
+The final sustained full-suite probe reported large connectivity/ERC/MNA
+aggregate p50 as `76.88/222.83/228.52 ms` and peak incremental heap as
+`5,993,340 B`. These are regressions from the preceding isolated probe and are
+recorded as observed; the same run slowed unrelated save, PCB, and synthetic
+microbenchmarks, so another thermally controlled baseline is required before
+attributing the delta. Actual large offscreen egui total was
+`4.128/8.486/8.486 ms` p50/p95/max. The focused final rerun measured dense pin
+lookup at `132.66 ns`, full schematic viewport query at `1.039 ms`, and
+add/split/undo/redo at `16.12 ms`.
 
 ## Roadmap
 

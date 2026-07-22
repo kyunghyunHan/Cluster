@@ -202,13 +202,14 @@ Notes:
 
 현재 구조 안정화 상태:
 - 성능 기준선과 구조 마무리 수치는 README Performance baseline에 기록한다. `benches/performance.rs`와 `examples/performance_probe.rs`가 realistic schematic/PCB/실제 command undo/frame percentile/heap 핵심 경로를 재현한다. offscreen egui benchmark는 production `update_ui`/panel/canvas paint/tessellation을 측정한다. `DocumentRevisions`와 `Arc` cache, bounded revision-tagged analysis worker, schematic entity/attachment/shared spatial index, PCB entity/spatial index, local DRC가 적용되어 visual-only/PCB-only 변경이 schematic 분석 cache를 무효화하지 않고 오래된 worker 결과를 폐기한다.
-- `ProjectDocument`/`EditorState`/`WorkspaceState`/`AnalysisState` 소유권 경계를 사용한다. component/wire 삭제는 swap-remove 후 ID index를 단일 보정하고, drag preview는 release 전까지 분석 revision을 올리지 않는다.
+- `ProjectDocument`/`EditorState`/`WorkspaceState`/`AnalysisState` 소유권 경계를 사용한다. component/wire 삭제는 swap-remove 후 ID index를 단일 보정하고, drag preview는 release 전까지 분석 revision을 올리지 않는다. schematic command는 entity/attachment/segment spatial index를 함께 incremental 갱신하고 debug commit에서 document/index invariant를 검증한다. explicit pin endpoint 이동은 `PinRef` identity와 이전 물리 위치를 함께 사용한다.
 - editor command는 제한된 `CommandContext`와 typed `ChangeSet`을 사용하며 중앙 dispatcher가 cache/dirty/autosave/repaint를 처리한다. undo/redo는 16 MiB 제한의 entity delta를 저장한다.
 - canonical connectivity의 endpoint/spatial-index/intersection/junction/geometry/label/union-find/diagnostics 단계가 분리되었고 입력 배열 순서와 무관한 exact net mapping을 테스트한다. contact exact-check 결과를 canonical segment normalization에서 재사용하며 단계별 프로파일을 probe에 출력한다.
 - `ProjectPage`가 junction/no-connect annotation을 소유하며 schema v4 JSON과 다중 페이지/undo/자동복구 왕복에서 이를 보존한다. canonical 결과는 좌표와 typed `JunctionId` 양쪽의 exact net mapping을 제공한다.
 - ERC rule registry는 rule disable/severity override와 certainty를 지원하며 annotation/no-connect/ground rule이 domain module로 분리되었다.
 - custom part schema v2는 v1 파일을 유지하면서 구조화 metadata와 footprint 검증을 지원하고 symlink/1 MiB 초과 입력을 거부한다.
 - 저장은 같은 디렉터리의 임시 파일을 sync/rename하고 3세대 backup을 유지한다.
+- PCB footprint pad lookup/spatial index/Gerber/Excellon은 공통 `FootprintTransform`을 사용하며 0/90/180/270도와 back flip 좌표를 테스트한다. Excellon은 배치 footprint drill과 실제 tool diameter를 출력한다.
 - `v*` tag release workflow가 Linux/macOS/Windows portable archive, SHA-256 checksum, 자동 release note를 생성한다.
 
 ## Definition Of Done

@@ -94,6 +94,16 @@ pub(crate) struct BoardFootprint {
     pub(crate) placed: bool,
 }
 
+impl BoardFootprint {
+    pub(crate) fn transform(&self) -> crate::pcb::footprint::FootprintTransform {
+        crate::pcb::footprint::FootprintTransform {
+            position: self.position,
+            rotation_deg: self.rotation_deg,
+            flipped: self.flipped,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Zone {
     pub(crate) id: u64,
@@ -304,10 +314,7 @@ impl Board {
     }
 
     fn ensure_entity_index(&mut self) {
-        if self.entity_index.footprints.len() != self.footprints.len()
-            || self.entity_index.tracks.len() != self.tracks.len()
-            || self.entity_index.vias.len() != self.vias.len()
-        {
+        if !self.entity_index_is_consistent() {
             self.rebuild_entity_index();
         }
     }
@@ -542,10 +549,7 @@ impl Board {
             .pads
             .iter()
             .find(|item| item.number == pad.number)?;
-        Some(Point2::new(
-            footprint.position.x + pad.position.x,
-            footprint.position.y + pad.position.y,
-        ))
+        Some(footprint.transform().local_to_board(pad.position))
     }
 
     pub(crate) fn edge_candidates(&self, point: Point2) -> Vec<usize> {

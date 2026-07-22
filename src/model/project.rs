@@ -21,6 +21,12 @@ pub(crate) struct SchematicEntityIndex {
 }
 
 impl SchematicEntityIndex {
+    pub(crate) fn clear(&mut self) {
+        self.component_by_id.clear();
+        self.wire_by_id.clear();
+        self.junction_by_id.clear();
+    }
+
     pub(crate) fn rebuild(
         &mut self,
         components: &[Component],
@@ -49,7 +55,7 @@ impl SchematicEntityIndex {
         self.component_by_id.get(&id).copied()
     }
 
-    pub(crate) fn insert_component(&mut self, id: u64, index: usize) {
+    pub(crate) fn add_component(&mut self, id: u64, index: usize) {
         self.component_by_id.insert(id, index);
     }
 
@@ -64,7 +70,7 @@ impl SchematicEntityIndex {
         self.wire_by_id.get(&id).copied()
     }
 
-    pub(crate) fn insert_wire(&mut self, id: u64, index: usize) {
+    pub(crate) fn add_wire(&mut self, id: u64, index: usize) {
         self.wire_by_id.insert(id, index);
     }
 
@@ -80,7 +86,20 @@ impl SchematicEntityIndex {
         self.junction_by_id.get(&id).copied()
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)] // Used when junction editing is exposed through the command boundary.
+    pub(crate) fn add_junction(&mut self, id: JunctionId, index: usize) {
+        self.junction_by_id.insert(id, index);
+    }
+
+    #[allow(dead_code)] // Used when junction editing is exposed through the command boundary.
+    pub(crate) fn remove_junction(&mut self, id: JunctionId, moved: Option<(JunctionId, usize)>) {
+        self.junction_by_id.remove(&id);
+        if let Some((moved_id, index)) = moved {
+            self.junction_by_id.insert(moved_id, index);
+        }
+    }
+
+    #[cfg(debug_assertions)]
     pub(crate) fn is_consistent(
         &self,
         components: &[Component],
@@ -89,7 +108,10 @@ impl SchematicEntityIndex {
     ) -> bool {
         let mut expected = Self::default();
         expected.rebuild(components, wires, annotations);
-        self.component_by_id == expected.component_by_id
+        self.component_by_id.len() == components.len()
+            && self.wire_by_id.len() == wires.len()
+            && self.junction_by_id.len() == annotations.junction_dots.len()
+            && self.component_by_id == expected.component_by_id
             && self.wire_by_id == expected.wire_by_id
             && self.junction_by_id == expected.junction_by_id
     }
@@ -106,10 +128,14 @@ pub(crate) struct AttachmentIndex {
 }
 
 impl AttachmentIndex {
-    pub(crate) fn rebuild(&mut self, components: &[Component], wires: &[Wire]) {
+    pub(crate) fn clear(&mut self) {
         self.wires_by_component.clear();
         self.wires_by_pin.clear();
         self.endpoint_pins_by_wire.clear();
+    }
+
+    pub(crate) fn rebuild(&mut self, components: &[Component], wires: &[Wire]) {
+        self.clear();
         let pin_grid = pin_grid(components);
         for wire in wires {
             self.add_wire_with_grid(wire, &pin_grid);
@@ -121,6 +147,14 @@ impl AttachmentIndex {
         wire: &Wire,
         pin_grid: &HashMap<(i32, i32), Vec<(PinRef, egui::Pos2)>>,
     ) {
+        self.add_wire_with_resolver(wire, |position| nearest_pin(position, pin_grid, 20.0));
+    }
+
+    fn add_wire_with_resolver(
+        &mut self,
+        wire: &Wire,
+        mut resolve: impl FnMut(egui::Pos2) -> Option<PinRef>,
+    ) {
         let endpoints = [
             (&wire.start, wire.points.first().copied()),
             (&wire.end, wire.points.last().copied()),
@@ -129,19 +163,16 @@ impl AttachmentIndex {
         for (endpoint, position) in endpoints {
             let pin = match endpoint {
                 WireEndpoint::Pin(pin) => Some(pin.clone()),
-                _ => position.and_then(|position| nearest_pin(position, pin_grid, 20.0)),
+                _ => position.and_then(&mut resolve),
             };
             let Some(pin) = pin else {
                 continue;
             };
-            self.wires_by_component
-                .entry(pin.component_id)
-                .or_default()
-                .push(wire.id);
-            self.wires_by_pin
-                .entry(pin.clone())
-                .or_default()
-                .push(wire.id);
+            push_unique(
+                self.wires_by_component.entry(pin.component_id).or_default(),
+                wire.id,
+            );
+            push_unique(self.wires_by_pin.entry(pin.clone()).or_default(), wire.id);
             pins.push(pin);
         }
         pins.sort_by(|left, right| {
@@ -152,25 +183,31 @@ impl AttachmentIndex {
         if !pins.is_empty() {
             self.endpoint_pins_by_wire.insert(wire.id, pins);
         }
-        dedup_map_values(&mut self.wires_by_component);
-        dedup_map_values(&mut self.wires_by_pin);
     }
 
-    pub(crate) fn add_wire(&mut self, wire: &Wire, components: &[Component]) {
+    pub(crate) fn add_wire_indexed(
+        &mut self,
+        wire: &Wire,
+        resolve: impl FnMut(egui::Pos2) -> Option<PinRef>,
+    ) {
         self.remove_wire(wire.id);
-        self.add_wire_with_grid(wire, &pin_grid(components));
+        self.add_wire_with_resolver(wire, resolve);
     }
 
     pub(crate) fn remove_wire(&mut self, wire_id: u64) {
-        self.endpoint_pins_by_wire.remove(&wire_id);
-        self.wires_by_component.retain(|_, wires| {
-            wires.retain(|id| *id != wire_id);
-            !wires.is_empty()
-        });
-        self.wires_by_pin.retain(|_, wires| {
-            wires.retain(|id| *id != wire_id);
-            !wires.is_empty()
-        });
+        let Some(pins) = self.endpoint_pins_by_wire.remove(&wire_id) else {
+            return;
+        };
+        let component_ids = pins
+            .iter()
+            .map(|pin| pin.component_id)
+            .collect::<std::collections::HashSet<_>>();
+        for component_id in component_ids {
+            remove_value(&mut self.wires_by_component, &component_id, wire_id);
+        }
+        for pin in pins {
+            remove_value(&mut self.wires_by_pin, &pin, wire_id);
+        }
     }
 
     pub(crate) fn remove_component(&mut self, component_id: u64) {
@@ -209,7 +246,7 @@ impl AttachmentIndex {
             .map_or(&[], Vec::as_slice)
     }
 
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub(crate) fn is_consistent(&self, components: &[Component], wires: &[Wire]) -> bool {
         let mut expected = Self::default();
         expected.rebuild(components, wires);
@@ -259,10 +296,24 @@ fn nearest_pin(
     best.map(|(pin, _)| pin.clone())
 }
 
-fn dedup_map_values<K: std::hash::Hash + Eq>(map: &mut HashMap<K, Vec<u64>>) {
-    for values in map.values_mut() {
-        values.sort_unstable();
-        values.dedup();
+fn push_unique(values: &mut Vec<u64>, value: u64) {
+    match values.binary_search(&value) {
+        Ok(_) => {}
+        Err(index) => values.insert(index, value),
+    }
+}
+
+fn remove_value<K: std::hash::Hash + Eq>(map: &mut HashMap<K, Vec<u64>>, key: &K, value: u64) {
+    let remove_key = if let Some(values) = map.get_mut(key) {
+        if let Ok(index) = values.binary_search(&value) {
+            values.remove(index);
+        }
+        values.is_empty()
+    } else {
+        false
+    };
+    if remove_key {
+        map.remove(key);
     }
 }
 
@@ -375,6 +426,9 @@ mod tests {
         assert_eq!(index.component(2), Some(1));
         assert_eq!(index.wire(10), Some(0));
         assert_eq!(index.junction(JunctionId(30)), Some(0));
+        index.remove_junction(JunctionId(30), None);
+        assert_eq!(index.junction(JunctionId(30)), None);
+        index.add_junction(JunctionId(30), 0);
         let mut attachments = AttachmentIndex::default();
         attachments.rebuild(&components, &wires);
         assert_eq!(attachments.attached_wires(1), &[10]);

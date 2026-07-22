@@ -517,26 +517,3 @@ pub(crate) fn push_unique_point(points: &mut Vec<Pos2>, pos: Pos2) {
     }
     points.push(pos);
 }
-
-pub(crate) fn move_attached_wire_endpoints(
-    wires: &mut [Wire],
-    old_pins: &[Pos2],
-    new_pins: &[Pos2],
-) {
-    for wire in wires {
-        if wire.points.is_empty() {
-            continue;
-        }
-
-        if let Some(new_pos) = moved_pin_for_point(wire.points[0], old_pins, new_pins) {
-            wire.points[0] = new_pos;
-            keep_wire_end_orthogonal(wire, true);
-        }
-
-        let last_index = wire.points.len() - 1;
-        if let Some(new_pos) = moved_pin_for_point(wire.points[last_index], old_pins, new_pins) {
-            wire.points[last_index] = new_pos;
-            keep_wire_end_orthogonal(wire, false);
-        }
-    }
-}

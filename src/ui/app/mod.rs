@@ -623,18 +623,13 @@ impl CircuitApp {
     }
 
     fn indexed_wire_hit(&self, position: Pos2) -> Option<Selection> {
-        let radius = Vec2::splat(10.0);
         self.analysis
             .schematic_spatial_index
-            .query_wires(position - radius, position + radius)
+            .wire_segments_near(position, 10.0)
             .into_iter()
-            .filter_map(|id| {
-                let index = self.analysis.schematic_entity_index.wire(id)?;
-                let wire = self.document.wires.get(index)?;
-                wire.points
-                    .windows(2)
-                    .any(|segment| distance_to_segment(position, segment[0], segment[1]) <= 10.0)
-                    .then_some((index, id))
+            .filter_map(|segment| {
+                let index = self.analysis.schematic_entity_index.wire(segment.wire_id)?;
+                Some((index, segment.wire_id))
             })
             .max_by_key(|(index, _)| *index)
             .map(|(_, id)| Selection::Wire(id))
@@ -2979,6 +2974,7 @@ impl CircuitApp {
                 if finished_drag {
                     self.finish_history_transaction();
                     self.dispatch_changes(crate::commands::ChangeSet::schematic());
+                    self.mark_schematic_indices_current();
                 }
                 self.editor.drag = None;
                 if let Some(start) = self.editor.rect_select_start.take()
@@ -2989,7 +2985,7 @@ impl CircuitApp {
                     let selected_ids = self
                         .analysis
                         .schematic_spatial_index
-                        .query_components(sel.min, sel.max)
+                        .components_in_viewport(sel)
                         .into_iter()
                         .filter(|id| {
                             self.component_by_id(*id)

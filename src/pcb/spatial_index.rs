@@ -42,10 +42,8 @@ impl PcbSpatialIndex {
                 .find(|definition| definition.footprint_id == footprint.footprint_id)
             {
                 for pad in &definition.pads {
-                    let position = Point2::new(
-                        footprint.position.x + pad.position.x,
-                        footprint.position.y + pad.position.y,
-                    );
+                    let pad = footprint.transform().transform_pad(pad);
+                    let position = pad.position;
                     index.pads.insert_bounds(
                         PadRef {
                             footprint_id: footprint.id,
@@ -100,10 +98,8 @@ impl PcbSpatialIndex {
             .find(|definition| definition.footprint_id == footprint.footprint_id)
         {
             for pad in &definition.pads {
-                let position = Point2::new(
-                    footprint.position.x + pad.position.x,
-                    footprint.position.y + pad.position.y,
-                );
+                let pad = footprint.transform().transform_pad(pad);
+                let position = pad.position;
                 self.pads.insert_bounds(
                     PadRef {
                         footprint_id: footprint.id,

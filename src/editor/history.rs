@@ -258,9 +258,10 @@ impl crate::CircuitApp {
             if let Some(index) = self.analysis.schematic_entity_index.wire(wire_id) {
                 let wire = &self.document.wires[index];
                 self.analysis.schematic_spatial_index.update_wire(wire);
+                let spatial_index = &self.analysis.schematic_spatial_index;
                 self.analysis
                     .attachment_index
-                    .add_wire(wire, &self.document.components);
+                    .add_wire_indexed(wire, |position| spatial_index.nearest_pin(position, 20.0));
             } else {
                 self.analysis.schematic_spatial_index.remove_wire(wire_id);
                 self.analysis.attachment_index.remove_wire(wire_id);

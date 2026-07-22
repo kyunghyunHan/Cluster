@@ -66,6 +66,9 @@ impl crate::CircuitApp {
             self.push_history_delta(delta, description, merge_key);
         }
         self.dispatch_changes(changes);
+        if changes.schematic_geometry_changed {
+            self.mark_schematic_indices_current();
+        }
         if changes.persistence_changed
             && let Some(impact) = pcb_local_impact
         {
@@ -180,6 +183,30 @@ impl crate::CircuitApp {
             self.context_menu = None;
             self.zoom = 1.0;
             self.pan = egui::Vec2::ZERO;
+        }
+    }
+
+    pub(crate) fn mark_schematic_indices_current(&mut self) {
+        self.analysis.schematic_entity_revision = self.analysis.revisions.schematic_geometry;
+        self.analysis.attachment_revision = self.analysis.revisions.schematic_geometry;
+        self.analysis.schematic_spatial_revision = self.analysis.revisions.schematic_geometry;
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(self.analysis.schematic_entity_index.is_consistent(
+                &self.document.components,
+                &self.document.wires,
+                &self.document.annotations,
+            ));
+            debug_assert!(
+                self.analysis
+                    .attachment_index
+                    .is_consistent(&self.document.components, &self.document.wires)
+            );
+            debug_assert!(
+                self.analysis
+                    .schematic_spatial_index
+                    .is_consistent(&self.document.components, &self.document.wires)
+            );
         }
     }
 
@@ -345,6 +372,37 @@ mod tests {
             &app.document.wires,
             &app.document.annotations,
         ));
+    }
+
+    #[test]
+    fn deleting_connected_component_detaches_typed_endpoints_without_stale_indices() {
+        let mut app = crate::CircuitApp::new();
+        app.load_led_demo();
+        let resistor_id = app
+            .components
+            .iter()
+            .find(|component| component.kind == ComponentKind::Resistor)
+            .map(|component| component.id)
+            .unwrap();
+        app.editor.selected = Some(crate::app::Selection::Component(resistor_id));
+        app.execute_editor_command(EditorCommand::Selection(
+            crate::commands::selection::SelectionCommand::Delete,
+        ));
+
+        assert!(app.wires.iter().all(|wire| {
+            !matches!(&wire.start, crate::model::WireEndpoint::Pin(pin) if pin.component_id == resistor_id)
+                && !matches!(&wire.end, crate::model::WireEndpoint::Pin(pin) if pin.component_id == resistor_id)
+        }));
+        assert!(app.analysis.schematic_entity_index.is_consistent(
+            &app.document.components,
+            &app.document.wires,
+            &app.document.annotations,
+        ));
+        assert!(
+            app.analysis
+                .attachment_index
+                .is_consistent(&app.document.components, &app.document.wires)
+        );
     }
 
     #[test]

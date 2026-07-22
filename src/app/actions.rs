@@ -378,6 +378,14 @@ impl crate::CircuitApp {
             value: Self::default_value(kind),
             part_id: None,
         });
+        if let Some(component) = self.document.components.last() {
+            self.analysis
+                .schematic_entity_index
+                .add_component(component.id, self.document.components.len() - 1);
+            self.analysis
+                .schematic_spatial_index
+                .update_component(component);
+        }
         id
     }
 
@@ -449,6 +457,14 @@ impl crate::CircuitApp {
             value: def.map(|def| def.default_value).unwrap_or_default(),
             part_id: Some(part_id.to_string()),
         });
+        if let Some(component) = self.document.components.last() {
+            self.analysis
+                .schematic_entity_index
+                .add_component(component.id, self.document.components.len() - 1);
+            self.analysis
+                .schematic_spatial_index
+                .update_component(component);
+        }
         id
     }
 

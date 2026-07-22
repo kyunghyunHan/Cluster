@@ -1,8 +1,8 @@
 use crate::app::{EditorDocumentState, Selection, Tool};
 use crate::model::cad::{CadNet, NetClass, Point2, SymbolInstance};
 use crate::model::{
-    AttachmentIndex, Component, ComponentKind, IdAllocator, ProjectDocument, SchematicEntityIndex,
-    Wire, WireEndpoint, component_pins, distance_to_segment,
+    AttachmentIndex, Component, ComponentKind, IdAllocator, PinRef, ProjectDocument,
+    SchematicEntityIndex, Wire, WireEndpoint, component_pin_defs,
 };
 use crate::pcb::board::{BoardOutline, RemovedFootprintPolicy};
 use crate::pcb::track::TrackSegment;
@@ -10,6 +10,13 @@ use crate::pcb::via::Via;
 use crate::ui::canvas::spatial_index::SchematicSpatialIndex;
 use egui::{Pos2, Vec2};
 use std::collections::HashSet;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PinMove {
+    pub(crate) pin: PinRef,
+    pub(crate) old_position: Pos2,
+    pub(crate) new_position: Pos2,
+}
 
 /// Narrow mutation boundary used by every document command.
 ///
@@ -44,14 +51,12 @@ impl<'a> CommandContext<'a> {
         }
     }
 
-    fn rebuild_entity_index(&mut self) {
-        self.entity_index.rebuild(
-            &self.document.components,
-            &self.document.wires,
-            &self.document.annotations,
-        );
+    fn update_wire_indices(&mut self, wire_index: usize) {
+        let wire = &self.document.wires[wire_index];
+        self.spatial_index.update_wire(wire);
+        let spatial_index = &self.spatial_index;
         self.attachment_index
-            .rebuild(&self.document.components, &self.document.wires);
+            .add_wire_indexed(wire, |position| spatial_index.nearest_pin(position, 20.0));
     }
 
     pub(crate) fn components(&self) -> &[Component] {
@@ -97,7 +102,7 @@ impl<'a> CommandContext<'a> {
         if let Some(component) = self.document.components.last() {
             self.spatial_index.update_component(component);
             self.entity_index
-                .insert_component(component.id, self.document.components.len() - 1);
+                .add_component(component.id, self.document.components.len() - 1);
         }
         id
     }
@@ -107,18 +112,16 @@ impl<'a> CommandContext<'a> {
         if let Some(component) = self.document.components.last() {
             self.spatial_index.update_component(component);
             self.entity_index
-                .insert_component(component.id, self.document.components.len() - 1);
+                .add_component(component.id, self.document.components.len() - 1);
         }
     }
 
     pub(crate) fn insert_wire(&mut self, wire: Wire) {
         self.document.wires.push(wire);
         if let Some(wire) = self.document.wires.last() {
-            self.spatial_index.update_wire(wire);
             self.entity_index
-                .insert_wire(wire.id, self.document.wires.len() - 1);
-            self.attachment_index
-                .add_wire(wire, &self.document.components);
+                .add_wire(wire.id, self.document.wires.len() - 1);
+            self.update_wire_indices(self.document.wires.len() - 1);
         }
     }
 
@@ -133,6 +136,7 @@ impl<'a> CommandContext<'a> {
         let Some(index) = self.entity_index.component(id) else {
             return false;
         };
+        let attached_wire_ids = self.attachment_index.attached_wires(id).to_vec();
         self.document.components.swap_remove(index);
         let moved = self
             .document
@@ -142,6 +146,23 @@ impl<'a> CommandContext<'a> {
         self.spatial_index.remove_component(id);
         self.entity_index.remove_component(id, moved);
         self.attachment_index.remove_component(id);
+        for wire_id in attached_wire_ids {
+            let Some(wire_index) = self.entity_index.wire(wire_id) else {
+                continue;
+            };
+            let wire = &mut self.document.wires[wire_index];
+            if matches!(&wire.start, WireEndpoint::Pin(pin) if pin.component_id == id)
+                && let Some(position) = wire.points.first().copied()
+            {
+                wire.start = WireEndpoint::FreePoint(position);
+            }
+            if matches!(&wire.end, WireEndpoint::Pin(pin) if pin.component_id == id)
+                && let Some(position) = wire.points.last().copied()
+            {
+                wire.end = WireEndpoint::FreePoint(position);
+            }
+            self.update_wire_indices(wire_index);
+        }
         true
     }
 
@@ -180,9 +201,9 @@ impl<'a> CommandContext<'a> {
         if indices.is_empty() {
             return false;
         }
-        let old_pins = indices
+        let old_components = indices
             .iter()
-            .flat_map(|&index| component_pins(&self.document.components[index]))
+            .map(|&index| self.document.components[index].clone())
             .collect::<Vec<_>>();
         let attached_wire_ids = ids
             .iter()
@@ -194,11 +215,12 @@ impl<'a> CommandContext<'a> {
             self.spatial_index
                 .update_component(&self.document.components[index]);
         }
-        let new_pins = indices
+        let pin_moves = old_components
             .iter()
-            .flat_map(|&index| component_pins(&self.document.components[index]))
+            .zip(indices.iter())
+            .flat_map(|(old, &index)| pin_moves(old, &self.document.components[index]))
             .collect::<Vec<_>>();
-        self.move_attached_wires(&attached_wire_ids, &old_pins, &new_pins);
+        self.move_attached_wires(&attached_wire_ids, &pin_moves);
         true
     }
 
@@ -206,7 +228,7 @@ impl<'a> CommandContext<'a> {
         let Some(index) = self.entity_index.component(id) else {
             return false;
         };
-        let old_pins = component_pins(&self.document.components[index]);
+        let old_component = self.document.components[index].clone();
         let attached_wire_ids = self
             .attachment_index
             .attached_wires(id)
@@ -217,30 +239,23 @@ impl<'a> CommandContext<'a> {
             (self.document.components[index].rotation + 90) % 360;
         self.spatial_index
             .update_component(&self.document.components[index]);
-        let new_pins = component_pins(&self.document.components[index]);
-        self.move_attached_wires(&attached_wire_ids, &old_pins, &new_pins);
+        let pin_moves = pin_moves(&old_component, &self.document.components[index]);
+        self.move_attached_wires(&attached_wire_ids, &pin_moves);
         true
     }
 
-    fn move_attached_wires(
-        &mut self,
-        attached_wire_ids: &HashSet<u64>,
-        old_pins: &[Pos2],
-        new_pins: &[Pos2],
-    ) {
+    fn move_attached_wires(&mut self, attached_wire_ids: &HashSet<u64>, pin_moves: &[PinMove]) {
         let wire_indices = attached_wire_ids
             .iter()
             .filter_map(|id| self.entity_index.wire(*id))
             .collect::<Vec<_>>();
         for index in wire_indices {
             let wire = &mut self.document.wires[index];
-            crate::move_attached_wire_endpoints(std::slice::from_mut(wire), old_pins, new_pins);
-            if wire.points.len() <= 2 {
-                self.spatial_index.update_wire(wire);
-                continue;
+            move_wire_endpoints_by_identity(wire, pin_moves);
+            if wire.points.len() > 2 {
+                crate::tidy_wire_points(wire);
             }
-            crate::tidy_wire_points(wire);
-            self.spatial_index.update_wire(wire);
+            self.update_wire_indices(index);
         }
     }
 
@@ -260,32 +275,22 @@ impl<'a> CommandContext<'a> {
     }
 
     pub(crate) fn infer_wire_endpoint(&self, point: Pos2) -> WireEndpoint {
-        if let Some(pin) = self.spatial_index.nearest_pin(point, 1.0) {
+        if let Some((pin, _)) = self.spatial_index.pins_near(point, 1.0).into_iter().next() {
             return WireEndpoint::Pin(pin);
         }
         WireEndpoint::FreePoint(point)
     }
 
     pub(crate) fn split_wire_at_point(&mut self, point: Pos2) {
-        let radius = Vec2::splat(2.5);
-        let mut candidates = self
-            .spatial_index
-            .query_wires(point - radius, point + radius)
-            .into_iter()
-            .filter_map(|wire_id| self.entity_index.wire(wire_id))
-            .collect::<Vec<_>>();
-        candidates.sort_unstable();
-        let split_target = candidates.into_iter().find_map(|wire_index| {
+        let candidates = self.spatial_index.wire_segments_near(point, 2.5);
+        let split_target = candidates.into_iter().find_map(|segment| {
+            let wire_index = self.entity_index.wire(segment.wire_id)?;
             let wire = &self.document.wires[wire_index];
-            wire.points
-                .windows(2)
-                .enumerate()
-                .find(|(_, pair)| {
-                    distance_to_segment(point, pair[0], pair[1]) < 2.5
-                        && point.distance(pair[0]) > 5.0
-                        && point.distance(pair[1]) > 5.0
-                })
-                .map(|(segment_index, _)| (wire_index, segment_index))
+            let pair = wire
+                .points
+                .get(segment.segment_index..=segment.segment_index + 1)?;
+            (point.distance(pair[0]) > 5.0 && point.distance(pair[1]) > 5.0)
+                .then_some((wire_index, segment.segment_index))
         });
         let Some((wire_index, segment_index)) = split_target else {
             return;
@@ -306,19 +311,12 @@ impl<'a> CommandContext<'a> {
             start: WireEndpoint::FreePoint(point),
             end: old_end,
         });
-        self.spatial_index
-            .update_wire(&self.document.wires[wire_index]);
+        self.update_wire_indices(wire_index);
         if let Some(wire) = self.document.wires.last() {
-            self.spatial_index.update_wire(wire);
             self.entity_index
-                .insert_wire(wire.id, self.document.wires.len() - 1);
+                .add_wire(wire.id, self.document.wires.len() - 1);
         }
-        self.attachment_index
-            .add_wire(&self.document.wires[wire_index], &self.document.components);
-        if let Some(wire) = self.document.wires.last() {
-            self.attachment_index
-                .add_wire(wire, &self.document.components);
-        }
+        self.update_wire_indices(self.document.wires.len() - 1);
     }
 
     pub(crate) fn move_wire_control_point(
@@ -339,30 +337,24 @@ impl<'a> CommandContext<'a> {
         if !is_endpoint {
             crate::ui::app::straighten_neighbor_segments(wire, point_index);
         }
-        self.spatial_index
-            .update_wire(&self.document.wires[wire_index]);
-        self.attachment_index
-            .add_wire(&self.document.wires[wire_index], &self.document.components);
+        self.update_wire_indices(wire_index);
         true
     }
 
     pub(crate) fn insert_wire_control_point(&mut self, position: Pos2) -> Option<(u64, usize)> {
-        let radius = Vec2::splat(10.0);
-        let wire_ids = self
-            .spatial_index
-            .query_wires(position - radius, position + radius);
-        for wire_id in wire_ids {
-            let Some(index) = self.entity_index.wire(wire_id) else {
+        let segments = self.spatial_index.wire_segments_near(position, 10.0);
+        for segment_ref in segments {
+            let wire_id = segment_ref.wire_id;
+            let Some(index) = self.entity_index.wire(segment_ref.wire_id) else {
                 continue;
             };
-            let segment_index = self.document.wires[index]
+            let segment_index = segment_ref.segment_index;
+            let Some(segment) = self.document.wires[index]
                 .points
-                .windows(2)
-                .position(|segment| distance_to_segment(position, segment[0], segment[1]) <= 10.0);
-            let Some(segment_index) = segment_index else {
+                .get(segment_index..=segment_index + 1)
+            else {
                 continue;
             };
-            let segment = &self.document.wires[index].points[segment_index..=segment_index + 1];
             let inserted = if (segment[0].y - segment[1].y).abs() <= 0.5 {
                 Pos2::new(
                     position.x.clamp(
@@ -386,9 +378,7 @@ impl<'a> CommandContext<'a> {
             self.document.wires[index]
                 .points
                 .insert(point_index, inserted);
-            self.spatial_index.update_wire(&self.document.wires[index]);
-            self.attachment_index
-                .add_wire(&self.document.wires[index], &self.document.components);
+            self.update_wire_indices(index);
             return Some((wire_id, point_index));
         }
         None
@@ -449,8 +439,9 @@ impl<'a> CommandContext<'a> {
         self.editor.wire_from_select = false;
         self.editor.snap_target = None;
         self.editor.tool = Tool::Select;
-        self.rebuild_entity_index();
-        self.spatial_index.sync(&[], &[]);
+        self.entity_index.clear();
+        self.attachment_index.clear();
+        self.spatial_index.clear();
     }
 
     pub(crate) fn move_footprint(&mut self, footprint_id: u64, position: Point2) -> bool {
@@ -541,6 +532,64 @@ impl<'a> CommandContext<'a> {
     }
 }
 
+fn pin_moves(old: &Component, new: &Component) -> Vec<PinMove> {
+    let mut unmatched_new = component_pin_defs(new);
+    component_pin_defs(old)
+        .into_iter()
+        .filter_map(|old_pin| {
+            let new_index = unmatched_new
+                .iter()
+                .position(|new_pin| new_pin.label == old_pin.label)?;
+            let new_pin = unmatched_new.remove(new_index);
+            Some(PinMove {
+                pin: PinRef {
+                    component_id: old.id,
+                    pin_name: old_pin.label.to_string(),
+                },
+                old_position: old_pin.pos,
+                new_position: new_pin.pos,
+            })
+        })
+        .collect()
+}
+
+fn move_wire_endpoints_by_identity(wire: &mut Wire, pin_moves: &[PinMove]) {
+    if wire.points.is_empty() {
+        return;
+    }
+    let last = wire.points.len() - 1;
+    let endpoints = [
+        (0, wire.start.clone(), true),
+        (last, wire.end.clone(), false),
+    ];
+    for (point_index, endpoint, first) in endpoints {
+        let current = wire.points[point_index];
+        let matching = match &endpoint {
+            WireEndpoint::Pin(pin) => pin_moves
+                .iter()
+                .filter(|movement| movement.pin == *pin)
+                .min_by(|left, right| {
+                    left.old_position
+                        .distance_sq(current)
+                        .total_cmp(&right.old_position.distance_sq(current))
+                }),
+            WireEndpoint::FreePoint(_) => pin_moves
+                .iter()
+                .filter(|movement| movement.old_position.distance(current) <= 20.0)
+                .min_by(|left, right| {
+                    left.old_position
+                        .distance_sq(current)
+                        .total_cmp(&right.old_position.distance_sq(current))
+                }),
+            WireEndpoint::Junction(_) => None,
+        };
+        if let Some(movement) = matching {
+            wire.points[point_index] = movement.new_position;
+            crate::ui::app::keep_wire_end_orthogonal(wire, first);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum CommandPostAction {
     #[default]
@@ -575,5 +624,64 @@ impl CommandOutcome {
     pub(crate) fn with_post_action(mut self, post_action: CommandPostAction) -> Self {
         self.post_action = post_action;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pin(component_id: u64, name: &str) -> PinRef {
+        PinRef {
+            component_id,
+            pin_name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn explicit_pin_endpoint_moves_by_identity_even_when_geometry_is_stale() {
+        let pin = pin(7, "A");
+        let mut wire = Wire::with_endpoints(
+            1,
+            vec![Pos2::new(80.0, 80.0), Pos2::new(150.0, 80.0)],
+            WireEndpoint::Pin(pin.clone()),
+            WireEndpoint::FreePoint(Pos2::new(150.0, 80.0)),
+        );
+        move_wire_endpoints_by_identity(
+            &mut wire,
+            &[PinMove {
+                pin,
+                old_position: Pos2::new(10.0, 10.0),
+                new_position: Pos2::new(30.0, 40.0),
+            }],
+        );
+        assert_eq!(wire.points[0], Pos2::new(30.0, 40.0));
+    }
+
+    #[test]
+    fn duplicate_pin_names_follow_the_matching_physical_position() {
+        let duplicate = pin(9, "GND");
+        let mut wire = Wire::with_endpoints(
+            1,
+            vec![Pos2::new(100.0, 0.0), Pos2::new(160.0, 0.0)],
+            WireEndpoint::Pin(duplicate.clone()),
+            WireEndpoint::FreePoint(Pos2::new(160.0, 0.0)),
+        );
+        move_wire_endpoints_by_identity(
+            &mut wire,
+            &[
+                PinMove {
+                    pin: duplicate.clone(),
+                    old_position: Pos2::ZERO,
+                    new_position: Pos2::new(10.0, 0.0),
+                },
+                PinMove {
+                    pin: duplicate,
+                    old_position: Pos2::new(100.0, 0.0),
+                    new_position: Pos2::new(110.0, 0.0),
+                },
+            ],
+        );
+        assert_eq!(wire.points[0], Pos2::new(110.0, 0.0));
     }
 }

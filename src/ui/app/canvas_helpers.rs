@@ -222,18 +222,6 @@ pub(crate) fn closest_point_on_segment(p: Pos2, a: Pos2, b: Pos2) -> Pos2 {
     a + ab * t.clamp(0.0, 1.0)
 }
 
-pub(crate) fn moved_pin_for_point(
-    point: Pos2,
-    old_pins: &[Pos2],
-    new_pins: &[Pos2],
-) -> Option<Pos2> {
-    old_pins
-        .iter()
-        .zip(new_pins)
-        .find(|(old_pin, _)| point.distance(**old_pin) <= 20.0)
-        .map(|(_, &new_pin)| new_pin)
-}
-
 pub(crate) fn wire_path_pin_crossings(points: &[Pos2], pins: &[Pos2]) -> usize {
     pins.iter()
         .filter(|&&pin| {
