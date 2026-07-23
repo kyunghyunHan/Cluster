@@ -1101,6 +1101,7 @@ impl OffscreenFrameFixture {
 pub struct PcbFixture {
     board: Board,
     nets: Vec<CadNet>,
+    net_ids: std::collections::HashSet<usize>,
     expected: (usize, usize, usize, usize),
 }
 
@@ -1176,7 +1177,7 @@ impl PcbFixture {
             })
             .collect();
         board.rebuild_entity_index();
-        let nets = (0..32)
+        let nets: Vec<CadNet> = (0..32)
             .map(|net_id| CadNet {
                 net_id,
                 name: format!("PCB_NET_{net_id}"),
@@ -1192,9 +1193,11 @@ impl PcbFixture {
                 class_id: "Default".to_string(),
             })
             .collect();
+        let net_ids = nets.iter().map(|net| net.net_id).collect();
         let fixture = Self {
             board,
             nets,
+            net_ids,
             expected,
         };
         fixture.assert_counts();
@@ -1343,6 +1346,12 @@ impl PcbFixture {
 
     pub fn full_drc_checksum(&self) -> usize {
         crate::pcb::drc::run_drc_with_nets(&self.board, &self.nets).len()
+    }
+
+    pub fn invariant_checksum(&self) -> usize {
+        self.board
+            .validate_invariants_with_nets(Some(&self.net_ids))
+            .map_or_else(|violations| violations.len(), |()| 0)
     }
 }
 

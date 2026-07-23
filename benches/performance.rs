@@ -244,6 +244,9 @@ fn pcb_benchmarks(c: &mut Criterion) {
     c.bench_function("pcb_full_drc", |b| {
         b.iter(|| black_box(&medium).full_drc_checksum())
     });
+    c.bench_function("pcb_full_invariant_validation", |b| {
+        b.iter(|| black_box(&medium).invariant_checksum())
+    });
 }
 
 fn history_benchmarks(c: &mut Criterion) {

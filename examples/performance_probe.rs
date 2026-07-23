@@ -245,6 +245,7 @@ fn main() {
     measure("pcb_hit_250_2000_150", samples, || pcb.hit_test_checksum());
     measure("pcb_local_drc", samples, || pcb.local_drc_checksum());
     measure("pcb_full_drc", samples, || pcb.full_drc_checksum());
+    measure("pcb_full_invariants", samples, || pcb.invariant_checksum());
     measure("pcb_ratsnest", samples, || pcb.ratsnest_checksum());
 
     let history = HistoryFixture::generate(SchematicSize::Large);

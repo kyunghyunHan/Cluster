@@ -155,6 +155,48 @@ impl Footprint {
             model_3d_path: None,
         }
     }
+
+    pub(crate) fn led_tht_5mm() -> Self {
+        Self {
+            footprint_id: "LED_THT_5mm".to_string(),
+            display_name: "LED THT 5 mm".to_string(),
+            pads: vec![
+                Pad {
+                    number: "1".to_string(),
+                    net_id: None,
+                    position: Point2::new(-1.27, 0.0),
+                    size: Size2 { w: 1.8, h: 1.8 },
+                    drill_mm: Some(0.8),
+                    shape: PadShape::Rect,
+                    layers: vec![BoardLayer::FrontCopper, BoardLayer::BackCopper],
+                },
+                Pad {
+                    number: "2".to_string(),
+                    net_id: None,
+                    position: Point2::new(1.27, 0.0),
+                    size: Size2 { w: 1.8, h: 1.8 },
+                    drill_mm: Some(0.8),
+                    shape: PadShape::Circle,
+                    layers: vec![BoardLayer::FrontCopper, BoardLayer::BackCopper],
+                },
+            ],
+            courtyard: vec![
+                Point2::new(-3.0, -3.0),
+                Point2::new(3.0, -3.0),
+                Point2::new(3.0, 3.0),
+                Point2::new(-3.0, 3.0),
+            ],
+            silkscreen: vec![vec![
+                Point2::new(-2.5, -2.5),
+                Point2::new(2.5, -2.5),
+                Point2::new(2.5, 2.5),
+                Point2::new(-2.5, 2.5),
+                Point2::new(-2.5, -2.5),
+            ]],
+            fabrication: Vec::new(),
+            model_3d_path: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -191,5 +233,15 @@ mod tests {
         };
         assert_point(flipped.local_to_board(local), Point2::new(9.0, 18.0));
         assert_point(flipped.board_to_local(Point2::new(9.0, 18.0)), local);
+    }
+
+    #[test]
+    fn led_footprint_has_polarized_through_hole_geometry() {
+        let footprint = Footprint::led_tht_5mm();
+        assert_eq!(footprint.footprint_id, "LED_THT_5mm");
+        assert_eq!(footprint.pads.len(), 2);
+        assert_eq!(footprint.pads[0].shape, PadShape::Rect);
+        assert_eq!(footprint.pads[1].shape, PadShape::Circle);
+        assert!(footprint.pads.iter().all(|pad| pad.drill_mm == Some(0.8)));
     }
 }

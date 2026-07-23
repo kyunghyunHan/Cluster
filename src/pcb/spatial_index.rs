@@ -13,7 +13,7 @@ pub(crate) struct PadRef {
     pub(crate) number: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PcbSpatialIndex {
     footprints: Grid<u64>,
     tracks: Grid<u64>,
@@ -85,6 +85,17 @@ impl PcbSpatialIndex {
             );
         }
         index
+    }
+
+    pub(crate) fn is_consistent(
+        &self,
+        footprints: &[BoardFootprint],
+        tracks: &[TrackSegment],
+        vias: &[Via],
+        outline: &BoardOutline,
+        library: &[Footprint],
+    ) -> bool {
+        self == &Self::build(footprints, tracks, vias, outline, library)
     }
 
     pub(crate) fn add_footprint(&mut self, footprint: &BoardFootprint, library: &[Footprint]) {
@@ -230,7 +241,7 @@ impl PcbSpatialIndex {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Grid<T> {
     buckets: HashMap<(i32, i32), Vec<T>>,
 }

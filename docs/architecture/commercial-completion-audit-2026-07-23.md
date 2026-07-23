@@ -381,3 +381,42 @@ because a scaffold exists or because a neighboring feature works.
   subcommands are not installed. Linux and Windows were not executable in this
   macOS workspace. No release tag, signed installer, or distributable artifact
   was made.
+
+## 2026-07-24 PCB invariant follow-up
+
+The board validator now checks the derived spatial index against a fresh
+reference build and reports stale geometry instead of allowing indexed queries
+to silently omit entities. It also validates footprint-definition presence and
+uniqueness, pad numbers/geometry/drills/layers, zone polygon area and
+self-intersection, net-class/design-rule values, and track/via/zone/pad net IDs
+against the CAD net set at project-load and fabrication-export boundaries.
+
+Project load remains non-destructive: malformed board data is retained and the
+status reports the invariant count. Fabrication export is now blocked before
+writing any output when structural board errors exist. Deterministic tests
+cover missing definitions, unknown nets, invalid rules, self-intersecting zones,
+and stale spatial geometry. Criterion and the release probe include
+`pcb_full_invariant_validation` / `pcb_full_invariants` so this cold-path
+correctness check has an explicit regression boundary.
+
+The 21-sample release probe measured full invariant validation at
+`0.8775/1.0080/1.1181 ms` p50/p95/max with a 345,106-byte peak incremental
+heap. The same run measured PCB local DRC p95 `0.0513 ms`, PCB full DRC p95
+`7.8362 ms`, and large production frame p95 `4.1903 ms`. Medium and large full
+connectivity remained above their targets at `23.1034 ms` and `57.7391 ms`
+p95, respectively; this follow-up does not claim M3 acceptance.
+
+Validation after this follow-up:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo check --all-targets --all-features`: pass.
+- `cargo clippy --all-targets --all-features -- -D warnings`: pass.
+- `cargo test --all-targets --all-features`: 246 passed.
+- `cargo build --release --all-features`: pass.
+- `cargo bench --bench performance`: pass, including
+  `pcb_full_invariant_validation` at a Criterion point estimate of about
+  `1.025 ms`.
+- `CLUSTER_PERF_SAMPLES=21 cargo run --release --example performance_probe`:
+  pass.
+- `cargo audit` and `cargo deny check`: unavailable because both Cargo
+  subcommands are not installed.

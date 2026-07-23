@@ -209,7 +209,7 @@ Notes:
 - ERC rule registry는 rule disable/severity override와 certainty를 지원하며 annotation/no-connect/ground rule이 domain module로 분리되었다. topology/value dependency를 분리하고 topology 결과를 revision cache하며, rules-only evaluator는 net별 pin index를 사용해 반복 전수 탐색을 피한다.
 - custom part schema v2는 v1 파일을 유지하면서 구조화 metadata와 footprint 검증을 지원하고 symlink/1 MiB 초과 입력을 거부한다.
 - 저장은 같은 디렉터리의 임시 파일을 sync/rename하고 3세대 backup을 유지한다.
-- 문서/PCB 구조 validator가 중복 ID, 잘못된 endpoint/geometry/index 상태를 구조화해 보고하며 load 경계에서 repair/invariant 수를 status에 남긴다. PCB immutable lookup의 stale-index 선형 fallback은 제거되었다.
+- 문서/PCB 구조 validator가 중복 ID, 잘못된 endpoint/geometry/index 상태를 구조화해 보고하며 load 경계에서 repair/invariant 수를 status에 남긴다. PCB validator는 entity/spatial index, footprint/pad definition, zone polygon, layer, net class/design rule, CAD net cross-reference도 검사하고 구조 오류가 있으면 fabrication export를 차단한다. PCB immutable lookup의 stale-index 선형 fallback은 제거되었다.
 - performance probe는 ERC rules-only/value-only/topology-only와 connectivity+ERC를 분리한다. GND 없는 synthetic MNA는 `mna_prepare_no_ground_*`로 명시하고, 실제 solver-only/parameter-update는 solvable mixed fixture로 측정한다. worker는 같은 connectivity revision의 canonical 결과를 `Arc`로 재사용한다. 2026-07-23의 3회×21표본 before/after와 남은 acceptance 상태는 `docs/architecture/commercial-completion-audit-2026-07-23.md`에 기록한다.
 - PCB footprint pad lookup/spatial index/Gerber/Excellon은 공통 `FootprintTransform`을 사용하며 0/90/180/270도와 back flip 좌표를 테스트한다. Excellon은 배치 footprint drill과 실제 tool diameter를 출력한다.
 - `v*` tag release workflow가 Linux/macOS/Windows portable archive, SHA-256 checksum, 자동 release note를 생성한다.

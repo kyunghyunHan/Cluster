@@ -917,6 +917,26 @@ impl crate::CircuitApp {
 
     pub(crate) fn export_pcb_fabrication_files(&mut self) {
         self.ensure_pcb_synced();
+        let Some(mut cad) = self.analysis.pcb_cad.clone() else {
+            self.status = "Update PCB before fabrication export.".to_string();
+            return;
+        };
+        let known_net_ids = cad
+            .nets
+            .iter()
+            .map(|net| net.net_id)
+            .collect::<std::collections::HashSet<_>>();
+        if let Err(violations) = self
+            .document
+            .board
+            .validate_invariants_with_nets(Some(&known_net_ids))
+        {
+            self.status = format!(
+                "PCB export blocked: repair {} board invariant error(s) first.",
+                violations.len()
+            );
+            return;
+        }
         let drc_errors = self
             .analysis
             .pcb_drc
@@ -927,10 +947,6 @@ impl crate::CircuitApp {
             self.status = format!("PCB export blocked: fix {drc_errors} DRC error(s) first.");
             return;
         }
-        let Some(mut cad) = self.analysis.pcb_cad.clone() else {
-            self.status = "Update PCB before fabrication export.".to_string();
-            return;
-        };
         cad.board = Some(self.document.board.clone());
         let writes = [
             (
@@ -1044,6 +1060,11 @@ impl crate::CircuitApp {
         board.rebuild_entity_index();
         let mut cad = serde_json::from_str::<CadProjectData>(&project_json)
             .map_err(|error| format!("Parse project.json: {error}"))?;
+        let known_net_ids = cad
+            .nets
+            .iter()
+            .map(|net| net.net_id)
+            .collect::<std::collections::HashSet<_>>();
         cad.board = Some(board.clone());
 
         self.begin_snapshot_history_transaction("Load project folder");
@@ -1069,7 +1090,7 @@ impl crate::CircuitApp {
         let board_invariant_warnings = self
             .document
             .board
-            .validate_invariants()
+            .validate_invariants_with_nets(Some(&known_net_ids))
             .err()
             .map_or(0, |violations| violations.len());
         self.finish_history_transaction();

@@ -1810,6 +1810,29 @@ fn pcb_fabrication_export_is_blocked_by_drc_errors() {
 }
 
 #[test]
+fn pcb_fabrication_export_is_blocked_by_board_invariant_errors() {
+    let mut app = CircuitApp::new();
+    app.load_led_demo();
+    app.update_pcb_from_schematic();
+    app.document
+        .board
+        .net_classes
+        .push(crate::model::cad::NetClass {
+            class_id: "invalid".to_string(),
+            clearance_mm: -1.0,
+            ..crate::model::cad::NetClass::default()
+        });
+
+    app.export_pcb_fabrication_files();
+
+    assert!(
+        app.status.contains("board invariant error"),
+        "{}",
+        app.status
+    );
+}
+
+#[test]
 fn project_folder_load_restores_schematic_board_and_pcb_analysis() {
     let root =
         std::env::temp_dir().join(format!("cluster-project-load-test-{}", std::process::id()));

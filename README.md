@@ -121,6 +121,11 @@ Cluster has a dedicated two-layer PCB workspace backed by persistent board data:
 - DRC for width/via size, board edge/outside copper, different-net shorts,
   clearance, duplicate references, dangling tracks/vias, outline, and unrouted connections
 - Gerber/Excellon/BOM/CPL fabrication export, blocked while error-level DRC remains
+- Board integrity validation covers stale entity/spatial indexes, footprint and
+  pad definitions, polygon geometry, layer references, net classes, design
+  rules, and CAD-net cross-references. Fabrication export is blocked on these
+  structural errors while project save/load continues to preserve the data and
+  report diagnostics.
 
 Use **Workspace → PCB** for editing. The compact bottom-dock preview remains a
 status and diagnostics summary. Current footprint geometry is intentionally

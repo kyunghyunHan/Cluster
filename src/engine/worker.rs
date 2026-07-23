@@ -197,35 +197,34 @@ fn execute(
             ac_key,
         } => {
             let started = std::time::Instant::now();
-            let (connectivity, connectivity_reused) = if cache.connectivity_revision
-                == Some(revision_key.connectivity)
-            {
-                match &cache.connectivity {
-                    Some(connectivity) => (Arc::clone(connectivity), true),
-                    None => {
-                        let connectivity = Arc::new(
+            let (connectivity, connectivity_reused) =
+                if cache.connectivity_revision == Some(revision_key.connectivity) {
+                    match &cache.connectivity {
+                        Some(connectivity) => (Arc::clone(connectivity), true),
+                        None => {
+                            let connectivity = Arc::new(
                             crate::engine::netlist::build_canonical_connectivity_with_annotations(
                                 &components,
                                 &wires,
                                 &annotations,
                             ),
                         );
-                        cache.connectivity = Some(Arc::clone(&connectivity));
-                        (connectivity, false)
+                            cache.connectivity = Some(Arc::clone(&connectivity));
+                            (connectivity, false)
+                        }
                     }
-                }
-            } else {
-                let connectivity = Arc::new(
-                    crate::engine::netlist::build_canonical_connectivity_with_annotations(
-                        &components,
-                        &wires,
-                        &annotations,
-                    ),
-                );
-                cache.connectivity_revision = Some(revision_key.connectivity);
-                cache.connectivity = Some(Arc::clone(&connectivity));
-                (connectivity, false)
-            };
+                } else {
+                    let connectivity = Arc::new(
+                        crate::engine::netlist::build_canonical_connectivity_with_annotations(
+                            &components,
+                            &wires,
+                            &annotations,
+                        ),
+                    );
+                    cache.connectivity_revision = Some(revision_key.connectivity);
+                    cache.connectivity = Some(Arc::clone(&connectivity));
+                    (connectivity, false)
+                };
             let connectivity_ms = started.elapsed().as_secs_f64() * 1_000.0;
             if cancellation.is_cancelled() {
                 return AnalysisPayload::Schematic(Box::new(SchematicAnalysis {

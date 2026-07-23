@@ -160,16 +160,73 @@ struct BoardEntityIndex {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BoardInvariantViolation {
-    DuplicateFootprintId { id: u64 },
-    DuplicateTrackId { id: u64 },
-    DuplicateViaId { id: u64 },
-    DuplicateZoneId { id: u64 },
+    DuplicateFootprintId {
+        id: u64,
+    },
+    DuplicateTrackId {
+        id: u64,
+    },
+    DuplicateViaId {
+        id: u64,
+    },
+    DuplicateZoneId {
+        id: u64,
+    },
+    DuplicateFootprintDefinition {
+        footprint_id: FootprintId,
+    },
+    MissingFootprintDefinition {
+        id: u64,
+        footprint_id: FootprintId,
+    },
+    DuplicatePadNumber {
+        footprint_id: FootprintId,
+        number: String,
+    },
     EntityIndexMismatch,
+    SpatialIndexMismatch,
     InvalidOutline,
-    NonFiniteGeometry { entity: &'static str, id: u64 },
-    InvalidTrackWidth { id: u64 },
-    InvalidViaDimensions { id: u64 },
-    MissingLayer { entity: &'static str, id: u64 },
+    InvalidZonePolygon {
+        id: u64,
+    },
+    NonFiniteGeometry {
+        entity: &'static str,
+        id: u64,
+    },
+    InvalidTrackWidth {
+        id: u64,
+    },
+    InvalidViaDimensions {
+        id: u64,
+    },
+    InvalidPadGeometry {
+        footprint_id: FootprintId,
+        number: String,
+    },
+    InvalidPadDrill {
+        footprint_id: FootprintId,
+        number: String,
+    },
+    MissingPadLayer {
+        footprint_id: FootprintId,
+        number: String,
+    },
+    MissingLayer {
+        entity: &'static str,
+        id: u64,
+    },
+    DuplicateNetClass {
+        class_id: String,
+    },
+    InvalidNetClass {
+        class_id: String,
+    },
+    InvalidDesignRules,
+    UnknownNet {
+        entity: &'static str,
+        id: u64,
+        net_id: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -275,7 +332,7 @@ impl EcoReport {
 
 impl Board {
     pub(crate) fn new_two_layer(width_mm: f32, height_mm: f32) -> Self {
-        Self {
+        let mut board = Self {
             schema_version: BOARD_SCHEMA_VERSION,
             outline: BoardOutline::rectangular(width_mm, height_mm),
             layers: default_two_layer_stackup(),
@@ -291,12 +348,14 @@ impl Board {
             vias: Vec::new(),
             zones: Vec::new(),
             footprints: Vec::new(),
-            footprint_library: vec![Footprint::resistor_axial()],
+            footprint_library: vec![Footprint::resistor_axial(), Footprint::led_tht_5mm()],
             design_rules: DesignRules::default(),
             net_classes: vec![NetClass::default()],
             entity_index: BoardEntityIndex::default(),
             spatial_index: PcbSpatialIndex::default(),
-        }
+        };
+        board.rebuild_entity_index();
+        board
     }
 
     pub(crate) fn rebuild_entity_index(&mut self) {
@@ -501,6 +560,13 @@ impl Board {
     }
 
     pub(crate) fn validate_invariants(&self) -> Result<(), Vec<BoardInvariantViolation>> {
+        self.validate_invariants_with_nets(None)
+    }
+
+    pub(crate) fn validate_invariants_with_nets(
+        &self,
+        known_net_ids: Option<&HashSet<usize>>,
+    ) -> Result<(), Vec<BoardInvariantViolation>> {
         let mut violations = Vec::new();
         collect_duplicate_ids(
             self.footprints.iter().map(|entity| entity.id),
@@ -525,6 +591,68 @@ impl Board {
         if !self.entity_index_is_consistent() {
             violations.push(BoardInvariantViolation::EntityIndexMismatch);
         }
+        if !self.spatial_index.is_consistent(
+            &self.footprints,
+            &self.tracks,
+            &self.vias,
+            &self.outline,
+            &self.footprint_library,
+        ) {
+            violations.push(BoardInvariantViolation::SpatialIndexMismatch);
+        }
+        let mut definition_ids = HashSet::new();
+        for definition in &self.footprint_library {
+            if !definition_ids.insert(definition.footprint_id.clone()) {
+                violations.push(BoardInvariantViolation::DuplicateFootprintDefinition {
+                    footprint_id: definition.footprint_id.clone(),
+                });
+            }
+            let mut pad_numbers = HashSet::new();
+            for pad in &definition.pads {
+                if !pad_numbers.insert(pad.number.clone()) {
+                    violations.push(BoardInvariantViolation::DuplicatePadNumber {
+                        footprint_id: definition.footprint_id.clone(),
+                        number: pad.number.clone(),
+                    });
+                }
+                if !finite(pad.position)
+                    || !pad.size.w.is_finite()
+                    || !pad.size.h.is_finite()
+                    || pad.size.w <= 0.0
+                    || pad.size.h <= 0.0
+                {
+                    violations.push(BoardInvariantViolation::InvalidPadGeometry {
+                        footprint_id: definition.footprint_id.clone(),
+                        number: pad.number.clone(),
+                    });
+                }
+                if pad.drill_mm.is_some_and(|drill| {
+                    !drill.is_finite() || drill <= 0.0 || drill >= pad.size.w.min(pad.size.h)
+                }) {
+                    violations.push(BoardInvariantViolation::InvalidPadDrill {
+                        footprint_id: definition.footprint_id.clone(),
+                        number: pad.number.clone(),
+                    });
+                }
+                if pad.layers.is_empty()
+                    || pad.layers.iter().any(|layer| !self.layers.contains(layer))
+                {
+                    violations.push(BoardInvariantViolation::MissingPadLayer {
+                        footprint_id: definition.footprint_id.clone(),
+                        number: pad.number.clone(),
+                    });
+                }
+                if let (Some(known), Some(net_id)) = (known_net_ids, pad.net_id)
+                    && !known.contains(&net_id)
+                {
+                    violations.push(BoardInvariantViolation::UnknownNet {
+                        entity: "pad",
+                        id: 0,
+                        net_id,
+                    });
+                }
+            }
+        }
         if self.outline.points.len() < 4
             || self.outline.points.iter().any(|point| !finite(*point))
             || self.outline.points.first() != self.outline.points.last()
@@ -536,6 +664,12 @@ impl Board {
                 violations.push(BoardInvariantViolation::NonFiniteGeometry {
                     entity: "footprint",
                     id: footprint.id,
+                });
+            }
+            if !definition_ids.contains(&footprint.footprint_id) {
+                violations.push(BoardInvariantViolation::MissingFootprintDefinition {
+                    id: footprint.id,
+                    footprint_id: footprint.footprint_id.clone(),
                 });
             }
         }
@@ -555,6 +689,13 @@ impl Board {
                     id: track.id,
                 });
             }
+            validate_known_net(
+                known_net_ids,
+                "track",
+                track.id,
+                track.net_id,
+                &mut violations,
+            );
         }
         for via in &self.vias {
             if !finite(via.position) {
@@ -571,6 +712,7 @@ impl Board {
             {
                 violations.push(BoardInvariantViolation::InvalidViaDimensions { id: via.id });
             }
+            validate_known_net(known_net_ids, "via", via.id, via.net_id, &mut violations);
         }
         for zone in &self.zones {
             if zone.outline.len() < 3 || zone.outline.iter().any(|point| !finite(*point)) {
@@ -579,12 +721,44 @@ impl Board {
                     id: zone.id,
                 });
             }
+            if !valid_polygon(&zone.outline) {
+                violations.push(BoardInvariantViolation::InvalidZonePolygon { id: zone.id });
+            }
             if !self.layers.contains(&zone.layer) {
                 violations.push(BoardInvariantViolation::MissingLayer {
                     entity: "zone",
                     id: zone.id,
                 });
             }
+            validate_known_net(known_net_ids, "zone", zone.id, zone.net_id, &mut violations);
+        }
+        let mut net_class_ids = HashSet::new();
+        for class in &self.net_classes {
+            if !net_class_ids.insert(class.class_id.clone()) {
+                violations.push(BoardInvariantViolation::DuplicateNetClass {
+                    class_id: class.class_id.clone(),
+                });
+            }
+            if class.class_id.trim().is_empty()
+                || !positive_finite(class.clearance_mm)
+                || !positive_finite(class.track_width_mm)
+                || !positive_finite(class.via_diameter_mm)
+                || !positive_finite(class.via_drill_mm)
+                || class.via_drill_mm >= class.via_diameter_mm
+            {
+                violations.push(BoardInvariantViolation::InvalidNetClass {
+                    class_id: class.class_id.clone(),
+                });
+            }
+        }
+        if !positive_finite(self.design_rules.default_clearance_mm)
+            || !positive_finite(self.design_rules.min_track_width_mm)
+            || !positive_finite(self.design_rules.min_via_diameter_mm)
+            || !positive_finite(self.design_rules.min_via_drill_mm)
+            || !positive_finite(self.design_rules.board_edge_clearance_mm)
+            || self.design_rules.min_via_drill_mm >= self.design_rules.min_via_diameter_mm
+        {
+            violations.push(BoardInvariantViolation::InvalidDesignRules);
         }
         if violations.is_empty() {
             Ok(())
@@ -981,6 +1155,91 @@ impl Board {
 
 fn finite(point: Point2) -> bool {
     point.x.is_finite() && point.y.is_finite()
+}
+
+fn positive_finite(value: f32) -> bool {
+    value.is_finite() && value > 0.0
+}
+
+fn validate_known_net(
+    known_net_ids: Option<&HashSet<usize>>,
+    entity: &'static str,
+    id: u64,
+    net_id: usize,
+    output: &mut Vec<BoardInvariantViolation>,
+) {
+    if known_net_ids.is_some_and(|known| !known.contains(&net_id)) {
+        output.push(BoardInvariantViolation::UnknownNet { entity, id, net_id });
+    }
+}
+
+fn valid_polygon(points: &[Point2]) -> bool {
+    if points.len() < 3 || points.iter().any(|point| !finite(*point)) {
+        return false;
+    }
+    let unique_len = if points.first() == points.last() {
+        points.len().saturating_sub(1)
+    } else {
+        points.len()
+    };
+    if unique_len < 3 {
+        return false;
+    }
+    let polygon = &points[..unique_len];
+    let signed_twice_area = polygon
+        .iter()
+        .zip(polygon.iter().cycle().skip(1))
+        .take(unique_len)
+        .map(|(left, right)| left.x * right.y - right.x * left.y)
+        .sum::<f32>();
+    if signed_twice_area.abs() <= 1.0e-6 {
+        return false;
+    }
+    for left in 0..unique_len {
+        let left_next = (left + 1) % unique_len;
+        for right in (left + 1)..unique_len {
+            let right_next = (right + 1) % unique_len;
+            if left == right
+                || left_next == right
+                || right_next == left
+                || (left == 0 && right_next == 0)
+            {
+                continue;
+            }
+            if segments_intersect(
+                polygon[left],
+                polygon[left_next],
+                polygon[right],
+                polygon[right_next],
+            ) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn segments_intersect(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
+    fn cross(a: Point2, b: Point2, c: Point2) -> f32 {
+        (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+    }
+    fn on_segment(a: Point2, b: Point2, point: Point2) -> bool {
+        const EPSILON: f32 = 1.0e-6;
+        point.x >= a.x.min(b.x) - EPSILON
+            && point.x <= a.x.max(b.x) + EPSILON
+            && point.y >= a.y.min(b.y) - EPSILON
+            && point.y <= a.y.max(b.y) + EPSILON
+    }
+    const EPSILON: f32 = 1.0e-6;
+    let ab_c = cross(a, b, c);
+    let ab_d = cross(a, b, d);
+    let cd_a = cross(c, d, a);
+    let cd_b = cross(c, d, b);
+    (ab_c * ab_d < 0.0 && cd_a * cd_b < 0.0)
+        || (ab_c.abs() <= EPSILON && on_segment(a, b, c))
+        || (ab_d.abs() <= EPSILON && on_segment(a, b, d))
+        || (cd_a.abs() <= EPSILON && on_segment(c, d, a))
+        || (cd_b.abs() <= EPSILON && on_segment(c, d, b))
 }
 
 fn collect_duplicate_ids(
@@ -1451,5 +1710,89 @@ mod tests {
             })
         );
         assert!(violations.contains(&BoardInvariantViolation::InvalidTrackWidth { id: 9 }));
+    }
+
+    #[test]
+    fn board_validator_reports_library_net_and_rule_corruption() {
+        let mut board = Board::new_two_layer(80.0, 50.0);
+        board.footprints.push(BoardFootprint {
+            id: 20,
+            symbol_instance_id: Some(5),
+            reference: "U1".to_string(),
+            footprint_id: "missing".to_string(),
+            position: Point2::new(10.0, 10.0),
+            rotation_deg: 0.0,
+            flipped: false,
+            placed: true,
+        });
+        board.tracks.push(TrackSegment {
+            id: 21,
+            net_id: 99,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(10.0, 10.0),
+            end: Point2::new(20.0, 10.0),
+            width_mm: 0.25,
+        });
+        board.zones.push(Zone {
+            id: 22,
+            net_id: 99,
+            layer: BoardLayer::FrontCopper,
+            outline: vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(5.0, 5.0),
+                Point2::new(0.0, 5.0),
+                Point2::new(5.0, 0.0),
+            ],
+        });
+        board.net_classes.push(NetClass {
+            class_id: "broken".to_string(),
+            clearance_mm: -0.1,
+            ..NetClass::default()
+        });
+        board.rebuild_entity_index();
+
+        let known_nets = HashSet::from([1]);
+        let violations = board
+            .validate_invariants_with_nets(Some(&known_nets))
+            .expect_err("cross-reference corruption must be diagnosed");
+        assert!(
+            violations.contains(&BoardInvariantViolation::MissingFootprintDefinition {
+                id: 20,
+                footprint_id: "missing".to_string(),
+            })
+        );
+        assert!(violations.contains(&BoardInvariantViolation::UnknownNet {
+            entity: "track",
+            id: 21,
+            net_id: 99,
+        }));
+        assert!(violations.contains(&BoardInvariantViolation::InvalidZonePolygon { id: 22 }));
+        assert!(
+            violations.contains(&BoardInvariantViolation::InvalidNetClass {
+                class_id: "broken".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn board_validator_detects_stale_spatial_index() {
+        let mut board = Board::new_two_layer(80.0, 50.0);
+        board.add_track(TrackSegment {
+            id: 30,
+            net_id: 1,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(10.0, 10.0),
+            end: Point2::new(20.0, 10.0),
+            width_mm: 0.25,
+        });
+        board.tracks[0].end = Point2::new(70.0, 40.0);
+
+        let violations = board
+            .validate_invariants()
+            .expect_err("out-of-band geometry mutation must stale the spatial index");
+        assert!(violations.contains(&BoardInvariantViolation::SpatialIndexMismatch));
+
+        board.rebuild_entity_index();
+        assert!(board.validate_invariants().is_ok());
     }
 }
