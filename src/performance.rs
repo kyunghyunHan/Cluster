@@ -168,6 +168,14 @@ impl RealisticFixture {
             total_ms: profile.total_ms,
         }
     }
+
+    pub fn prepare_single_page_analysis(&self) -> Option<PreparedSchematicAnalysis<'_>> {
+        self.pages.is_empty().then(|| PreparedSchematicAnalysis {
+            components: &self.components,
+            wires: &self.wires,
+            connectivity: self.connectivity(),
+        })
+    }
 }
 
 fn fixture_component(id: u64, kind: ComponentKind, position: Pos2) -> Component {
@@ -559,12 +567,36 @@ impl PreparedSchematicAnalysis<'_> {
         .len()
     }
 
-    pub fn mna_solver_checksum(&self) -> usize {
+    pub fn mna_attempt_checksum(&self) -> usize {
         mna::solve_dc_detailed_with_connectivity(self.components, self.wires, &self.connectivity)
             .map_or_else(
                 |_| self.connectivity.netlist.nets.len(),
                 |dc| dc.node_voltages.len(),
             )
+    }
+
+    /// Analysis attempt with canonical connectivity already reused. Callers
+    /// must use a solvable fixture before presenting this as solver latency.
+    pub fn reused_connectivity_analysis_checksum(&self) -> usize {
+        let mna = self.mna_attempt_checksum();
+        mna.saturating_add(self.erc_values_only_checksum())
+    }
+
+    pub fn mna_stage_profile(&self) -> MnaStageMetrics {
+        let (_, profile) =
+            mna::solve_dc_detailed_profiled(self.components, self.wires, &self.connectivity);
+        MnaStageMetrics {
+            circuit_compilation_ms: profile.circuit_compilation_ms,
+            node_indexing_ms: profile.node_indexing_ms,
+            matrix_allocation_ms: profile.matrix_allocation_ms,
+            matrix_stamping_ms: profile.matrix_stamping_ms,
+            nonlinear_iteration_ms: profile.nonlinear_iteration_ms,
+            factorization_solve_ms: profile.factorization_solve_ms,
+            convergence_test_ms: profile.convergence_test_ms,
+            result_mapping_ms: profile.result_mapping_ms,
+            wire_segment_current_mapping_ms: profile.wire_segment_current_mapping_ms,
+            total_ms: profile.total_ms,
+        }
     }
 }
 

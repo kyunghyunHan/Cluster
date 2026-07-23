@@ -4,6 +4,7 @@ use crate::model::{Component, NetlistAnnotations, SavedCircuit, Wire};
 use crate::pcb::board::Board;
 use crate::pcb::drc::{DrcViolation, run_drc_with_nets};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
 pub(crate) enum AnalysisRequest {
@@ -33,7 +34,8 @@ pub(crate) enum AnalysisPayload {
 }
 
 pub(crate) struct SchematicAnalysis {
-    pub(crate) connectivity: crate::model::CanonicalConnectivity,
+    pub(crate) connectivity: Arc<crate::model::CanonicalConnectivity>,
+    pub(crate) connectivity_reused: bool,
     pub(crate) simulation: crate::engine::simulation::Simulation,
     pub(crate) connectivity_ms: f64,
     pub(crate) simulation_ms: f64,
@@ -55,6 +57,8 @@ struct Job {
 
 #[derive(Default)]
 struct WorkerCache {
+    connectivity_revision: Option<u64>,
+    connectivity: Option<Arc<crate::model::CanonicalConnectivity>>,
     erc_topology_revision: Option<u64>,
     erc_topology: Vec<crate::engine::validation::ErcViolation>,
 }
@@ -193,16 +197,40 @@ fn execute(
             ac_key,
         } => {
             let started = std::time::Instant::now();
-            let connectivity =
-                crate::engine::netlist::build_canonical_connectivity_with_annotations(
-                    &components,
-                    &wires,
-                    &annotations,
+            let (connectivity, connectivity_reused) = if cache.connectivity_revision
+                == Some(revision_key.connectivity)
+            {
+                match &cache.connectivity {
+                    Some(connectivity) => (Arc::clone(connectivity), true),
+                    None => {
+                        let connectivity = Arc::new(
+                            crate::engine::netlist::build_canonical_connectivity_with_annotations(
+                                &components,
+                                &wires,
+                                &annotations,
+                            ),
+                        );
+                        cache.connectivity = Some(Arc::clone(&connectivity));
+                        (connectivity, false)
+                    }
+                }
+            } else {
+                let connectivity = Arc::new(
+                    crate::engine::netlist::build_canonical_connectivity_with_annotations(
+                        &components,
+                        &wires,
+                        &annotations,
+                    ),
                 );
+                cache.connectivity_revision = Some(revision_key.connectivity);
+                cache.connectivity = Some(Arc::clone(&connectivity));
+                (connectivity, false)
+            };
             let connectivity_ms = started.elapsed().as_secs_f64() * 1_000.0;
             if cancellation.is_cancelled() {
                 return AnalysisPayload::Schematic(Box::new(SchematicAnalysis {
                     connectivity,
+                    connectivity_reused,
                     simulation: crate::engine::simulation::Simulation::default(),
                     connectivity_ms,
                     simulation_ms: 0.0,
@@ -215,7 +243,7 @@ fn execute(
             let mut simulation = crate::ui::app::analyze_circuit_with_connectivity_and_cancellation(
                 &components,
                 &wires,
-                &connectivity,
+                connectivity.as_ref(),
                 Some(cancellation),
             );
             simulation.ac = crate::engine::mna::solve_ac_with_connectivity(
@@ -287,6 +315,7 @@ fn execute(
             let erc_ms = started.elapsed().as_secs_f64() * 1_000.0;
             AnalysisPayload::Schematic(Box::new(SchematicAnalysis {
                 connectivity,
+                connectivity_reused,
                 simulation,
                 connectivity_ms,
                 simulation_ms,
@@ -338,6 +367,51 @@ mod tests {
             }),
             path: PathBuf::from(format!("autosave-{revision}.json")),
         }
+    }
+
+    fn empty_schematic(connectivity_revision: u64, parameter_revision: u64) -> AnalysisRequest {
+        AnalysisRequest::Schematic {
+            components: Vec::new(),
+            wires: Vec::new(),
+            annotations: Box::default(),
+            ac_frequency_hz: 1_000.0,
+            backend: crate::engine::backend::BackendKind::InternalMna,
+            revision_key: crate::ui::app::SimulationRevisionKey {
+                connectivity: connectivity_revision,
+                topology: connectivity_revision,
+                parameters: parameter_revision,
+                electrical: parameter_revision,
+            },
+            ac_key: 1_000.0_f32.to_bits(),
+        }
+    }
+
+    #[test]
+    fn value_only_worker_request_reuses_canonical_connectivity() {
+        let cancellation = CancellationToken::default();
+        let mut cache = WorkerCache::default();
+        let first = execute(empty_schematic(4, 10), &cancellation, &mut cache);
+        let AnalysisPayload::Schematic(first) = first else {
+            panic!("expected schematic analysis");
+        };
+        assert!(!first.connectivity_reused);
+
+        let second = execute(empty_schematic(4, 11), &cancellation, &mut cache);
+        let AnalysisPayload::Schematic(second) = second else {
+            panic!("expected schematic analysis");
+        };
+        assert!(second.connectivity_reused);
+        assert!(Arc::ptr_eq(&first.connectivity, &second.connectivity));
+
+        let topology_change = execute(empty_schematic(5, 11), &cancellation, &mut cache);
+        let AnalysisPayload::Schematic(topology_change) = topology_change else {
+            panic!("expected schematic analysis");
+        };
+        assert!(!topology_change.connectivity_reused);
+        assert!(!Arc::ptr_eq(
+            &second.connectivity,
+            &topology_change.connectivity
+        ));
     }
 
     #[test]

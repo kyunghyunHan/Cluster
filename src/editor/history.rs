@@ -69,22 +69,30 @@ impl crate::CircuitApp {
         self.invalidate_connectivity_cache();
     }
 
-    pub(crate) fn record_history(&mut self) {
-        self.begin_history_transaction("Edit document", None);
-    }
-
-    pub(crate) fn begin_history_transaction(
-        &mut self,
-        description: &'static str,
-        merge_key: Option<crate::commands::CommandMergeKey>,
-    ) {
+    pub(crate) fn begin_snapshot_history_transaction(&mut self, description: &'static str) {
         if self.editor.history.pending.is_some() {
             return;
         }
         self.editor.history.pending = Some(crate::ui::app::PendingHistory {
             basis: crate::ui::app::PendingHistoryBasis::Snapshot(Box::new(self.snapshot())),
             description,
-            merge_key,
+            merge_key: None,
+        });
+    }
+
+    pub(crate) fn begin_scoped_schematic_history_transaction(
+        &mut self,
+        description: &'static str,
+        scope: crate::editor::delta::SchematicDeltaScope,
+    ) {
+        if self.editor.history.pending.is_some() {
+            return;
+        }
+        let capture = DocumentDelta::capture_schematic(&self.document, scope);
+        self.editor.history.pending = Some(crate::ui::app::PendingHistory {
+            basis: crate::ui::app::PendingHistoryBasis::Schematic(Box::new(capture)),
+            description,
+            merge_key: None,
         });
     }
 
@@ -94,22 +102,62 @@ impl crate::CircuitApp {
         component_ids: std::collections::HashSet<u64>,
         wire_ids: std::collections::HashSet<u64>,
     ) {
-        if self.editor.history.pending.is_some() {
-            return;
-        }
-        let capture = DocumentDelta::capture_schematic(
-            &self.document,
+        self.begin_scoped_schematic_history_transaction(
+            description,
             crate::editor::delta::SchematicDeltaScope {
                 component_ids,
                 wire_ids,
                 ..Default::default()
             },
         );
-        self.editor.history.pending = Some(crate::ui::app::PendingHistory {
-            basis: crate::ui::app::PendingHistoryBasis::Schematic(Box::new(capture)),
+    }
+
+    pub(crate) fn begin_new_entities_history_transaction(&mut self, description: &'static str) {
+        self.begin_scoped_schematic_history_transaction(
             description,
-            merge_key: None,
-        });
+            crate::editor::delta::SchematicDeltaScope {
+                // Auto-routing a repair can split any existing wire crossed by
+                // the generated orthogonal path. Capture wires as entity
+                // deltas so undo restores those splits without retaining a
+                // whole CircuitSnapshot.
+                wire_ids: self.document.wires.iter().map(|wire| wire.id).collect(),
+                capture_new_components: true,
+                capture_new_wires: true,
+                capture_metadata: true,
+                ..Default::default()
+            },
+        );
+    }
+
+    pub(crate) fn begin_document_history_transaction(&mut self, description: &'static str) {
+        self.begin_scoped_schematic_history_transaction(
+            description,
+            crate::editor::delta::SchematicDeltaScope {
+                component_ids: self
+                    .document
+                    .components
+                    .iter()
+                    .map(|component| component.id)
+                    .collect(),
+                wire_ids: self.document.wires.iter().map(|wire| wire.id).collect(),
+                capture_new_components: true,
+                capture_new_wires: true,
+                capture_annotations: true,
+                capture_metadata: true,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_annotation_history_transaction(&mut self, description: &'static str) {
+        self.begin_scoped_schematic_history_transaction(
+            description,
+            crate::editor::delta::SchematicDeltaScope {
+                capture_annotations: true,
+                capture_metadata: true,
+                ..Default::default()
+            },
+        );
     }
 
     pub(crate) fn finish_history_transaction(&mut self) {

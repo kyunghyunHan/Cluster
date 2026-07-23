@@ -155,16 +155,21 @@ fn main() {
             measure("erc_topology_only_1000c_5000s", samples, || {
                 prepared.erc_topology_only_checksum()
             });
+            measure("analysis_prepare_no_ground_1000c_5000s", samples, || {
+                prepared.reused_connectivity_analysis_checksum()
+            });
         }
         measure(&format!("connectivity_plus_erc_{label}"), samples, || {
             fixture.connectivity_plus_erc_checksum()
         });
-        measure(&format!("mna_solver_only_{label}"), samples, || {
-            prepared.mna_solver_checksum()
+        measure(&format!("mna_prepare_no_ground_{label}"), samples, || {
+            prepared.mna_attempt_checksum()
         });
-        measure(&format!("connectivity_plus_mna_{label}"), samples, || {
-            fixture.connectivity_plus_mna_checksum()
-        });
+        measure(
+            &format!("connectivity_plus_mna_no_ground_{label}"),
+            samples,
+            || fixture.connectivity_plus_mna_checksum(),
+        );
         let save = fixture.prepare_save();
         measure(&format!("save_json_{label}"), samples, || {
             save.serialization_len()
@@ -197,7 +202,30 @@ fn main() {
         connectivity.diagnostics_ms,
         connectivity.total_ms,
     );
+    let large_mna = large.prepare_analysis().mna_stage_profile();
+    println!(
+        "MNA stages (large synthetic): compile={:.3} nodes={:.3} alloc={:.3} stamp={:.3} nonlinear={:.3} solve={:.3} converge={:.3} results={:.3} wire_map={:.3} total={:.3} ms",
+        large_mna.circuit_compilation_ms,
+        large_mna.node_indexing_ms,
+        large_mna.matrix_allocation_ms,
+        large_mna.matrix_stamping_ms,
+        large_mna.nonlinear_iteration_ms,
+        large_mna.factorization_solve_ms,
+        large_mna.convergence_test_ms,
+        large_mna.result_mapping_ms,
+        large_mna.wire_segment_current_mapping_ms,
+        large_mna.total_ms,
+    );
     let mixed = RealisticFixture::generate(RealisticFixtureKind::MixedSimulation);
+    let prepared_mixed = mixed
+        .prepare_single_page_analysis()
+        .expect("mixed simulation fixture is single-page");
+    measure("mna_solver_only_mixed", samples, || {
+        prepared_mixed.mna_attempt_checksum()
+    });
+    measure("parameter_update_mixed", samples, || {
+        prepared_mixed.reused_connectivity_analysis_checksum()
+    });
     let mna = mixed.mna_stage_profile();
     println!(
         "MNA stages (mixed): compile={:.3} nodes={:.3} alloc={:.3} stamp={:.3} nonlinear={:.3} solve={:.3} converge={:.3} results={:.3} wire_map={:.3} total={:.3} ms",

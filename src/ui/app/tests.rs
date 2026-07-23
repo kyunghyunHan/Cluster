@@ -128,6 +128,9 @@ fn beginner_validation_warns_relay_without_flyback_diode() {
 fn relay_flyback_auto_fix_places_and_wires_diode() {
     let mut app = CircuitApp::new();
     app.load_motor_relay_demo();
+    let components_before = app.components.clone();
+    let wires_before = app.wires.clone();
+    let history_before = app.editor.history.undo.len();
     let simulation = app.current_simulation();
     let fix = simulation
         .erc
@@ -137,6 +140,11 @@ fn relay_flyback_auto_fix_places_and_wires_diode() {
         .expect("relay flyback warning should offer auto fix");
 
     app.apply_erc_auto_fix(fix);
+    assert_eq!(
+        app.editor.history.undo.len(),
+        history_before + 1,
+        "one auto-fix must produce one history entry"
+    );
 
     let simulation = app.current_simulation();
     assert!(
@@ -151,6 +159,16 @@ fn relay_flyback_auto_fix_places_and_wires_diode() {
             .any(|component| component.kind == ComponentKind::Diode)
     );
     assert!(app.status.contains("flyback diode"));
+
+    app.undo();
+    assert_eq!(app.components, components_before);
+    assert_eq!(app.wires, wires_before);
+    app.redo();
+    assert!(
+        app.components
+            .iter()
+            .any(|component| component.kind == ComponentKind::Diode)
+    );
 }
 
 #[test]
@@ -478,7 +496,7 @@ fn legacy_single_page_annotations_load_without_schema_change() {
 #[test]
 fn annotation_changes_are_undoable_entity_deltas() {
     let mut app = CircuitApp::new();
-    app.record_history();
+    app.begin_annotation_history_transaction("Add junction");
     app.annotations.junction_dots.push(JunctionDot {
         id: JunctionId(10),
         position: Pos2::new(100.0, 100.0),

@@ -23,8 +23,11 @@ not counted as complete.
   pooled. Raw run outputs were retained as `/tmp/cluster-perf-final{1,2,3}.txt`
   during the audit.
 
-ERC and MNA now have explicit timing boundaries. `erc_rules_only_*` reuses a
-prepared canonical connectivity result; `mna_solver_only_*` does the same.
+ERC has an explicit timing boundary: `erc_rules_only_*` reuses a prepared
+canonical connectivity result. The baseline's former `mna_solver_only_*` label
+was incorrect; those rows stop at `NoGround` after preparation and are retained
+below only as historical measurements. See the erratum and corrected solvable
+fixture in the follow-up section.
 The completion slice additionally reports `erc_values_only_*` and
 `erc_topology_only_*`, so dependency-filtered work is measurable rather than
 inferred from the full rule set.
@@ -41,18 +44,18 @@ Times are milliseconds and heap values are bytes.
 | Connectivity, 100 / 300 | 3.3956 | 5.2952 | 6.9823 | 415,886 |
 | ERC rules only, 100 / 300 | 0.6622 | 0.6897 | 0.8260 | 85,164 |
 | Connectivity + ERC, 100 / 300 | 3.1589 | 3.2680 | 3.2941 | 415,886 |
-| MNA solver only, 100 / 300 | 0.4803 | 0.5063 | 0.5317 | 46,449 |
-| Connectivity + MNA, 100 / 300 | 2.9660 | 3.0994 | 3.1858 | 415,886 |
+| MNA prepare then `NoGround`, 100 / 300 | 0.4803 | 0.5063 | 0.5317 | 46,449 |
+| Connectivity + MNA prepare then `NoGround`, 100 / 300 | 2.9660 | 3.0994 | 3.1858 | 415,886 |
 | Connectivity, 500 / 2,000 | 18.2896 | 18.7317 | 18.9142 | 2,690,979 |
 | ERC rules only, 500 / 2,000 | 12.2497 | 12.3908 | 12.4264 | 591,284 |
 | Connectivity + ERC, 500 / 2,000 | 30.7302 | 31.6380 | 32.9358 | 2,690,979 |
-| MNA solver only, 500 / 2,000 | 16.5850 | 16.8789 | 16.9400 | 366,320 |
-| Connectivity + MNA, 500 / 2,000 | 34.8763 | 35.5773 | 35.8897 | 2,690,979 |
+| MNA prepare then `NoGround`, 500 / 2,000 | 16.5850 | 16.8789 | 16.9400 | 366,320 |
+| Connectivity + MNA prepare then `NoGround`, 500 / 2,000 | 34.8763 | 35.5773 | 35.8897 | 2,690,979 |
 | Connectivity, 1,000 / 5,000 | 48.2897 | 48.7855 | 49.7068 | 5,993,436 |
 | ERC rules only, 1,000 / 5,000 | 92.2542 | 97.8833 | 115.8097 | 1,181,668 |
 | Connectivity + ERC, 1,000 / 5,000 | 138.6502 | 143.2533 | 148.2399 | 5,993,436 |
-| MNA solver only, 1,000 / 5,000 | 95.1147 | 96.3391 | 97.2700 | 723,088 |
-| Connectivity + MNA, 1,000 / 5,000 | 144.0003 | 146.6168 | 150.3731 | 5,993,436 |
+| MNA prepare then `NoGround`, 1,000 / 5,000 | 95.1147 | 96.3391 | 97.2700 | 723,088 |
+| Connectivity + MNA prepare then `NoGround`, 1,000 / 5,000 | 144.0003 | 146.6168 | 150.3731 | 5,993,436 |
 | JSON serialization, 1,000 / 5,000 | 3.7347 | 3.8537 | 3.9012 | 3,143,839 |
 | Atomic write + sync/backup, 1,000 / 5,000 | 10.9559 | 12.8948 | 13.0268 | 168 |
 | Autosave UI-thread DTO, 1,000 / 5,000 | 1.1102 | 1.3535 | 1.3660 | 1,381,652 |
@@ -86,10 +89,12 @@ Times are milliseconds and heap values are bytes.
 | PCB workspace | 0.4125 / 0.5017 / 0.5318 | 0.3311 | 0.0773 |
 | Breadboard workspace | 0.8800 / 1.1229 / 1.1472 | 0.6562 | 0.2109 |
 
-The measured bottlenecks are not frame painting. At large scale they are MNA
-solver-only p95 (96.34 ms), ERC rule evaluation p95 (97.88 ms), canonical
-connectivity p95 (48.79 ms), and add/split-wire command p95 (10.68 ms with a
-9.83 MiB peak allocation). These establish the optimization order for M2–M4.
+The measured bottlenecks are not frame painting. At large scale they are ERC
+rule evaluation p95 (97.88 ms), canonical connectivity p95 (48.79 ms), the
+mislabelled MNA preparation/`NoGround` path (96.34 ms), and add/split-wire
+command p95 (10.68 ms with a 9.83 MiB peak allocation). The corrected solvable
+MNA measurement appears in the follow-up; the historical row is not solver
+latency. These establish the optimization order for M2–M4.
 Atomic write is intentionally slower than the UI budget because it includes
 file and directory sync plus backup rotation and executes on the worker. The UI
 thread autosave DTO work is isolated and remains below its 3 ms target.
@@ -110,13 +115,14 @@ milliseconds.
 | ERC values only | not isolated | 0.3819 / 0.4122 / 0.4209 | 1,790 |
 | ERC topology only | not isolated | 3.9153 / 4.0192 / 4.0331 | 1,181,668 |
 | Connectivity + ERC | 138.6502 / 143.2533 | 53.3970 / 54.0169 / 54.4929 | 5,993,436 |
-| MNA solver only | 95.1147 / 96.3391 | 96.0559 / 97.8217 / 98.9065 | 723,088 |
-| Connectivity + MNA | 144.0003 / 146.6168 | 145.4240 / 146.6680 / 147.0070 | 5,993,436 |
+| MNA prepare then `NoGround` | 95.1147 / 96.3391 | 96.0559 / 97.8217 / 98.9065 | 723,088 |
+| Connectivity + MNA prepare then `NoGround` | 144.0003 / 146.6168 | 145.4240 / 146.6680 / 147.0070 | 5,993,436 |
 
 ERC output checksums remained identical (`6002` full, `6001` topology), and
 the beginner ERC test suite remained green. The 95% rules-only reduction is
-therefore an execution-plan change, not a reduced rule set. MNA did not improve
-because compiled-topology/parameter reuse is not implemented yet.
+therefore an execution-plan change, not a reduced rule set. The historical MNA
+row did not improve and, as the erratum explains, did not measure a completed
+solve. Compiled-topology/parameter reuse is not implemented yet.
 
 | Command + undo/redo/undo | Before p50 / p95 | After p50 / p95 / max | Heap before → after |
 | --- | ---: | ---: | ---: |
@@ -129,6 +135,85 @@ The final large offscreen production frame was
 `2.1812/2.5437/2.8828 ms` p50/p95/max. Atomic write p95 was 13.2098 ms and ran
 on the worker; UI-thread autosave DTO p95 was 1.3058 ms.
 
+## Full-product directive follow-up
+
+The follow-up starts at `f5133629c8e400125f5f55c830875e2475aa7df1`.
+It closes the remaining normal-edit snapshot paths and corrects an MNA
+measurement error.
+
+### Correctness fixes
+
+- ERC auto-fix previously opened an outer snapshot transaction while nested
+  wire commands independently created history entries and revisions. One fix
+  was therefore not one undo operation.
+- Generated flyback wiring can split an existing wire. Capturing only newly
+  created entities failed to restore that split wire on undo. The compound
+  repair transaction now captures existing wires as entity deltas, suppresses
+  nested history/revision commits, and commits once.
+- Editing a `NetLabel` value was classified as an ordinary electrical value
+  edit even though that value is the canonical global net name. Connectivity
+  could remain stale. Net-label value edits now advance connectivity and
+  simulation-topology revisions.
+- Value-only worker requests rebuilt canonical connectivity despite carrying a
+  stable connectivity revision. The worker now retains an `Arc` keyed by that
+  revision and exposes hit/miss state in the existing performance overlay.
+
+The deterministic 240-operation command test now additionally undoes to the
+initial semantic state, redoes to the final semantic state, serializes and
+loads it, and compares all exact canonical connectivity maps and diagnostics.
+Entity vector order is normalized by ID for semantic comparison because
+swap-remove intentionally does not preserve storage order; the entity index is
+still checked against the actual vector position after every operation.
+
+### Snapshot boundary after follow-up
+
+There is no full snapshot in a normal editor command, page add/remove,
+annotation edit, drag, multi-entity transform, or compound ERC repair. The two
+production snapshot transactions are explicit whole-document replacement
+boundaries:
+
+- project-folder load;
+- circuit JSON load/autorecovery/schema migration.
+
+`DocumentDelta::between` also remains in unit/performance code that verifies or
+benchmarks the legacy compatibility boundary.
+
+### MNA benchmark erratum
+
+The original synthetic `mna_solver_only_{100,500,1000}` fixture contains only
+resistors/labels and no GND. The solver spends the reported time constructing
+its `NetMap` and then returns `NoGround`; it never reaches node indexing,
+matrix allocation, stamping, factorization, or result mapping. The former
+`95.1147/96.3391 ms` large row must therefore not be cited as numeric solver
+latency.
+
+Those rows are now named `mna_prepare_no_ground_*` and
+`connectivity_plus_mna_no_ground_*`. Actual solver-only and parameter-update
+measurements use the solvable mixed fixture. Median-of-three 21-sample results:
+
+| Corrected workload | p50 | p95 | max | Peak heap |
+| --- | ---: | ---: | ---: | ---: |
+| MNA solver only, solvable mixed | 2.0765 | 2.1913 | 2.2845 | 154,824 |
+| Reused-connectivity parameter update, mixed | 2.1374 | 2.2650 | 2.2898 | 154,824 |
+
+The mixed stage profile was approximately compile `1.64–1.71 ms`, node index
+`0.013 ms`, allocation `0.004–0.005 ms`, stamping `0.001 ms`, solve
+`0.059–0.060 ms`, and result mapping `0.38–0.41 ms`. This passes the measured
+parameter-update target, but it is not a compiled MNA topology cache:
+compilation and matrix construction still run. A cache must be implemented and
+differentially tested before Phase 5 is accepted.
+
+The follow-up three-run medians were: large frame
+`2.2889/3.3145/3.6326 ms`, large ERC rules-only
+`4.4652/4.7116/5.1400 ms`, value-only ERC
+`0.3882/0.4155/0.4415 ms`, connectivity + ERC
+`54.0891/57.7997/65.8875 ms`, PCB local DRC p95 `0.0435 ms`, PCB full DRC p95
+`9.0540 ms`, autosave UI p95 `1.1103 ms`, add wire p95 `0.9936 ms`, and split
+wire p95 `1.0807 ms`. Large full connectivity p95 was `57.9363 ms` in this
+thermally noisy run set and therefore does not receive a pass, although the
+earlier isolated set was `49.8498 ms`. No improvement or regression is inferred
+from that disagreement.
+
 ### Acceptance check
 
 | Criterion | Result | Status |
@@ -140,10 +225,10 @@ on the worker; UI-thread autosave DTO p95 was 1.3058 ms.
 | Dense pin query p95 < 0.1 ms | Criterion estimate about 0.0001 ms | Pass |
 | Full schematic viewport p95 < 1 ms | Criterion estimate about 0.81 ms | Pass |
 | Medium full connectivity p95 < 20 ms | 18.7317 ms | Pass |
-| Large full connectivity p95 < 50 ms | 48.7855 ms | Pass |
+| Large full connectivity p95 < 50 ms | earlier 48.7855; follow-up 57.9363 ms | Not stable / no pass |
 | Value-only ERC p95 < 3 ms | 0.4122 ms | Pass |
 | Large full ERC rules-only p95 < 75 ms | 4.3620 ms | Pass |
-| Large aggregate analysis ideally < 100 ms | ERC 54.0169; MNA 146.6680 ms | ERC pass; MNA fail |
+| Large aggregate analysis ideally < 100 ms | ERC 54.0169; historical MNA row invalid | ERC pass; MNA unproven |
 | PCB local DRC p95 < 5 ms | 0.0556 ms | Pass |
 | PCB full DRC p95 < 20 ms | 7.2097 ms | Pass |
 | Autosave UI-thread work p95 < 3 ms | 1.3535 ms | Pass |
@@ -196,7 +281,7 @@ transaction on release.
 ### Analysis
 
 `dispatch_changes` marks dependency-specific revisions → UI submits a bounded,
-revision-tagged `AnalysisJob` → worker builds canonical connectivity → MNA and
+revision-tagged `AnalysisJob` → worker builds or revision-reuses canonical connectivity → MNA and
 simulation → topology/value/dynamic ERC → UI polls results and discards stale
 revision keys. Full PCB DRC and autosave share the same bounded worker queue.
 
@@ -232,7 +317,7 @@ spatial lookup, Gerber, drill, and CPL share the footprint transform.
 
 ## Test and benchmark inventory
 
-There are 240 passing tests after this slice. The largest groups are
+There are 242 passing tests after this slice. The largest groups are
 UI/app integration (76), MNA (30), canonical netlist (26), beginner ERC (22),
 current flow/custom parts (10 each), PCB board (8), and command dispatch (8).
 Criterion defines 42 benchmark registrations plus parameterized rows. The
@@ -256,14 +341,15 @@ spatial indexes.
   invariants, worker startup/queue failure handling, malformed-state tests, and
   the deterministic command sequence are implemented. Broader randomized
   geometry/connectivity and PCB/ECO differential tests remain.
-- M2: partially complete. Standard commands and component/wire drag use scoped
-  deltas, and isolated wire add/split meet their latency targets. Generic
-  compatibility history for page/load/annotation/compound repair still uses a
-  full snapshot and must be converted before M2 acceptance.
+- M2: accepted for current editor commands. Standard commands, page changes,
+  annotations, compound ERC repair, and component/wire drag use scoped deltas;
+  isolated wire add/split meet their latency targets. Snapshot history is
+  limited to explicit project/circuit replacement and recovery boundaries.
 - M3: partially complete. Prepared rules-only/value-only/topology-only timing,
-  topology ERC caching, and indexed pin grouping are implemented. Full canonical
-  connectivity remains the reference path; local connectivity rebuild, local-net
-  issue-key merge, and differential incremental tests remain.
+  topology ERC caching, indexed pin grouping, and value-only worker connectivity
+  reuse are implemented. Full canonical connectivity remains the reference
+  path; local connectivity rebuild, local-net issue-key merge, and differential
+  incremental tests remain.
 - M4–M9: not accepted. Existing reachable functionality is recorded in README
   and prior audits, but the completion-plan criteria have not been re-proven.
   In particular snapshot fallbacks, incremental connectivity/ERC/MNA reuse,
@@ -279,14 +365,15 @@ because a scaffold exists or because a neighboring feature works.
 - `cargo fmt --all -- --check`: pass.
 - `cargo check --all-targets --all-features`: pass.
 - `cargo clippy --all-targets --all-features -- -D warnings`: pass.
-- `cargo test --all-targets --all-features`: 240 passed, 0 failed/ignored.
+- `cargo test --all-targets --all-features`: 242 passed, 0 failed/ignored.
 - `cargo build --release --all-features`: pass.
 - `cargo bench --bench performance`: pass; all Criterion groups completed,
-  including the new ERC dependency and isolated add-wire rows. The large ERC
-  estimate improved by about 96%. A 2.9% (`3.88 ms` absolute) regression was
-  reported for the small realistic mixed-simulation ERC fixture, while dense
-  crossing was within Criterion's noise threshold; this is retained as a
-  follow-up for sharing one prepared rule context across rules.
+  including the corrected no-ground labels and solvable mixed MNA rows. This
+  long run progressively slowed across unrelated UI, save, PCB, command, and
+  analysis groups; Criterion reported widespread regressions against its saved
+  baseline. It is retained as code-path/fixture validation, not used as stable
+  acceptance evidence. The independent short probes above remain the absolute
+  timing evidence, and their large-connectivity p95 does not pass the target.
 - Three independent 21-sample release probes plus one post-clippy working-tree
   probe: pass. The post-clippy probe reported large ERC p95 `4.3109 ms`, add
   `0.7638 ms`, split `0.8562 ms`, and large egui `2.6944 ms`.

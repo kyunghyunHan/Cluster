@@ -4,6 +4,7 @@ use crate::model::IdAllocator;
 
 impl crate::CircuitApp {
     pub(crate) fn execute_editor_command(&mut self, command: EditorCommand) -> ChangeSet {
+        let compound_transaction = self.editor.history.pending.is_some();
         self.editor.document.grid = self.grid;
         if self.analysis.schematic_entity_revision != self.analysis.revisions.schematic_geometry {
             self.analysis.schematic_entity_index.rebuild(
@@ -27,14 +28,20 @@ impl crate::CircuitApp {
         }
         let description = command.description();
         let merge_key = command.merge_key();
-        let pcb_local_impact = command.pcb_local_analysis_impact(&self.document.board);
-        let board_capture = command.pcb_delta_scope(&self.document.board).map(|scope| {
-            crate::editor::delta::DocumentDelta::capture_board(&self.document.board, scope)
-        });
-        let schematic_capture = if board_capture.is_none() {
-            self.schematic_delta_capture(&command)
-        } else {
+        let pcb_local_impact = (!compound_transaction)
+            .then(|| command.pcb_local_analysis_impact(&self.document.board))
+            .flatten();
+        let board_capture = if compound_transaction {
             None
+        } else {
+            command.pcb_delta_scope(&self.document.board).map(|scope| {
+                crate::editor::delta::DocumentDelta::capture_board(&self.document.board, scope)
+            })
+        };
+        let schematic_capture = if compound_transaction || board_capture.is_some() {
+            None
+        } else {
+            self.schematic_delta_capture(&command)
         };
         let mut allocator = IdAllocator::new(self.document.next_id, self.document.counters.clone());
         let outcome = command.apply(&mut CommandContext::new(
@@ -47,7 +54,7 @@ impl crate::CircuitApp {
         ));
         allocator.commit(&mut self.document.next_id, &mut self.document.counters);
         let changes = outcome.changes;
-        if changes.persistence_changed {
+        if changes.persistence_changed && !compound_transaction {
             let delta = if let Some(capture) = board_capture {
                 crate::editor::delta::DocumentDelta::from_board_capture(
                     capture,
@@ -61,11 +68,14 @@ impl crate::CircuitApp {
             };
             self.push_history_delta(delta, description, merge_key);
         }
-        self.dispatch_changes(changes);
+        if !compound_transaction {
+            self.dispatch_changes(changes);
+        }
         if changes.schematic_geometry_changed {
             self.mark_schematic_indices_current();
         }
-        if changes.persistence_changed
+        if !compound_transaction
+            && changes.persistence_changed
             && let Some(impact) = pcb_local_impact
         {
             self.refresh_local_pcb_analysis(&impact.track_ids, &impact.net_ids);
@@ -534,6 +544,7 @@ mod tests {
     fn deterministic_random_command_sequence_matches_linear_document_state() {
         use crate::commands::selection::SelectionCommand;
         use crate::commands::wiring::WiringCommand;
+        use crate::model::SavedCircuit;
 
         fn next(seed: &mut u64) -> u64 {
             *seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
@@ -577,7 +588,42 @@ mod tests {
             }
         }
 
+        fn assert_same_schematic(
+            actual: &crate::model::CircuitSnapshot,
+            expected: &crate::model::CircuitSnapshot,
+        ) {
+            let mut actual_components = actual.components.clone();
+            let mut expected_components = expected.components.clone();
+            actual_components.sort_by_key(|component| component.id);
+            expected_components.sort_by_key(|component| component.id);
+            assert_eq!(actual_components, expected_components);
+
+            let mut actual_wires = actual.wires.clone();
+            let mut expected_wires = expected.wires.clone();
+            actual_wires.sort_by_key(|wire| wire.id);
+            expected_wires.sort_by_key(|wire| wire.id);
+            assert_eq!(actual_wires, expected_wires);
+            assert_eq!(actual.annotations, expected.annotations);
+            let normalize_pages = |pages: &[crate::model::ProjectPage]| {
+                pages
+                    .iter()
+                    .cloned()
+                    .map(|mut page| {
+                        page.components.sort_by_key(|component| component.id);
+                        page.wires.sort_by_key(|wire| wire.id);
+                        page
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                normalize_pages(&actual.pages),
+                normalize_pages(&expected.pages)
+            );
+            assert_eq!(actual.current_page, expected.current_page);
+        }
+
         let mut app = crate::CircuitApp::new();
+        let initial = app.snapshot();
         let mut seed = 0x5eed_cafe_f00d_u64;
         for step in 0..240 {
             match next(&mut seed) % 7 {
@@ -621,6 +667,41 @@ mod tests {
             }
             assert_consistent(&app);
         }
+
+        let final_snapshot = app.snapshot();
+        while !app.editor.history.undo.is_empty() {
+            app.undo();
+            assert_consistent(&app);
+        }
+        assert_same_schematic(&app.snapshot(), &initial);
+
+        while !app.editor.history.redo.is_empty() {
+            app.redo();
+            assert_consistent(&app);
+        }
+        assert_same_schematic(&app.snapshot(), &final_snapshot);
+
+        let before = crate::engine::netlist::build_canonical_connectivity_with_annotations(
+            &app.components,
+            &app.wires,
+            &app.annotations.netlist_annotations(),
+        );
+        let json = serde_json::to_string(&SavedCircuit::from_app(&app)).unwrap();
+        let (round_trip, notes) = serde_json::from_str::<SavedCircuit>(&json)
+            .unwrap()
+            .into_snapshot()
+            .unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        let after = crate::engine::netlist::build_canonical_connectivity_with_annotations(
+            &round_trip.components,
+            &round_trip.wires,
+            &round_trip.annotations.netlist_annotations(),
+        );
+        assert_eq!(before.pin_nets, after.pin_nets);
+        assert_eq!(before.junction_id_nets, after.junction_id_nets);
+        assert_eq!(before.junction_nets, after.junction_nets);
+        assert_eq!(before.wire_segment_nets, after.wire_segment_nets);
+        assert_eq!(before.diagnostics, after.diagnostics);
     }
 
     #[test]
@@ -670,6 +751,35 @@ mod tests {
             &app.analysis.cached_connected_pins.as_ref().unwrap().1
         ));
         assert!(app.analysis.cached_simulation.is_none());
+    }
+
+    #[test]
+    fn net_label_value_change_invalidates_connectivity() {
+        use crate::commands::properties::PropertiesCommand;
+
+        let mut app = crate::CircuitApp::new();
+        app.execute_editor_command(EditorCommand::Component(ComponentCommand::Place {
+            kind: ComponentKind::NetLabel,
+            position: Pos2::new(100.0, 100.0),
+            value: "BUS_A".to_string(),
+        }));
+        let label_id = app.components[0].id;
+        let cached = app.current_connectivity();
+        let revision = app.analysis.revisions.schematic_connectivity;
+
+        let changes = app.execute_editor_command(EditorCommand::Properties(
+            PropertiesCommand::SetComponentValue {
+                component_id: label_id,
+                value: "BUS_B".to_string(),
+            },
+        ));
+
+        assert!(changes.schematic_connectivity_changed);
+        assert!(changes.simulation_topology_changed);
+        assert!(app.analysis.revisions.schematic_connectivity > revision);
+        assert!(app.analysis.cached_connectivity.is_none());
+        let rebuilt = app.current_connectivity();
+        assert!(!std::sync::Arc::ptr_eq(&cached, &rebuilt));
     }
 
     #[test]

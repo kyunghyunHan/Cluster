@@ -376,6 +376,13 @@ egui p95 was `2.5437 ms`; UI-thread autosave DTO p95 was `1.3058 ms`. MNA
 topology reuse and local incremental connectivity remain open and are not
 reported as complete. The following historical p50 values
 compare `e613665` with the earlier change on arm64 macOS.
+
+The subsequent full-product audit found that the old synthetic MNA rows had no
+GND and measured preparation-to-`NoGround`, not matrix solve latency. They are
+now named `mna_prepare_no_ground_*`. The solvable mixed fixture reports actual
+solver-only and reused-connectivity parameter-update rows (three-run p95
+`2.1913 ms` and `2.2650 ms`). This does not claim a compiled MNA topology cache;
+the stage still recompiles the circuit.
 Each circuit row uses the exact component/segment count shown. Times are
 milliseconds; the local-DRC baseline used the old truncated-board approximation,
 whereas the new result validates 128 affected tracks against the complete board.

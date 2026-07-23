@@ -24,8 +24,19 @@ impl PropertiesCommand {
                 component_id,
                 value,
             } => {
+                let net_label_changed = context
+                    .components()
+                    .iter()
+                    .find(|component| component.id == component_id)
+                    .is_some_and(|component| {
+                        component.kind == crate::model::ComponentKind::NetLabel
+                            && component.value != value
+                    });
                 if !context.update_component(component_id, |component| component.value = value) {
                     return CommandOutcome::unchanged();
+                }
+                if net_label_changed {
+                    return CommandOutcome::new(ChangeSet::net_label_value());
                 }
             }
             Self::ToggleSwitch { component_id } => {
@@ -46,11 +57,22 @@ impl PropertiesCommand {
                 label,
                 value,
             } => {
+                let net_label_changed = context
+                    .components()
+                    .iter()
+                    .find(|component| component.id == component_id)
+                    .is_some_and(|component| {
+                        component.kind == crate::model::ComponentKind::NetLabel
+                            && component.value != value
+                    });
                 if !context.update_component(component_id, |component| {
                     component.label = label;
                     component.value = value;
                 }) {
                     return CommandOutcome::unchanged();
+                }
+                if net_label_changed {
+                    return CommandOutcome::new(ChangeSet::net_label_value());
                 }
             }
         }

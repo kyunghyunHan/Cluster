@@ -50,6 +50,9 @@ fn schematic_benchmarks(c: &mut Criterion) {
     c.bench_function("erc_topology_only_large", |b| {
         b.iter(|| black_box(&prepared_large).erc_topology_only_checksum())
     });
+    c.bench_function("analysis_prepare_no_ground_large", |b| {
+        b.iter(|| black_box(&prepared_large).reused_connectivity_analysis_checksum())
+    });
     c.bench_function("component_hit_first", |b| {
         b.iter(|| black_box(&large).component_hit_checksum(0))
     });
@@ -102,17 +105,17 @@ fn schematic_benchmarks(c: &mut Criterion) {
     c.bench_function("indexed_hit_test", |b| {
         b.iter(|| black_box(&large).indexed_hit_test_checksum())
     });
-    c.bench_function("connectivity_plus_mna_small", |b| {
+    c.bench_function("connectivity_plus_mna_no_ground_small", |b| {
         b.iter(|| black_box(&small).connectivity_plus_mna_checksum())
     });
-    c.bench_function("connectivity_plus_mna_medium", |b| {
+    c.bench_function("connectivity_plus_mna_no_ground_medium", |b| {
         b.iter(|| black_box(&medium).connectivity_plus_mna_checksum())
     });
-    c.bench_function("mna_solver_only_small", |b| {
-        b.iter(|| black_box(&prepared_small).mna_solver_checksum())
+    c.bench_function("mna_prepare_no_ground_small", |b| {
+        b.iter(|| black_box(&prepared_small).mna_attempt_checksum())
     });
-    c.bench_function("mna_solver_only_medium", |b| {
-        b.iter(|| black_box(&prepared_medium).mna_solver_checksum())
+    c.bench_function("mna_prepare_no_ground_medium", |b| {
+        b.iter(|| black_box(&prepared_medium).mna_attempt_checksum())
     });
     c.bench_function("flow_path_generation", |b| {
         b.iter(|| black_box(&large).flow_path_checksum())
@@ -297,6 +300,17 @@ fn history_benchmarks(c: &mut Criterion) {
 }
 
 fn realistic_benchmarks(c: &mut Criterion) {
+    let mixed = RealisticFixture::generate(RealisticFixtureKind::MixedSimulation);
+    let prepared_mixed = mixed
+        .prepare_single_page_analysis()
+        .expect("mixed simulation fixture is single-page");
+    c.bench_function("mna_solver_only_mixed_simulation", |b| {
+        b.iter(|| black_box(&prepared_mixed).mna_attempt_checksum())
+    });
+    c.bench_function("parameter_update_mixed_simulation", |b| {
+        b.iter(|| black_box(&prepared_mixed).reused_connectivity_analysis_checksum())
+    });
+
     for (name, kind) in [
         ("dense_esp32_i2c", RealisticFixtureKind::DenseEsp32I2c),
         ("branch_heavy_power", RealisticFixtureKind::BranchHeavyPower),

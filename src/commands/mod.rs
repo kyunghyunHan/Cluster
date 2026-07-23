@@ -55,6 +55,18 @@ impl ChangeSet {
         }
     }
 
+    pub(crate) const fn net_label_value() -> Self {
+        Self {
+            persistence_changed: true,
+            schematic_connectivity_changed: true,
+            electrical_values_changed: true,
+            simulation_topology_changed: true,
+            simulation_parameters_changed: true,
+            pcb_sync_changed: true,
+            ..Self::none()
+        }
+    }
+
     pub(crate) const fn board() -> Self {
         Self {
             persistence_changed: true,

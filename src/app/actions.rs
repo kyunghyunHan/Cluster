@@ -497,7 +497,7 @@ impl crate::CircuitApp {
             return;
         };
         let base_pos = target.pos;
-        self.record_history();
+        self.begin_new_entities_history_transaction("Apply ERC auto fix");
         match fix {
             ErcAutoFix::AddLedSeriesResistor { .. } => {
                 let id = self
@@ -1046,7 +1046,7 @@ impl crate::CircuitApp {
             .map_err(|error| format!("Parse project.json: {error}"))?;
         cad.board = Some(board.clone());
 
-        self.record_history();
+        self.begin_snapshot_history_transaction("Load project folder");
         self.restore_snapshot(snapshot);
         self.document.board = board;
         let document_invariant_warnings = crate::model::validate_document_invariants(
@@ -1637,7 +1637,7 @@ impl crate::CircuitApp {
 
     pub(crate) fn add_page(&mut self) {
         self.save_current_page();
-        self.record_history();
+        self.begin_document_history_transaction("Add page");
         let n = self.pages.len() + 1;
         self.pages.push(ProjectPage::empty(format!("Page {n}")));
         let new_idx = self.pages.len() - 1;
@@ -1653,7 +1653,7 @@ impl crate::CircuitApp {
             return;
         }
         self.save_current_page();
-        self.record_history();
+        self.begin_document_history_transaction("Remove page");
         let current_page = self.document.current_page;
         self.document.pages.remove(current_page);
         let new_idx = self.current_page.saturating_sub(1);
@@ -1738,7 +1738,7 @@ impl crate::CircuitApp {
             .and_then(SavedCircuit::into_snapshot)
         {
             Ok((snapshot, load_notes)) => {
-                self.record_history();
+                self.begin_snapshot_history_transaction("Load circuit");
                 self.restore_snapshot(snapshot);
                 let invariant_warnings = crate::model::validate_document_invariants(
                     &self.document,
@@ -2043,7 +2043,15 @@ impl crate::CircuitApp {
                     if self.analysis.pending_schematic != Some(expected) {
                         continue;
                     }
-                    let connectivity = std::sync::Arc::new(result.connectivity);
+                    self.performance.netlist_cache_hit = result.connectivity_reused;
+                    if result.connectivity_reused {
+                        self.performance.netlist_cache_hits =
+                            self.performance.netlist_cache_hits.saturating_add(1);
+                    } else {
+                        self.performance.netlist_cache_misses =
+                            self.performance.netlist_cache_misses.saturating_add(1);
+                    }
+                    let connectivity = result.connectivity;
                     self.analysis.cached_netlist = Some((
                         result.revision_key.connectivity,
                         std::sync::Arc::new(connectivity.netlist.clone()),
