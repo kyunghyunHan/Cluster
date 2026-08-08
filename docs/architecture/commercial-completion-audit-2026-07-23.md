@@ -1,422 +1,285 @@
-# Commercial completion audit — 2026-07-23
+# 상용화 완성도 감사 — 2026-07-23
 
-This is the evidence record for the commercial-completion plan. It describes
-what is reachable and tested at the audited commit; a type or scaffold alone is
-not counted as complete.
+이 문서는 상용화 완성 계획의 근거 기록이다. 감사 대상 커밋에서 실제로 접근하고 테스트할 수 있는
+동작만 기록하며, 타입이나 뼈대만 존재하는 기능은 완료로 계산하지 않는다.
 
-## Baseline identity and protocol
+## 기준선 식별 정보와 측정 절차
 
-- Upstream baseline: `84b4f237e64250fe9971da13f38ea98490763baf`
-  (`fix: keep schematic indexes and pcb transforms consistent`). Local `main`
-  and `origin/main` matched before changes.
-- Platform: macOS Darwin 25.3.0, Apple M1 (4 performance + 4 efficiency
-  cores), 16 GiB RAM, arm64.
-- Toolchain: `rustc 1.97.0 (2d8144b78 2026-07-07)`, Cargo 1.97.0.
-- Power/background state: AC was connected, although the battery tool reported
-  78% and discharging. Load averages were approximately 1.98/2.34/3.46;
-  macOS thermal state was unavailable. This is a development-machine baseline,
-  not a thermally isolated laboratory result.
-- Command: `CLUSTER_PERF_SAMPLES=21 cargo run --release --example performance_probe`.
-- Three independent invocations used the same release binary with no source
-  change between runs. Each table cell is the median of the three run-level
-  p50, p95, max, or peak-incremental-heap values. Individual samples were not
-  pooled. Raw run outputs were retained as `/tmp/cluster-perf-final{1,2,3}.txt`
-  during the audit.
+- 업스트림 기준선: `84b4f237e64250fe9971da13f38ea98490763baf`
+  (`fix: keep schematic indexes and pcb transforms consistent`). 변경 전 로컬 `main`과
+  `origin/main`은 일치했다.
+- 플랫폼: macOS Darwin 25.3.0, Apple M1(성능 코어 4개 + 효율 코어 4개), 메모리 16 GiB, arm64.
+- 도구 체인: `rustc 1.97.0 (2d8144b78 2026-07-07)`, Cargo 1.97.0.
+- 전원/백그라운드 상태: AC가 연결되어 있었으나 배터리 도구는 78%, 방전 중으로 보고했다.
+  부하 평균은 약 1.98/2.34/3.46이었다. 열적으로 격리된 실험실 결과가 아니라 개발 장비 기준선이다.
+- 실행 명령: `CLUSTER_PERF_SAMPLES=21 cargo run --release --example performance_probe`.
+- 소스 변경 없이 동일한 릴리스 바이너리로 독립 실행 3회를 수행했다. 각 표의 값은 실행별 p50,
+  p95, 최댓값, 최대 증분 힙의 중앙값이다. 개별 표본은 합치지 않았다.
 
-ERC has an explicit timing boundary: `erc_rules_only_*` reuses a prepared
-canonical connectivity result. The baseline's former `mna_solver_only_*` label
-was incorrect; those rows stop at `NoGround` after preparation and are retained
-below only as historical measurements. See the erratum and corrected solvable
-fixture in the follow-up section.
-The completion slice additionally reports `erc_values_only_*` and
-`erc_topology_only_*`, so dependency-filtered work is measurable rather than
-inferred from the full rule set.
-`connectivity_plus_erc_*` and `connectivity_plus_mna_*` rebuild connectivity.
-Separately measured rows must not be arithmetically added because they run in
-different sample loops and are affected differently by caches and system load.
+`erc_rules_only_*`는 준비된 정규 연결성 결과를 재사용한다. 기존 `mna_solver_only_*`는 실제로
+행렬을 풀지 않고 준비 뒤 `NoGround`에서 끝났으므로 잘못된 이름이었다. 현재는
+`mna_prepare_no_ground_*`로 구분한다. `erc_values_only_*`와 `erc_topology_only_*`도 별도로
+측정한다. 서로 다른 표본 루프에서 실행되는 행의 값은 단순히 더하면 안 된다.
 
-## Measured baseline
+## 측정 기준선
 
-Times are milliseconds and heap values are bytes.
+시간 단위는 밀리초, 힙 단위는 바이트다.
 
-| Synthetic workload | p50 | p95 | max | Peak heap |
+| 합성 작업 | p50 | p95 | 최댓값 | 최대 힙 |
 | --- | ---: | ---: | ---: | ---: |
-| Connectivity, 100 / 300 | 3.3956 | 5.2952 | 6.9823 | 415,886 |
-| ERC rules only, 100 / 300 | 0.6622 | 0.6897 | 0.8260 | 85,164 |
-| Connectivity + ERC, 100 / 300 | 3.1589 | 3.2680 | 3.2941 | 415,886 |
-| MNA prepare then `NoGround`, 100 / 300 | 0.4803 | 0.5063 | 0.5317 | 46,449 |
-| Connectivity + MNA prepare then `NoGround`, 100 / 300 | 2.9660 | 3.0994 | 3.1858 | 415,886 |
-| Connectivity, 500 / 2,000 | 18.2896 | 18.7317 | 18.9142 | 2,690,979 |
-| ERC rules only, 500 / 2,000 | 12.2497 | 12.3908 | 12.4264 | 591,284 |
-| Connectivity + ERC, 500 / 2,000 | 30.7302 | 31.6380 | 32.9358 | 2,690,979 |
-| MNA prepare then `NoGround`, 500 / 2,000 | 16.5850 | 16.8789 | 16.9400 | 366,320 |
-| Connectivity + MNA prepare then `NoGround`, 500 / 2,000 | 34.8763 | 35.5773 | 35.8897 | 2,690,979 |
-| Connectivity, 1,000 / 5,000 | 48.2897 | 48.7855 | 49.7068 | 5,993,436 |
-| ERC rules only, 1,000 / 5,000 | 92.2542 | 97.8833 | 115.8097 | 1,181,668 |
-| Connectivity + ERC, 1,000 / 5,000 | 138.6502 | 143.2533 | 148.2399 | 5,993,436 |
-| MNA prepare then `NoGround`, 1,000 / 5,000 | 95.1147 | 96.3391 | 97.2700 | 723,088 |
-| Connectivity + MNA prepare then `NoGround`, 1,000 / 5,000 | 144.0003 | 146.6168 | 150.3731 | 5,993,436 |
-| JSON serialization, 1,000 / 5,000 | 3.7347 | 3.8537 | 3.9012 | 3,143,839 |
-| Atomic write + sync/backup, 1,000 / 5,000 | 10.9559 | 12.8948 | 13.0268 | 168 |
-| Autosave UI-thread DTO, 1,000 / 5,000 | 1.1102 | 1.3535 | 1.3660 | 1,381,652 |
+| 연결성, 100 / 300 | 3.3956 | 5.2952 | 6.9823 | 415,886 |
+| ERC 규칙 전용, 100 / 300 | 0.6622 | 0.6897 | 0.8260 | 85,164 |
+| 연결성 + ERC, 100 / 300 | 3.1589 | 3.2680 | 3.2941 | 415,886 |
+| MNA 준비 후 `NoGround`, 100 / 300 | 0.4803 | 0.5063 | 0.5317 | 46,449 |
+| 연결성, 500 / 2,000 | 18.2896 | 18.7317 | 18.9142 | 2,690,979 |
+| ERC 규칙 전용, 500 / 2,000 | 12.2497 | 12.3908 | 12.4264 | 591,284 |
+| 연결성 + ERC, 500 / 2,000 | 30.7302 | 31.6380 | 32.9358 | 2,690,979 |
+| 연결성, 1,000 / 5,000 | 48.2897 | 48.7855 | 49.7068 | 5,993,436 |
+| ERC 규칙 전용, 1,000 / 5,000 | 92.2542 | 97.8833 | 115.8097 | 1,181,668 |
+| 연결성 + ERC, 1,000 / 5,000 | 138.6502 | 143.2533 | 148.2399 | 5,993,436 |
+| MNA 준비 후 `NoGround`, 1,000 / 5,000 | 95.1147 | 96.3391 | 97.2700 | 723,088 |
+| JSON 직렬화, 1,000 / 5,000 | 3.7347 | 3.8537 | 3.9012 | 3,143,839 |
+| 원자적 쓰기 + 동기화/백업, 1,000 / 5,000 | 10.9559 | 12.8948 | 13.0268 | 168 |
+| UI 스레드 자동 저장 DTO, 1,000 / 5,000 | 1.1102 | 1.3535 | 1.3660 | 1,381,652 |
 
-| Command/PCB workload | p50 | p95 | max | Peak heap |
+| 명령/PCB 작업 | p50 | p95 | 최댓값 | 최대 힙 |
 | --- | ---: | ---: | ---: | ---: |
-| Move one component + undo/redo | 0.4688 | 0.4889 | 4.2949 | 2,699,399 |
-| Move 100 components + undo/redo | 1.2641 | 1.3507 | 5.1594 | 2,700,515 |
-| Rotate component + undo/redo | 0.4683 | 0.4994 | 4.2629 | 2,699,355 |
-| Property edit + undo/redo | 0.0615 | 0.0700 | 3.9992 | 2,699,359 |
-| Add/split wire + undo/redo | 10.3123 | 10.6827 | 13.8198 | 9,828,754 |
-| PCB route + undo/redo | 0.3000 | 0.3120 | 4.2325 | 2,699,355 |
-| PCB via + undo/redo | 0.2934 | 0.3490 | 4.2670 | 2,699,355 |
-| PCB footprint move + undo/redo | 0.3051 | 0.3406 | 4.2523 | 2,699,355 |
-| PCB indexed hit, 250 / 2,000 / 150 | <0.0001 | 0.0001 | 0.0001 | 168 |
-| PCB local DRC | 0.0424 | 0.0556 | 0.0582 | 4,176 |
-| PCB full DRC | 7.0801 | 7.2097 | 7.2743 | 681,102 |
-| PCB ratsnest | 0.4767 | 0.5073 | 0.5213 | 18,424 |
-| Large undo + redo | 11.2176 | 11.4238 | 11.5387 | 5,886,294 |
-| Large save snapshot clone | 0.3588 | 0.3664 | 0.3741 | 1,382,275 |
+| 부품 1개 이동 + 실행 취소/다시 실행 | 0.4688 | 0.4889 | 4.2949 | 2,699,399 |
+| 부품 100개 이동 + 실행 취소/다시 실행 | 1.2641 | 1.3507 | 5.1594 | 2,700,515 |
+| 부품 회전 + 실행 취소/다시 실행 | 0.4683 | 0.4994 | 4.2629 | 2,699,355 |
+| 속성 편집 + 실행 취소/다시 실행 | 0.0615 | 0.0700 | 3.9992 | 2,699,359 |
+| 배선 추가/분할 + 실행 취소/다시 실행 | 10.3123 | 10.6827 | 13.8198 | 9,828,754 |
+| PCB 라우팅 + 실행 취소/다시 실행 | 0.3000 | 0.3120 | 4.2325 | 2,699,355 |
+| PCB 비아 + 실행 취소/다시 실행 | 0.2934 | 0.3490 | 4.2670 | 2,699,355 |
+| PCB 풋프린트 이동 + 실행 취소/다시 실행 | 0.3051 | 0.3406 | 4.2523 | 2,699,355 |
+| PCB 인덱스 적중 검사, 250 / 2,000 / 150 | <0.0001 | 0.0001 | 0.0001 | 168 |
+| PCB 로컬 DRC | 0.0424 | 0.0556 | 0.0582 | 4,176 |
+| PCB 전체 DRC | 7.0801 | 7.2097 | 7.2743 | 681,102 |
+| PCB 랫츠네스트 | 0.4767 | 0.5073 | 0.5213 | 18,424 |
 
-| Production offscreen state | Total p50 / p95 / max | Update p50 | Tessellate p50 |
+| 실제 오프스크린 상태 | 전체 p50 / p95 / 최댓값 | 업데이트 p50 | 테셀레이션 p50 |
 | --- | ---: | ---: | ---: |
-| Empty | 0.3349 / 0.3580 / 0.4546 | 0.2437 | 0.0854 |
-| Small schematic | 0.8493 / 1.0112 / 1.0554 | 0.6360 | 0.1977 |
-| Medium schematic | 1.7432 / 1.9489 / 1.9740 | 1.1772 | 0.4892 |
-| Large schematic | 2.1988 / 2.3862 / 2.5122 | 1.4430 | 0.7210 |
-| Validation open | 1.3725 / 1.5357 / 2.4020 | 1.1822 | 0.1850 |
-| Inspector selection | 0.8872 / 1.0727 / 1.3085 | 0.6687 | 0.2098 |
-| Simulation animation | 0.8589 / 1.0347 / 1.0892 | 0.6492 | 0.2024 |
-| PCB workspace | 0.4125 / 0.5017 / 0.5318 | 0.3311 | 0.0773 |
-| Breadboard workspace | 0.8800 / 1.1229 / 1.1472 | 0.6562 | 0.2109 |
+| 빈 회로 | 0.3349 / 0.3580 / 0.4546 | 0.2437 | 0.0854 |
+| 소형 회로도 | 0.8493 / 1.0112 / 1.0554 | 0.6360 | 0.1977 |
+| 중형 회로도 | 1.7432 / 1.9489 / 1.9740 | 1.1772 | 0.4892 |
+| 대형 회로도 | 2.1988 / 2.3862 / 2.5122 | 1.4430 | 0.7210 |
+| 검증 패널 열림 | 1.3725 / 1.5357 / 2.4020 | 1.1822 | 0.1850 |
+| 인스펙터 선택 | 0.8872 / 1.0727 / 1.3085 | 0.6687 | 0.2098 |
+| 시뮬레이션 애니메이션 | 0.8589 / 1.0347 / 1.0892 | 0.6492 | 0.2024 |
+| PCB 작업공간 | 0.4125 / 0.5017 / 0.5318 | 0.3311 | 0.0773 |
+| 브레드보드 작업공간 | 0.8800 / 1.1229 / 1.1472 | 0.6562 | 0.2109 |
 
-The measured bottlenecks are not frame painting. At large scale they are ERC
-rule evaluation p95 (97.88 ms), canonical connectivity p95 (48.79 ms), the
-mislabelled MNA preparation/`NoGround` path (96.34 ms), and add/split-wire
-command p95 (10.68 ms with a 9.83 MiB peak allocation). The corrected solvable
-MNA measurement appears in the follow-up; the historical row is not solver
-latency. These establish the optimization order for M2–M4.
-Atomic write is intentionally slower than the UI budget because it includes
-file and directory sync plus backup rotation and executes on the worker. The UI
-thread autosave DTO work is isolated and remains below its 3 ms target.
+대형 작업의 병목은 프레임 그리기가 아니라 ERC 규칙 평가, 정규 연결성, 잘못 이름 붙었던 MNA
+준비 경로, 배선 추가/분할 명령이었다. 원자적 쓰기는 파일·디렉터리 동기화와 백업 순환을 포함하고
+작업자에서 실행하므로 UI 시간 한도보다 느린 것이 의도된 결과다. UI 스레드의 자동 저장 DTO
+작업은 분리되어 3ms 목표 안에 들었다.
 
-## Completion-slice results
+## 개선 작업 결과
 
-After the baseline, the standard schematic command and drag paths were changed
-from whole-document snapshots to scoped entity deltas. The ERC rule evaluator
-was also changed from repeated `nets × all pins` scans to one pin-to-net index
-per affected rule. The following values are medians of three new independent
-21-sample release probes (`/tmp/cluster-perf-after{1,2,3}.txt`). Times are
-milliseconds.
+표준 회로도 명령과 드래그를 전체 문서 스냅샷에서 범위 지정 엔티티 델타로 바꿨다. ERC 규칙
+평가기도 반복적인 `네트 × 전체 핀` 순회 대신 영향받는 규칙별 핀→네트 인덱스를 사용하도록 했다.
 
-| Large analysis workload | Before p50 / p95 | After p50 / p95 / max | Peak heap after |
+| 대형 분석 작업 | 변경 전 p50 / p95 | 변경 후 p50 / p95 / 최댓값 | 변경 후 최대 힙 |
 | --- | ---: | ---: | ---: |
-| Connectivity | 48.2897 / 48.7855 | 49.1252 / 49.8498 / 49.9859 | 5,993,436 |
-| ERC rules only | 92.2542 / 97.8833 | 4.2804 / 4.3620 / 4.3631 | 1,181,668 |
-| ERC values only | not isolated | 0.3819 / 0.4122 / 0.4209 | 1,790 |
-| ERC topology only | not isolated | 3.9153 / 4.0192 / 4.0331 | 1,181,668 |
-| Connectivity + ERC | 138.6502 / 143.2533 | 53.3970 / 54.0169 / 54.4929 | 5,993,436 |
-| MNA prepare then `NoGround` | 95.1147 / 96.3391 | 96.0559 / 97.8217 / 98.9065 | 723,088 |
-| Connectivity + MNA prepare then `NoGround` | 144.0003 / 146.6168 | 145.4240 / 146.6680 / 147.0070 | 5,993,436 |
+| 연결성 | 48.2897 / 48.7855 | 49.1252 / 49.8498 / 49.9859 | 5,993,436 |
+| ERC 규칙 전용 | 92.2542 / 97.8833 | 4.2804 / 4.3620 / 4.3631 | 1,181,668 |
+| ERC 값 전용 | 분리 측정 없음 | 0.3819 / 0.4122 / 0.4209 | 1,790 |
+| ERC 토폴로지 전용 | 분리 측정 없음 | 3.9153 / 4.0192 / 4.0331 | 1,181,668 |
+| 연결성 + ERC | 138.6502 / 143.2533 | 53.3970 / 54.0169 / 54.4929 | 5,993,436 |
 
-ERC output checksums remained identical (`6002` full, `6001` topology), and
-the beginner ERC test suite remained green. The 95% rules-only reduction is
-therefore an execution-plan change, not a reduced rule set. The historical MNA
-row did not improve and, as the erratum explains, did not measure a completed
-solve. Compiled-topology/parameter reuse is not implemented yet.
+ERC 출력 체크섬은 동일하게 유지되었고(전체 `6002`, 토폴로지 `6001`) 초보자 ERC 테스트도
+계속 통과했다. 규칙 전용 시간이 약 95% 줄어든 것은 규칙을 줄인 결과가 아니라 실행 계획 개선이다.
 
-| Command + undo/redo/undo | Before p50 / p95 | After p50 / p95 / max | Heap before → after |
+| 명령 + 실행 취소/다시 실행/실행 취소 | 변경 전 p50 / p95 | 변경 후 p50 / p95 / 최댓값 | 힙 변경 전 → 후 |
 | --- | ---: | ---: | ---: |
-| Move one | 0.4688 / 0.4889 | 0.4695 / 0.5076 / 4.4700 | 2,699,399 → 2,699,399 |
-| Move 100 | 1.2641 / 1.3507 | 1.2507 / 1.3881 / 5.2919 | 2,700,515 → 2,700,515 |
-| Add wire | not isolated | 0.7337 / 0.7729 / 4.3664 | 9,828,754 combined → 3,456,885 |
-| Add and split wire | 10.3123 / 10.6827 | 0.8222 / 0.8900 / 4.6067 | 9,828,754 → 3,457,453 |
+| 부품 1개 이동 | 0.4688 / 0.4889 | 0.4695 / 0.5076 / 4.4700 | 2,699,399 → 2,699,399 |
+| 부품 100개 이동 | 1.2641 / 1.3507 | 1.2507 / 1.3881 / 5.2919 | 2,700,515 → 2,700,515 |
+| 배선 추가 | 분리 측정 없음 | 0.7337 / 0.7729 / 4.3664 | 9,828,754(통합) → 3,456,885 |
+| 배선 추가 및 분할 | 10.3123 / 10.6827 | 0.8222 / 0.8900 / 4.6067 | 9,828,754 → 3,457,453 |
 
-The final large offscreen production frame was
-`2.1812/2.5437/2.8828 ms` p50/p95/max. Atomic write p95 was 13.2098 ms and ran
-on the worker; UI-thread autosave DTO p95 was 1.3058 ms.
+최종 대형 오프스크린 실제 프레임은 p50/p95/최댓값 `2.1812/2.5437/2.8828 ms`였다. 원자적
+쓰기 p95는 작업자에서 `13.2098 ms`, UI 스레드 자동 저장 DTO p95는 `1.3058 ms`였다.
 
-## Full-product directive follow-up
+## 전체 제품 후속 점검
 
-The follow-up starts at `f5133629c8e400125f5f55c830875e2475aa7df1`.
-It closes the remaining normal-edit snapshot paths and corrects an MNA
-measurement error.
+후속 작업은 `f5133629c8e400125f5f55c830875e2475aa7df1`에서 시작했다.
 
-### Correctness fixes
+### 정확성 수정
 
-- ERC auto-fix previously opened an outer snapshot transaction while nested
-  wire commands independently created history entries and revisions. One fix
-  was therefore not one undo operation.
-- Generated flyback wiring can split an existing wire. Capturing only newly
-  created entities failed to restore that split wire on undo. The compound
-  repair transaction now captures existing wires as entity deltas, suppresses
-  nested history/revision commits, and commits once.
-- Editing a `NetLabel` value was classified as an ordinary electrical value
-  edit even though that value is the canonical global net name. Connectivity
-  could remain stale. Net-label value edits now advance connectivity and
-  simulation-topology revisions.
-- Value-only worker requests rebuilt canonical connectivity despite carrying a
-  stable connectivity revision. The worker now retains an `Arc` keyed by that
-  revision and exposes hit/miss state in the existing performance overlay.
+- ERC 자동 수정의 바깥 스냅샷 트랜잭션과 안쪽 배선 명령이 각각 이력과 리비전을 만들던 문제를
+  수정했다. 이제 복합 수정 전체가 실행 취소 1회로 처리된다.
+- 플라이백 배선이 기존 배선을 분할할 때 실행 취소가 원본 배선을 복원하도록 기존 배선도 엔티티
+  델타로 캡처한다.
+- `NetLabel` 값은 정규 전역 네트 이름이므로 일반 전기 값 변경이 아니라 연결성과 시뮬레이션
+  토폴로지 리비전을 함께 올리도록 수정했다.
+- 값 전용 작업이 안정적인 연결성 리비전을 갖고도 정규 연결성을 다시 만들던 문제를 고쳤다.
+  작업자는 해당 리비전 키의 `Arc`를 재사용하며 성능 오버레이에 적중/실패 상태를 표시한다.
+- 결정적 240개 명령 테스트는 초기 의미 상태까지 실행 취소하고 최종 상태까지 다시 실행한 뒤
+  직렬화·불러오기를 거쳐 모든 정확한 연결성 맵과 진단을 비교한다.
 
-The deterministic 240-operation command test now additionally undoes to the
-initial semantic state, redoes to the final semantic state, serializes and
-loads it, and compares all exact canonical connectivity maps and diagnostics.
-Entity vector order is normalized by ID for semantic comparison because
-swap-remove intentionally does not preserve storage order; the entity index is
-still checked against the actual vector position after every operation.
+### 스냅샷 경계
 
-### Snapshot boundary after follow-up
+일반 편집기 명령, 페이지 추가/제거, 주석 편집, 드래그, 다중 엔티티 변환, 복합 ERC 수정에는
+전체 스냅샷이 없다. 제품의 전체 문서 교체 스냅샷 경계는 다음 두 곳뿐이다.
 
-There is no full snapshot in a normal editor command, page add/remove,
-annotation edit, drag, multi-entity transform, or compound ERC repair. The two
-production snapshot transactions are explicit whole-document replacement
-boundaries:
+- 프로젝트 폴더 불러오기
+- 회로 JSON 불러오기/자동 복구/스키마 마이그레이션
 
-- project-folder load;
-- circuit JSON load/autorecovery/schema migration.
+`DocumentDelta::between`은 레거시 호환 경계를 검증하거나 측정하는 단위 테스트/성능 코드에도 남아 있다.
 
-`DocumentDelta::between` also remains in unit/performance code that verifies or
-benchmarks the legacy compatibility boundary.
+### MNA 벤치마크 정정
 
-### MNA benchmark erratum
+기존 합성 `mna_solver_only_{100,500,1000}` 픽스처에는 저항과 라벨만 있고 GND가 없었다. 해석기는
+`NetMap`을 만든 뒤 `NoGround`를 반환해 노드 인덱싱, 행렬 할당, 스탬핑, 인수분해, 결과 매핑에
+도달하지 않았다. 따라서 기존 대형 행 `95.1147/96.3391 ms`를 수치 해석기 지연으로 인용하면 안 된다.
 
-The original synthetic `mna_solver_only_{100,500,1000}` fixture contains only
-resistors/labels and no GND. The solver spends the reported time constructing
-its `NetMap` and then returns `NoGround`; it never reaches node indexing,
-matrix allocation, stamping, factorization, or result mapping. The former
-`95.1147/96.3391 ms` large row must therefore not be cited as numeric solver
-latency.
-
-Those rows are now named `mna_prepare_no_ground_*` and
-`connectivity_plus_mna_no_ground_*`. Actual solver-only and parameter-update
-measurements use the solvable mixed fixture. Median-of-three 21-sample results:
-
-| Corrected workload | p50 | p95 | max | Peak heap |
+| 정정된 작업 | p50 | p95 | 최댓값 | 최대 힙 |
 | --- | ---: | ---: | ---: | ---: |
-| MNA solver only, solvable mixed | 2.0765 | 2.1913 | 2.2845 | 154,824 |
-| Reused-connectivity parameter update, mixed | 2.1374 | 2.2650 | 2.2898 | 154,824 |
+| 해석 가능한 혼합 회로 MNA 전용 | 2.0765 | 2.1913 | 2.2845 | 154,824 |
+| 연결성 재사용 혼합 회로 매개변수 업데이트 | 2.1374 | 2.2650 | 2.2898 | 154,824 |
 
-The mixed stage profile was approximately compile `1.64–1.71 ms`, node index
-`0.013 ms`, allocation `0.004–0.005 ms`, stamping `0.001 ms`, solve
-`0.059–0.060 ms`, and result mapping `0.38–0.41 ms`. This passes the measured
-parameter-update target, but it is not a compiled MNA topology cache:
-compilation and matrix construction still run. A cache must be implemented and
-differentially tested before Phase 5 is accepted.
+혼합 단계는 대략 컴파일 `1.64–1.71 ms`, 노드 인덱스 `0.013 ms`, 할당 `0.004–0.005 ms`,
+스탬핑 `0.001 ms`, 풀이 `0.059–0.060 ms`, 결과 매핑 `0.38–0.41 ms`였다. 측정된 매개변수
+업데이트 목표는 통과했지만 컴파일된 MNA 토폴로지 캐시는 아니다. 컴파일과 행렬 구성은 여전히 실행된다.
 
-The follow-up three-run medians were: large frame
-`2.2889/3.3145/3.6326 ms`, large ERC rules-only
-`4.4652/4.7116/5.1400 ms`, value-only ERC
-`0.3882/0.4155/0.4415 ms`, connectivity + ERC
-`54.0891/57.7997/65.8875 ms`, PCB local DRC p95 `0.0435 ms`, PCB full DRC p95
-`9.0540 ms`, autosave UI p95 `1.1103 ms`, add wire p95 `0.9936 ms`, and split
-wire p95 `1.0807 ms`. Large full connectivity p95 was `57.9363 ms` in this
-thermally noisy run set and therefore does not receive a pass, although the
-earlier isolated set was `49.8498 ms`. No improvement or regression is inferred
-from that disagreement.
+### 승인 기준 확인
 
-### Acceptance check
-
-| Criterion | Result | Status |
+| 기준 | 결과 | 상태 |
 | --- | ---: | --- |
-| Actual large egui frame p95 < 12 ms | 2.3862 ms | Pass |
-| Move one component p95 < 2 ms | 0.4889 ms | Pass |
-| Move 100 components p95 < 5 ms | 1.3507 ms | Pass |
-| Wire add < 3 ms and split < 5 ms | add 0.7729; split 0.8900 ms | Pass |
-| Dense pin query p95 < 0.1 ms | Criterion estimate about 0.0001 ms | Pass |
-| Full schematic viewport p95 < 1 ms | Criterion estimate about 0.81 ms | Pass |
-| Medium full connectivity p95 < 20 ms | 18.7317 ms | Pass |
-| Large full connectivity p95 < 50 ms | earlier 48.7855; follow-up 57.9363 ms | Not stable / no pass |
-| Value-only ERC p95 < 3 ms | 0.4122 ms | Pass |
-| Large full ERC rules-only p95 < 75 ms | 4.3620 ms | Pass |
-| Large aggregate analysis ideally < 100 ms | ERC 54.0169; historical MNA row invalid | ERC pass; MNA unproven |
-| PCB local DRC p95 < 5 ms | 0.0556 ms | Pass |
-| PCB full DRC p95 < 20 ms | 7.2097 ms | Pass |
-| Autosave UI-thread work p95 < 3 ms | 1.3535 ms | Pass |
+| 실제 대형 egui 프레임 p95 < 12 ms | 2.3862 ms | 통과 |
+| 부품 1개 이동 p95 < 2 ms | 0.4889 ms | 통과 |
+| 부품 100개 이동 p95 < 5 ms | 1.3507 ms | 통과 |
+| 배선 추가 < 3 ms, 분할 < 5 ms | 추가 0.7729, 분할 0.8900 ms | 통과 |
+| 고밀도 핀 조회 p95 < 0.1 ms | Criterion 추정 약 0.0001 ms | 통과 |
+| 전체 회로도 뷰포트 p95 < 1 ms | Criterion 추정 약 0.81 ms | 통과 |
+| 중형 전체 연결성 p95 < 20 ms | 18.7317 ms | 통과 |
+| 대형 전체 연결성 p95 < 50 ms | 이전 48.7855, 후속 57.9363 ms | 불안정 / 미통과 |
+| 값 전용 ERC p95 < 3 ms | 0.4122 ms | 통과 |
+| 대형 전체 ERC 규칙 전용 p95 < 75 ms | 4.3620 ms | 통과 |
+| 대형 집계 분석 권장 < 100 ms | ERC 54.0169, 기존 MNA 행 무효 | ERC 통과, MNA 미입증 |
+| PCB 로컬 DRC p95 < 5 ms | 0.0556 ms | 통과 |
+| PCB 전체 DRC p95 < 20 ms | 7.2097 ms | 통과 |
+| UI 스레드 자동 저장 작업 p95 < 3 ms | 1.3535 ms | 통과 |
 
-Pan/zoom/select input, single local connectivity, local-net topology ERC, and
-MNA parameter reuse still need isolated measurements.
-No inferred pass is assigned to them.
+팬/줌/선택 입력, 단일 로컬 연결성, 로컬 네트 토폴로지 ERC, MNA 매개변수 재사용은 독립 측정이 더 필요하다.
 
-## Repository-wide pattern audit
+## 저장소 전체 패턴 감사
 
-The audited Rust surface is 47,321 lines in `src`, `benches`, and `examples`.
-Raw matches are triage inputs, not automatic defects: TODO/FIXME/HACK/XXX 1;
-`todo!`/`unimplemented!` 0; `panic!` 0; `unwrap` 246; `expect` 34; `clone` 226;
-`DocumentDelta::between` 5; direct `.snapshot()` 8; `rebuild` 46; `retain` 23;
-`.iter().find` 104; `.position` 6; thread-builder creation 2; repaint requests 7.
+감사한 Rust 코드는 `src`, `benches`, `examples` 합계 47,321줄이다. 원시 검색 결과는 결함 판정이
+아닌 분류 입력이다: TODO/FIXME/HACK/XXX 1건, `todo!`/`unimplemented!` 0건, `panic!` 0건,
+`unwrap` 246건, `expect` 34건, `clone` 226건, `DocumentDelta::between` 5건, 직접 `.snapshot()`
+8건, `rebuild` 46건, `retain` 23건, `.iter().find` 104건, `.position` 6건, 스레드 빌더 생성
+2건, 다시 그리기 요청 7건이다.
 
-Classification:
+- 대부분의 `unwrap`/`expect`는 테스트 단언이나 해석기 내부의 검사된 불변 조건이다. 사용자 제어
+  파싱/파일 경로는 `Result`를 사용하지만 릴리스 패닉 감사를 마치기 전에 제품 코드 전용 조회가 필요하다.
+- 표준 편집기 명령과 회로도 드래그는 범위 지정 엔티티 델타를 사용한다.
+- 전체 재구성은 불러오기/가져오기/문서 교체 경계에서 타당하다.
+- 오래된 인덱스에서 조용히 동작을 바꾸던 PCB 불변 조회 및 DRC 후보 선형 대체 경로를 제거했다.
+- 제한된 작업자 하나가 회로도 분석, 전체 DRC, 자동 저장을 직렬화한다. 시작/연결 끊김 실패는
+  UI 상태에 표시하고 큐가 가득 차면 최신 자동 저장을 취소 인식 대기 슬롯에 보관한다.
 
-- Most `unwrap`/`expect` matches are test assertions or solver-internal checked
-  invariants. User-controlled parse/file paths use `Result`; these still need a
-  production-only query before the release panic audit is signed off.
-- Standard editor commands and schematic drag transactions now use scoped
-  entity deltas. Snapshot/delta fallback remains only in generic compatibility
-  history used by page/load/annotation and compound auto-fix paths, plus tests
-  and the explicit snapshot benchmark.
-- Full rebuilds are valid at load/import/document replacement boundaries. Full
-  schematic rebuilds during generic command/history fallback and full board
-  rebuilds during broad delta/ECO application require separate removal or an
-  explicit complexity justification.
-- The PCB immutable lookup and DRC-candidate linear fallbacks were silent
-  behavior changes on stale indexes. They were removed in this slice. Mutable
-  board APIs still perform an explicit consistency check and rebuild.
-- A single bounded worker serializes schematic analysis, full DRC, and autosave.
-  Thread startup/disconnect failures are surfaced to UI status. Queue saturation
-  retains the latest autosave in a cancellation-aware pending slot and retries
-  when capacity becomes available.
+## 실제 호출 경로
 
-## Reachable call paths
+### 편집기 명령
 
-### Editor command
+`CircuitApp::execute_editor_command` → 리비전 검사 파생 인덱스 → 타입 지정 델타 캡처 → 제한된
+`CommandContext`의 `EditorCommand::apply` → `DocumentDelta` 이력 → `dispatch_changes` →
+리비전/캐시/변경/자동 저장/다시 그리기 → 선택적 로컬 PCB 분석 순서다. 연속 드래그는 무거운 분석
+리비전을 올리지 않고 형상을 미리 본 뒤 포인터를 놓을 때 이력 트랜잭션 하나를 커밋한다.
 
-`CircuitApp::execute_editor_command` → revision-gated derived indexes → typed
-delta capture (or remaining snapshot fallback) → `EditorCommand::apply` with a
-restricted `CommandContext` → `DocumentDelta` history entry →
-`dispatch_changes` → revisions/cache/dirty/autosave/repaint → optional local PCB
-analysis. Continuous drag uses `execute_continuous_editor_command`, previews
-geometry without advancing heavy-analysis revisions, and commits one history
-transaction on release.
+### 분석
 
-### Analysis
+`dispatch_changes`가 의존성별 리비전을 표시하면 UI가 제한된 리비전 태그 `AnalysisJob`을 제출한다.
+작업자는 정규 연결성을 만들거나 같은 리비전 결과를 재사용하고 MNA/시뮬레이션과 토폴로지/값/동적
+ERC를 실행한다. UI는 결과를 폴링하며 오래된 리비전 키를 버린다. 전체 PCB DRC와 자동 저장도 같은 큐를 쓴다.
 
-`dispatch_changes` marks dependency-specific revisions → UI submits a bounded,
-revision-tagged `AnalysisJob` → worker builds or revision-reuses canonical connectivity → MNA and
-simulation → topology/value/dynamic ERC → UI polls results and discards stale
-revision keys. Full PCB DRC and autosave share the same bounded worker queue.
+### 저장·불러오기·내보내기
 
-### Save/load/export
-
-Save materializes current pages → `SavedCircuit` schema v4 → pretty JSON →
-same-directory temporary file, sync, rename, and three backup generations.
-Autosave serializes/writes in the worker. Load parses/migrates/repairs → restores
-the document → rebuilds derived indexes → runs structured document/derived/PCB
-invariant validation → reports repair and invariant counts in status. SVG,
-PNG, SPICE, netlist, Arduino, BOM, Gerber, Excellon, and CPL are reachable from
-toolbar or PCB dock actions; fabrication export is DRC-gated.
+저장은 현재 페이지를 구체화하고 `SavedCircuit` 스키마 v4의 보기 좋은 JSON을 만든 뒤 같은
+디렉터리에서 임시 파일, 동기화, 이름 변경, 백업 3세대 순환을 수행한다. 불러오기는 파싱/마이그레이션/
+복구 뒤 문서를 복원하고 파생 인덱스 및 구조화된 불변 검사를 실행해 복구/위반 수를 상태에 표시한다.
+SVG, PNG, SPICE, 네트리스트, Arduino, BOM, Gerber, Excellon, CPL 내보내기에 접근할 수 있으며
+제작 내보내기는 DRC 오류가 있으면 차단한다.
 
 ### PCB
 
-Schematic canonical netlist → CAD projection → ECO report/application → board
-entity/spatial indexes → interactive PCB commands → local DRC during edits or
-full DRC worker → DRC-gated Gerber/Excellon/BOM/CPL export. Pad placement,
-spatial lookup, Gerber, drill, and CPL share the footprint transform.
+회로도 정규 네트리스트 → CAD 투영 → ECO 보고/적용 → 보드 엔티티/공간 인덱스 → 대화형 PCB
+명령 → 편집 중 로컬 DRC 또는 작업자 전체 DRC → DRC 기반 Gerber/Excellon/BOM/CPL 내보내기
+순서다. 패드 배치, 공간 조회, Gerber, 드릴, CPL은 같은 풋프린트 변환을 사용한다.
 
-## Cache dependency audit
+## 캐시 의존성 감사
 
-| Cache/result | Key dependencies | Invalidated by | Must not be invalidated by |
+| 캐시/결과 | 주요 의존성 | 무효화하는 변경 | 무효화하면 안 되는 변경 |
 | --- | --- | --- | --- |
-| Canonical connectivity/netlist | schematic connectivity revision | component/wire/junction/label topology | selection, pan/zoom, PCB-only edits, value-only edits |
-| MNA/simulation | connectivity + topology + parameter/electrical revisions | topology/model/value/switch changes | visual-only and PCB-only edits |
-| ERC topology | topology revision | topology and annotations | value-only and visual edits |
-| ERC values/dynamic | value/simulation revisions | values, model state, simulation result | pan/zoom/selection |
-| Schematic entity/attachment/spatial indexes | schematic geometry revision | component/wire geometry, annotations as applicable | electrical values, PCB edits |
-| PCB entity/spatial index | board topology/geometry | footprints/tracks/vias/outline | schematic visual edits |
-| PCB DRC | board topology/geometry/rules + CAD nets | copper, footprint, outline, rules, ECO | schematic selection/pan |
-| Flow paint cache | connectivity/simulation + geometry | current result or visible path geometry | unrelated panel state |
+| 정규 연결성/네트리스트 | 회로도 연결성 리비전 | 부품/배선/접합점/라벨 토폴로지 | 선택, 팬/줌, PCB 전용, 값 전용 변경 |
+| MNA/시뮬레이션 | 연결성 + 토폴로지 + 매개변수/전기 리비전 | 토폴로지/모델/값/스위치 | 시각 전용, PCB 전용 변경 |
+| ERC 토폴로지 | 토폴로지 리비전 | 토폴로지와 주석 | 값 전용, 시각 변경 |
+| ERC 값/동적 결과 | 값/시뮬레이션 리비전 | 값, 모델 상태, 시뮬레이션 결과 | 팬/줌/선택 |
+| 회로도 엔티티/부착/공간 인덱스 | 회로도 형상 리비전 | 부품/배선 형상, 관련 주석 | 전기 값, PCB 변경 |
+| PCB 엔티티/공간 인덱스 | 보드 토폴로지/형상 | 풋프린트/트랙/비아/외곽선 | 회로도 시각 변경 |
+| PCB DRC | 보드 토폴로지/형상/규칙 + CAD 네트 | 동박, 풋프린트, 외곽선, 규칙, ECO | 회로도 선택/팬 |
+| 흐름 그리기 캐시 | 연결성/시뮬레이션 + 형상 | 전류 결과 또는 보이는 경로 형상 | 무관한 패널 상태 |
 
-## Test and benchmark inventory
+## 테스트 및 벤치마크 목록
 
-There are 242 passing tests after this slice. The largest groups are
-UI/app integration (76), MNA (30), canonical netlist (26), beginner ERC (22),
-current flow/custom parts (10 each), PCB board (8), and command dispatch (8).
-Criterion defines 42 benchmark registrations plus parameterized rows. The
-release probe covers synthetic and production offscreen frames, connectivity,
-isolated/aggregate ERC and MNA, PCB hit/DRC/ratsnest, history, real commands,
-serialization, stage profiles, and peak incremental heap.
+이번 작업 뒤 테스트 242개가 통과했다. 주요 그룹은 UI/앱 통합 76개, MNA 30개, 정규 네트리스트
+26개, 초보자 ERC 22개, 전류 흐름과 사용자 부품 각 10개, PCB 보드 8개, 명령 디스패치 8개다.
+Criterion에는 매개변수 행을 포함한 벤치마크 등록 42개가 있다. 새 정확성 테스트는 잘못된 문서/보드
+검증과 배치/이동/회전/삭제/배선/실행 취소/다시 실행을 아우르는 결정적 240개 명령 시퀀스를 포함한다.
 
-New correctness coverage includes structured malformed-document and malformed-
-board validator tests, plus a deterministic 240-operation sequence spanning
-place/move/rotate/delete/wire/undo/redo. After every operation it compares the
-entity index with linear source-of-truth order and validates attachment and
-spatial indexes.
+## 마일스톤 승인 상태
 
-## Milestone acceptance status
+- **M0 승인**: 저장소/호출 경로/캐시/테스트 감사와 3회 측정 절차, 분리된 ERC/MNA 시간,
+  명령/PCB/프레임/힙, 직렬화, 원자적 쓰기, UI 스레드 자동 저장 기준선이 완료되었다.
+- **M1 일부 완료**: 구조화된 문서·보드 검증기, 불러오기 진단, 조용한 PCB 대체 경로 제거,
+  선택/이력/드래그 디버그 불변 검사, 작업자 실패 처리, 잘못된 상태 테스트가 구현되었다.
+- **M2 현재 명령에 대해 승인**: 표준 명령, 페이지 변경, 주석, 복합 ERC 수정, 부품/배선 드래그가
+  범위 지정 델타를 사용하며 배선 추가/분할도 시간 목표를 충족한다.
+- **M3 일부 완료**: 규칙/값/토폴로지 전용 측정, 토폴로지 ERC 캐시, 핀 인덱스 그룹화, 값 전용
+  작업자의 연결성 재사용이 구현되었다. 로컬 연결성 재구성과 증분 차등 테스트는 남아 있다.
+- **M4–M9 미승인**: 증분 연결성/ERC/MNA 재사용, 제작 완성 수준 존/DRC/내보내기 골든,
+  편집 가능한 브레드보드 학습, 프로젝트 잠금/복구 UX, 접근성 근거, 설치 프로그램/서명,
+  릴리스 후보 근거가 남아 있다.
 
-- M0: accepted for this platform. Repository/call-path/cache/test audit,
-  three-run protocol, separated ERC/MNA timing, command/PCB/frame/heap,
-  serialization, atomic-write, and autosave UI-thread baselines are complete.
-- M1: partially complete. Structured document and board validators, load-boundary
-  diagnostics, silent PCB fallback removal, selection/history/drag debug
-  invariants, worker startup/queue failure handling, malformed-state tests, and
-  the deterministic command sequence are implemented. Broader randomized
-  geometry/connectivity and PCB/ECO differential tests remain.
-- M2: accepted for current editor commands. Standard commands, page changes,
-  annotations, compound ERC repair, and component/wire drag use scoped deltas;
-  isolated wire add/split meet their latency targets. Snapshot history is
-  limited to explicit project/circuit replacement and recovery boundaries.
-- M3: partially complete. Prepared rules-only/value-only/topology-only timing,
-  topology ERC caching, indexed pin grouping, and value-only worker connectivity
-  reuse are implemented. Full canonical connectivity remains the reference
-  path; local connectivity rebuild, local-net issue-key merge, and differential
-  incremental tests remain.
-- M4–M9: not accepted. Existing reachable functionality is recorded in README
-  and prior audits, but the completion-plan criteria have not been re-proven.
-  In particular snapshot fallbacks, incremental connectivity/ERC/MNA reuse,
-  manufacturing-complete zones/DRC/export goldens, editable breadboard lessons,
-  project locking/recovery UX, accessibility evidence, installers/signing, and
-  release-candidate evidence remain open.
+뼈대가 있거나 인접 기능이 동작한다는 이유만으로 마일스톤을 완료 처리하지 않는다.
 
-This status is intentionally conservative: no milestone is marked complete
-because a scaffold exists or because a neighboring feature works.
+## 이번 작업에서 실행한 검증
 
-## Validation executed for this slice
+- `cargo fmt --all -- --check`: 통과.
+- `cargo check --all-targets --all-features`: 통과.
+- `cargo clippy --all-targets --all-features -- -D warnings`: 통과.
+- `cargo test --all-targets --all-features`: 242개 통과, 실패/무시 0개.
+- `cargo build --release --all-features`: 통과.
+- `cargo bench --bench performance`: 모든 Criterion 그룹 통과. 장시간 실행에서 전반적인 열적
+  저하가 보여 안정적 승인 근거가 아닌 코드 경로/픽스처 검증으로만 사용했다.
+- 독립 21표본 릴리스 프로브 3회와 Clippy 뒤 작업 트리 프로브: 통과.
+- `cargo audit`, `cargo deny check`: 하위 명령이 설치되지 않아 실행 불가.
+- 이 macOS 작업공간에서는 Linux/Windows 실행, 릴리스 태그, 서명 설치 프로그램, 배포 산출물을 만들지 않았다.
 
-- `cargo fmt --all -- --check`: pass.
-- `cargo check --all-targets --all-features`: pass.
-- `cargo clippy --all-targets --all-features -- -D warnings`: pass.
-- `cargo test --all-targets --all-features`: 242 passed, 0 failed/ignored.
-- `cargo build --release --all-features`: pass.
-- `cargo bench --bench performance`: pass; all Criterion groups completed,
-  including the corrected no-ground labels and solvable mixed MNA rows. This
-  long run progressively slowed across unrelated UI, save, PCB, command, and
-  analysis groups; Criterion reported widespread regressions against its saved
-  baseline. It is retained as code-path/fixture validation, not used as stable
-  acceptance evidence. The independent short probes above remain the absolute
-  timing evidence, and their large-connectivity p95 does not pass the target.
-- Three independent 21-sample release probes plus one post-clippy working-tree
-  probe: pass. The post-clippy probe reported large ERC p95 `4.3109 ms`, add
-  `0.7638 ms`, split `0.8562 ms`, and large egui `2.6944 ms`.
-- `cargo audit` and `cargo deny check` were attempted but their Cargo
-  subcommands are not installed. Linux and Windows were not executable in this
-  macOS workspace. No release tag, signed installer, or distributable artifact
-  was made.
+## 2026-07-24 PCB 불변 조건 후속 작업
 
-## 2026-07-24 PCB invariant follow-up
+보드 검증기는 파생 공간 인덱스를 새 참조 빌드와 비교하고, 오래된 형상으로 인해 인덱스 조회가
+엔티티를 조용히 누락하는 대신 오류를 보고한다. 풋프린트 정의 존재/고유성, 패드 번호/형상/드릴/
+레이어, 존 폴리곤 면적/자기 교차, 네트 클래스/설계 규칙 값, 트랙/비아/존/패드 네트 ID와 CAD
+네트 집합의 일치도 프로젝트 불러오기와 제작 내보내기 경계에서 검사한다.
 
-The board validator now checks the derived spatial index against a fresh
-reference build and reports stale geometry instead of allowing indexed queries
-to silently omit entities. It also validates footprint-definition presence and
-uniqueness, pad numbers/geometry/drills/layers, zone polygon area and
-self-intersection, net-class/design-rule values, and track/via/zone/pad net IDs
-against the CAD net set at project-load and fabrication-export boundaries.
+프로젝트 불러오기는 비파괴적이다. 잘못된 보드 데이터도 보존하고 상태에 불변 조건 위반 수를
+표시한다. 구조적 보드 오류가 있으면 어떤 출력도 쓰기 전에 제작 내보내기를 차단한다. 누락된 정의,
+알 수 없는 네트, 잘못된 규칙, 자기 교차 존, 오래된 공간 형상에 대한 결정적 테스트를 추가했다.
 
-Project load remains non-destructive: malformed board data is retained and the
-status reports the invariant count. Fabrication export is now blocked before
-writing any output when structural board errors exist. Deterministic tests
-cover missing definitions, unknown nets, invalid rules, self-intersecting zones,
-and stale spatial geometry. Criterion and the release probe include
-`pcb_full_invariant_validation` / `pcb_full_invariants` so this cold-path
-correctness check has an explicit regression boundary.
+21표본 릴리스 프로브에서 전체 불변 검증은 p50/p95/최댓값
+`0.8775/1.0080/1.1181 ms`, 최대 증분 힙 345,106바이트였다. 같은 실행의 PCB 로컬 DRC p95는
+`0.0513 ms`, 전체 DRC p95는 `7.8362 ms`, 대형 실제 프레임 p95는 `4.1903 ms`였다. 중형 및
+대형 전체 연결성은 각각 `23.1034 ms`, `57.7391 ms` p95로 목표를 넘었으므로 M3 승인을 주장하지 않는다.
 
-The 21-sample release probe measured full invariant validation at
-`0.8775/1.0080/1.1181 ms` p50/p95/max with a 345,106-byte peak incremental
-heap. The same run measured PCB local DRC p95 `0.0513 ms`, PCB full DRC p95
-`7.8362 ms`, and large production frame p95 `4.1903 ms`. Medium and large full
-connectivity remained above their targets at `23.1034 ms` and `57.7391 ms`
-p95, respectively; this follow-up does not claim M3 acceptance.
+후속 검증 결과:
 
-Validation after this follow-up:
-
-- `cargo fmt --all -- --check`: pass.
-- `cargo check --all-targets --all-features`: pass.
-- `cargo clippy --all-targets --all-features -- -D warnings`: pass.
-- `cargo test --all-targets --all-features`: 246 passed.
-- `cargo build --release --all-features`: pass.
-- `cargo bench --bench performance`: pass, including
-  `pcb_full_invariant_validation` at a Criterion point estimate of about
-  `1.025 ms`.
-- `CLUSTER_PERF_SAMPLES=21 cargo run --release --example performance_probe`:
-  pass.
-- `cargo audit` and `cargo deny check`: unavailable because both Cargo
-  subcommands are not installed.
+- `cargo fmt --all -- --check`: 통과.
+- `cargo check --all-targets --all-features`: 통과.
+- `cargo clippy --all-targets --all-features -- -D warnings`: 통과.
+- `cargo test --all-targets --all-features`: 246개 통과.
+- `cargo build --release --all-features`: 통과.
+- `cargo bench --bench performance`: `pcb_full_invariant_validation` 약 `1.025 ms`를 포함해 통과.
+- `CLUSTER_PERF_SAMPLES=21 cargo run --release --example performance_probe`: 통과.
+- `cargo audit`, `cargo deny check`: 두 Cargo 하위 명령이 설치되지 않아 실행 불가.

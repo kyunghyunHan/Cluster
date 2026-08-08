@@ -3,7 +3,7 @@
 이 파일은 Cluster 회로도 편집기 저장소에서 작업하는 Codex, Claude, Cursor, Aider 등 코딩 에이전트를 위한 루트 지침이다.
 사람용 설명은 `README.md`를 보고, 에이전트는 작업 전 이 파일을 먼저 기준으로 삼는다.
 
-## Project Overview
+## 프로젝트 개요
 
 Cluster는 Rust + egui 기반 ESP32/Arduino 학습 및 프로토타이핑 회로 툴이다. 목표는 KiCad를 완전히 복제하는 것이 아니라 `Fritzing/Tinkercad처럼 직관적이면서 PCB 제작까지 이어질 수 있는 beginner-friendly KiCad-lite`다.
 
@@ -26,7 +26,7 @@ Cluster는 Rust + egui 기반 ESP32/Arduino 학습 및 프로토타이핑 회로
 - 저장/내보내기 결과가 실제 문서에 쓸 수 있을 만큼 깔끔하다.
 - UI가 조밀하지만 피로하지 않다.
 
-## Commercial Product Standard
+## 상용 제품 기준
 
 상용화를 전제로 작업할 때는 "데모로 보이는 기능"보다 "반복 사용해도 신뢰되는 워크플로우"를 우선한다.
 
@@ -45,19 +45,19 @@ Cluster는 Rust + egui 기반 ESP32/Arduino 학습 및 프로토타이핑 회로
 4. 출력 품질: 문서/수업/공유에 바로 쓸 수 있는 SVG/PNG
 5. 신뢰성: panic 없는 UI, 명확한 에러 메시지, 느려지지 않는 큰 회로
 
-## Setup Commands
+## 설정 명령
 
-- Build/check: `cargo check`
-- Run app: `cargo run`
-- Search code: `rg "<pattern>"`
-- List files: `rg --files`
+- 빌드/검사: `cargo check`
+- 앱 실행: `cargo run`
+- 코드 검색: `rg "<pattern>"`
+- 파일 목록: `rg --files`
 
-Notes:
+참고:
 - 작은 변경에서 전체 구조를 크게 갈아엎지 않는다.
 - `src/main.rs` 단일 파일 구조가 크면, 먼저 명확한 함수 단위로 정리하고 이후 모듈 분리를 검토한다.
 - 네트워크가 필요한 dependency 추가는 신중히 한다. 가능하면 egui와 표준 라이브러리 안에서 해결한다.
 
-## Testing Instructions
+## 테스트 지침
 
 - 코드 변경 후 기본 검증은 `cargo check`다.
 - UI 변경은 가능하면 `cargo run`으로 실제 배치, 좁은 패널, 빈 회로 상태를 확인한다.
@@ -70,7 +70,7 @@ Notes:
 - 내보내기 변경은 생성 파일이 브라우저에서 열리는지 확인한다.
 - 회귀 위험이 큰 로직은 작고 직접적인 단위 테스트를 추가한다.
 
-## Code Style
+## 코드 스타일
 
 - 기존 Rust/egui 스타일을 우선 따른다.
 - 큰 리팩터링보다 작고 검증 가능한 개선을 선호한다.
@@ -82,7 +82,7 @@ Notes:
 - 저장 포맷, 시뮬레이션 결과, 에러 상태처럼 장기 유지될 데이터는 명시적인 타입으로 표현한다.
 - 사용자가 볼 수 있는 에러 메시지는 짧고 원인/다음 행동을 알 수 있게 쓴다.
 
-## Data And Compatibility
+## 데이터와 호환성
 
 - 회로 저장 포맷은 가능하면 사람이 읽을 수 있는 JSON을 기본으로 한다.
 - 저장 데이터에는 앱 버전 또는 schema version을 포함한다.
@@ -91,7 +91,7 @@ Notes:
 - 좌표, 회전, 부품 타입, 값, 핀 연결, 스위치 상태, 모듈 핀 역할은 저장/복원 대상이다.
 - 포맷 변경은 migration 또는 backwards-compatible parser를 먼저 고려한다.
 
-## Reliability And Error Handling
+## 신뢰성과 오류 처리
 
 - UI 이벤트, 파일 I/O, export, parsing 경로에서 `unwrap()`/`expect()`는 피한다. 불변 조건이 코드상 명확한 경우만 예외로 한다.
 - 실패 가능한 작업은 `Result`로 다루고, 사용자에게 필요한 메시지를 status 또는 panel에 남긴다.
@@ -99,7 +99,7 @@ Notes:
 - 삭제, 덮어쓰기, 초기화 같은 작업은 사용자의 의도를 확인하거나 되돌릴 수 있는 흐름을 둔다.
 - 장시간 작업이 생기면 UI가 멈춘 것처럼 보이지 않게 상태를 표시한다.
 
-## Performance Standard
+## 성능 기준
 
 - 일반 작업은 마우스 입력에 즉각 반응해야 한다.
 - 큰 회로에서도 pan/zoom/select/wire drawing이 눈에 띄게 버벅이면 안 된다.
@@ -107,7 +107,7 @@ Notes:
 - 렌더링보다 시뮬레이션/검증 로직이 커질 경우, 계산 단위를 작게 나눠 테스트 가능하게 유지한다.
 - 성능 개선은 가독성을 크게 해치지 않는 범위에서 한다.
 
-## Design Standard
+## 디자인 기준
 
 기본 방향은 `Dense Practical Lab`이다.
 
@@ -126,7 +126,7 @@ Notes:
 - 색상만으로 상태를 구분하지 않는다. live/open/error/selected는 라벨, 선 스타일, 아이콘, 두께 중 하나를 함께 고려한다.
 - 툴팁과 status text는 짧게 쓰고, 작업 흐름을 가리지 않는다.
 
-## Simulation Standard
+## 시뮬레이션 기준
 
 현재 시뮬레이션은 SPICE급 아날로그 해석이 아니라 연결성 기반 live-path 판정이다.
 
@@ -163,7 +163,7 @@ Notes:
 - `Signal mismatch`: SDA/SCL/UART/SPI 핀이 예상 역할과 다르게 연결됨
 - 경고는 작업을 막기보다, 문제가 있는 부품/핀을 찾기 쉽게 표시한다.
 
-## Export Standard
+## 내보내기 기준
 
 - 이미지 저장은 기본적으로 SVG를 우선한다.
 - SVG는 배선, 부품 박스, 라벨, 값, 핀을 포함해야 한다.
@@ -176,7 +176,7 @@ Notes:
 - README 예제 이미지는 앱의 SVG exporter로 재생성할 수 있어야 한다.
 - CI는 `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, release build를 실행한다.
 
-## Release Readiness
+## 릴리스 준비 상태
 
 릴리즈를 목표로 하는 변경은 아래를 고려한다.
 - 앱 시작, 새 회로, 저장, 불러오기, 내보내기, 기본 부품 배치가 모두 동작한다.
@@ -186,7 +186,7 @@ Notes:
 - 새 dependency는 라이선스, 유지보수 상태, binary size, offline build 영향을 검토한 뒤 추가한다.
 - `v*` 태그 릴리스는 Linux/macOS/Windows 바이너리 압축 파일을 생성한다.
 
-## Roadmap
+## 로드맵
 
 우선순위 높은 순서:
 1. Breadboard View: 일부 완료 - ESP32/Arduino/STM32 + OLED/Sensor I2C 예제의 VCC/GND/SDA/SCL 점퍼 체크, schematic net 강조, 누락 점퍼 자동 schematic 배선 추가 지원. 향후 실제 점퍼 편집, 전원 레일, 핀 하이라이트 확장
@@ -214,7 +214,7 @@ Notes:
 - PCB footprint pad lookup/spatial index/Gerber/Excellon은 공통 `FootprintTransform`을 사용하며 0/90/180/270도와 back flip 좌표를 테스트한다. Excellon은 배치 footprint drill과 실제 tool diameter를 출력한다.
 - `v*` tag release workflow가 Linux/macOS/Windows portable archive, SHA-256 checksum, 자동 release note를 생성한다.
 
-## Definition Of Done
+## 완료 조건
 
 작업 완료 전 확인한다.
 - [ ] 기능이 실제 UI에서 접근 가능하다.

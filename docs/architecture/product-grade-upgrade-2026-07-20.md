@@ -1,159 +1,126 @@
-# Product-grade upgrade audit — 2026-07-20
+# 제품 수준 업그레이드 감사 — 2026-07-20
 
-This report distinguishes implemented behavior from requested future work. It
-does not treat a type or an unreachable module as a finished feature.
+이 보고서는 구현된 동작과 요청된 향후 작업을 구분한다. 타입이 존재하거나 접근 불가능한
+모듈이 있다는 이유만으로 완성된 기능으로 보지 않는다.
 
-## 1. Baseline
+## 1. 기준선
 
-- Commit: `cd30c3a1ee7f59540e04a7e5aab13d335bc42e97`
+- 커밋: `cd30c3a1ee7f59540e04a7e5aab13d335bc42e97`
   (`fix: preserve connectivity annotations across documents`).
-- Branch: `main`, nine commits ahead of `origin/main`; working tree clean.
-- `cargo fmt --check`: pass.
-- `cargo check --all-targets`: pass, zero warnings.
-- `cargo clippy --all-targets -- -D warnings`: pass.
-- `cargo test --all-targets`: 211 passed, zero failed/ignored.
-- `cargo build --release`: pass.
-- Rust source/test/workflow total: 36,589 lines.
-- Largest files: `ui/app/mod.rs` 3,452; `ui/app/symbols.rs` 3,118;
+- 브랜치: `main`, `origin/main`보다 커밋 9개 앞섬, 작업 트리 깨끗함.
+- `cargo fmt --check`: 통과.
+- `cargo check --all-targets`: 경고 없이 통과.
+- `cargo clippy --all-targets -- -D warnings`: 통과.
+- `cargo test --all-targets`: 211개 통과, 실패/무시 0개.
+- `cargo build --release`: 통과.
+- Rust 소스/테스트/워크플로 합계: 36,589줄.
+- 가장 큰 파일: `ui/app/mod.rs` 3,452줄, `ui/app/symbols.rs` 3,118줄,
   `engine/validation.rs` 2,767; `app/actions.rs` 2,260;
   `ui/app/energize.rs` 1,987; `ui/app/tests.rs` 1,980.
 
-The repository-wide audit found no production `unwrap()`/`expect()` on a
-user-controlled parsing or file path. The one production `expect()` is a
-checked current-flow invariant. Most occurrences are test assertions.
+저장소 전체 감사에서 사용자 제어 파싱 또는 파일 경로에 실제 제품용 `unwrap()`/`expect()`는
+없었다. 제품 코드의 `expect()` 1건은 검사된 전류 흐름 불변 조건이며 대부분은 테스트 단언이다.
 
-## 2. Architecture changes in this slice
+## 2. 이번 작업의 아키텍처 변경
 
-- `ChangeSet` now names persistence, schematic geometry/connectivity,
-  electrical values, simulation topology/parameters, PCB sync/geometry/rules,
-  and visual-only domains. The central dispatcher derives cache invalidation,
-  autosave eligibility, stale simulation, DRC invalidation, and repaint.
-- Added a dedicated PCB workspace separate from the bottom-dock preview.
-- Added an explicit ECO report/application model. Existing physical placement,
-  rotation, and board side survive updates. Removed symbols become visible
-  orphan footprints by default.
-- Ratsnest generation now computes remaining copper-connected footprint
-  islands and creates a minimal-distance spanning set between islands.
-- Added a backend-neutral simulation contract with internal MNA and ngspice
-  implementations.
-- ngspice uses a per-run directory, configurable executable, timeout,
-  cancellation token, captured stderr, and document revision. Fixed shared
-  temporary filenames were removed.
+- `ChangeSet`은 영속성, 회로도 형상/연결성, 전기 값, 시뮬레이션 토폴로지/매개변수, PCB 동기화/형상/규칙, 시각 전용 도메인을 명시한다. 중앙 디스패처가 캐시 무효화, 자동 저장 가능 여부, 오래된 시뮬레이션, DRC 무효화, 다시 그리기를 파생한다.
+- 하단 도크 미리보기와 별개인 전용 PCB 작업공간을 추가했다.
+- 명시적 ECO 보고서/적용 모델을 추가했다. 기존 물리 배치, 회전, 보드 면은 업데이트 뒤에도 보존되며 제거된 심볼은 기본적으로 보이는 고아 풋프린트가 된다.
+- 랫츠네스트 생성이 남은 동박 연결 풋프린트 아일랜드를 계산하고 아일랜드 사이에 최소 거리 연결 집합을 만든다.
+- 내부 MNA와 ngspice 구현을 갖춘 백엔드 중립 시뮬레이션 계약을 추가했다.
+- ngspice는 실행별 디렉터리, 설정 가능한 실행 파일, 시간 제한, 취소 토큰, 캡처된 표준 오류, 문서 리비전을 사용한다. 고정된 공유 임시 파일명은 제거했다.
 
-Final quality gates:
+최종 품질 게이트:
 
-- `cargo fmt --check`: pass.
-- `cargo check --all-targets`: pass, zero warnings.
-- `cargo clippy --all-targets -- -D warnings`: pass.
-- `cargo test --all-targets`: 217 passed, zero failed/ignored.
-- `cargo build --release`: pass.
+- `cargo fmt --check`: 통과.
+- `cargo check --all-targets`: 경고 없이 통과.
+- `cargo clippy --all-targets -- -D warnings`: 통과.
+- `cargo test --all-targets`: 217개 통과, 실패/무시 0개.
+- `cargo build --release`: 통과.
 
-## 3. New PCB commands
+## 3. 새 PCB 명령
 
-The command boundary now supports single/group footprint move and rotation,
-front/back flip, complete multi-segment route plus vias, track add/delete/edit,
-via add/delete, board outline replacement, net-class change, and ECO apply.
-A route containing several segments and vias is one history item.
+명령 경계는 이제 단일/그룹 풋프린트 이동 및 회전, 앞/뒤 뒤집기, 비아를 포함한 완전한 다중
+선분 라우팅, 트랙 추가/삭제/편집, 비아 추가/삭제, 보드 외곽선 교체, 네트 클래스 변경, ECO 적용을
+지원한다. 여러 선분과 비아를 포함한 라우팅도 이력 항목 하나로 저장한다.
 
-## 4. History and direct mutation audit
+## 4. 이력 및 직접 변경 감사
 
-History entries are entity deltas in a `VecDeque` with a 16 MiB/512-entry
-budget. No `Vec::remove(0)` eviction remains. A full `CircuitSnapshot` is still
-created transiently before/after generic commands and compatibility
-transactions to calculate a delta; it is not stored in history. Board changes
-inside that generic delta are still retained as a before/after `Board` pair.
-These are the remaining snapshot fallbacks.
+이력 항목은 16 MiB/512항목 한도의 `VecDeque`에 담긴 엔티티 델타다. `Vec::remove(0)` 제거는 남아
+있지 않다. 일반 명령 및 호환 트랜잭션 전후에는 델타 계산을 위해 전체 `CircuitSnapshot`을
+일시적으로 만들지만 이력에 저장하지 않는다. 일반 델타 안의 보드 변경은 여전히 변경 전/후
+`Board` 쌍으로 보관한다. 이것이 남은 스냅샷 대체 경로다.
 
-Remaining production mutation paths outside narrow command internals:
+좁은 명령 내부 밖에 남은 제품 데이터 변경 경로:
 
-- page materialization/switch/add/remove and load recovery in `app/actions.rs`;
-- demo/lesson fixture construction and ERC auto-fix compound edits;
-- legacy auto-place, board-fit, and straight-ratsnest helper methods in
-  `app/actions.rs`;
-- deserialization, migration, and `Board::apply_eco`, which are documented
-  domain/persistence boundaries.
+- `app/actions.rs`의 페이지 구체화/전환/추가/제거 및 불러오기 복구
+- 데모/학습 픽스처 구성 및 ERC 자동 수정 복합 편집
+- `app/actions.rs`의 레거시 자동 배치, 보드 맞춤, 직선 랫츠네스트 도우미
+- 문서화된 도메인/영속성 경계인 역직렬화, 마이그레이션, `Board::apply_eco`
 
-The transitional `Deref<Target = ProjectDocument>` on `CircuitApp` still makes
-the ownership boundary convention-based rather than compiler-enforced.
+`CircuitApp`의 과도기적 `Deref<Target = ProjectDocument>` 때문에 소유권 경계가 아직 컴파일러
+강제가 아닌 관례에 의존한다.
 
-## 5. Connectivity regression result
+## 5. 연결성 회귀 결과
 
-All canonical connectivity tests pass, including direct wire, crossing with
-and without explicit junction, T-junction, endpoint-on-segment, collinear
-overlap, pin overflight remaining disconnected, local/page/global labels,
-multi-page connectivity, typed endpoints, ordering invariance, and exact
-save/load mappings. This slice did not rewrite canonical connectivity.
+직접 배선, 명시적 접합점 유무에 따른 교차, T 접합, 선분 위 끝점, 동일 직선 겹침, 핀 위를
+지나도 미연결 유지, 로컬/페이지/전역 라벨, 다중 페이지 연결성, 타입 지정 끝점, 순서 불변성,
+정확한 저장/불러오기 매핑을 포함한 모든 정규 연결성 테스트가 통과했다. 이번 작업에서 정규
+연결성을 다시 작성하지는 않았다.
 
-## 6. PCB UI reachability
+## 6. PCB UI 접근성
 
-`Workspace → PCB` opens the dedicated editor. Reachable operations are
-independent pan/zoom/grid, layer visibility, net highlight, footprint
-selection/multi-selection/box selection/drag/rotate/flip, 45°/90° manual
-routing, via placement/layer transition, track/via selection and deletion,
-Escape cancel, Backspace anchor removal, and undo/redo. The bottom dock remains
-the ECO, DRC, project, and fabrication command center.
+`Workspace → PCB`에서 전용 편집기를 연다. 독립 팬/줌/그리드, 레이어 표시, 네트 강조,
+풋프린트 선택/다중 선택/영역 선택/드래그/회전/뒤집기, 45°/90° 수동 라우팅, 비아 배치/레이어
+전환, 트랙/비아 선택 및 삭제, Escape 취소, Backspace 앵커 제거, 실행 취소/다시 실행을 사용할 수
+있다. 하단 도크는 계속 ECO, DRC, 프로젝트, 제작 명령 센터 역할을 한다.
 
-## 7. DRC and ECO
+## 7. DRC와 ECO
 
-DRC now distinguishes an actual different-net intersection from a clearance
-violation and includes locations/object IDs. It additionally checks copper
-outside the board, duplicate footprint references, dangling tracks, and
-dangling vias. Unrouted warnings use the copper-island ratsnest rather than
-assuming that any track on a net routes the whole net.
+DRC는 이제 실제 서로 다른 네트의 교차와 간격 위반을 구분하고 위치/객체 ID를 포함한다. 또한
+보드 밖 동박, 중복 풋프린트 참조명, 매달린 트랙과 비아를 검사한다. 미배선 경고는 네트에 트랙
+하나만 있어도 전체 네트가 연결되었다고 가정하지 않고 동박 아일랜드 랫츠네스트를 사용한다.
 
-ECO detects added symbols, removed footprints, changed assignments, renamed
-references, and added/removed routed net IDs. Applying ECO is undoable.
-Removed footprints are retained as orphans by the current UI policy; the
-domain also supports remove/keep-tracks and remove-with-tracks policies.
+ECO는 추가된 심볼, 제거된 풋프린트, 변경된 할당, 이름이 바뀐 참조명, 추가/제거된 배선 네트
+ID를 감지한다. ECO 적용은 실행 취소할 수 있다. 현재 UI 정책은 제거된 풋프린트를 고아로
+보존하며, 도메인은 트랙 유지 제거 및 트랙 포함 제거 정책도 지원한다.
 
-## 8. Simulation limitations
+## 8. 시뮬레이션 제한
 
-The internal backend remains an educational operating-point solver with
-simplified semiconductor/load models and a narrow one-R/one-C transient
-preview. MCU, OLED, and sensor modules remain symbol-only. ngspice operating
-point execution is hardened but backend selection and asynchronous result
-presentation are not yet connected to the egui workflow; ngspice transient
-import is explicitly unsupported.
+내부 백엔드는 단순화한 반도체/부하 모델과 제한적인 저항 1개·커패시터 1개 과도 미리보기를
+갖춘 교육용 동작점 해석기다. MCU, OLED, 센서 모듈은 심볼 전용이다. ngspice 동작점 실행은
+강화했지만 백엔드 선택과 비동기 결과 표시는 아직 egui 흐름에 연결되지 않았으며 ngspice 과도
+해석 가져오기는 명시적으로 지원하지 않는다.
 
-## 9. Schema and migration
+## 9. 스키마와 마이그레이션
 
-Schematic schema remains v4, board schema remains v1, and custom parts remain
-v2 with v1 compatibility. `BoardFootprint.flipped` is a backward-compatible
-serde-defaulted board field. No existing file requires migration.
+회로도 스키마는 v4, 보드 스키마는 v1, 사용자 부품은 v1 호환 v2를 유지한다.
+`BoardFootprint.flipped`는 serde 기본값이 있는 하위 호환 보드 필드다. 기존 파일은 마이그레이션할 필요가 없다.
 
-## 10. README/UI claim audit
+## 10. README/UI 설명 감사
 
-The old README accurately described the bottom dock but explicitly admitted
-that no full PCB editor existed. It is updated to describe the now-reachable
-workspace and its remaining pad/mask/zone limitations. Automated tagged
-release packaging is still correctly described as unavailable. Comparative
-“easier/smarter” statements are product goals, not objectively verified test
-results.
+기존 README는 하단 도크를 정확히 설명했지만 완전한 PCB 편집기가 없다고 명시했다. 이제 접근
+가능한 작업공간과 남은 패드/마스크/존 제한을 설명하도록 업데이트했다. 자동 태그 릴리스 패키징은
+당시에도 올바르게 미지원으로 설명했다. “더 쉽다/똑똑하다” 같은 비교 표현은 객관적으로 검증된
+테스트 결과가 아니라 제품 목표다.
 
-## 11. Benchmarks
+## 11. 벤치마크
 
-No reproducible before/after benchmark harness existed at baseline, so this
-slice does not invent timing numbers after the fact. The required 100/500/1000
-component connectivity/ERC/hit-test/ratsnest/DRC/save/history benchmark suite
-remains incomplete. Functional copper-island tests were added, but they are
-not presented as performance measurements.
+기준선에는 재현 가능한 변경 전후 벤치마크 하네스가 없었으므로 사후에 시간 수치를 만들어내지
+않는다. 100/500/1000개 부품의 연결성/ERC/적중 검사/랫츠네스트/DRC/저장/이력 벤치마크 모음은
+미완성이다. 기능적 동박 아일랜드 테스트를 추가했지만 성능 측정치로 제시하지 않는다.
 
-## 12. Remaining limitations
+## 12. 남은 제한
 
-- Pad geometry/net mapping is not yet the routing hit-test source; the first
-  editor routes from footprint connection points.
-- Track endpoint dragging, interactive board-outline vertices, zones,
-  pad-to-pad/hole/silkscreen/mask DRC, and ECO pre-apply policy dialog remain.
-- Backend selection, probes, production oscilloscope CSV/cursors, and
-  asynchronous ngspice UI remain.
-- Typed six-lesson engine, multiple recovery candidates/project locks/recent
-  projects/read-only future schema, benchmark harness, and tagged artifacts
-  remain.
-- Major source files still exceed the preferred size limit.
+- 패드 형상/네트 매핑이 아직 라우팅 적중 검사의 기준이 아니며 첫 편집기는 풋프린트 연결점에서 라우팅한다.
+- 트랙 끝점 드래그, 대화형 보드 외곽선 꼭짓점, 존, 패드 간/홀/실크스크린/마스크 DRC, ECO 적용 전 정책 대화상자가 남아 있다.
+- 백엔드 선택, 프로브, 제품용 오실로스코프 CSV/커서, 비동기 ngspice UI가 남아 있다.
+- 타입 지정 6개 학습 엔진, 여러 복구 후보/프로젝트 잠금/최근 프로젝트/미래 스키마 읽기 전용, 벤치마크 하네스, 태그 산출물이 남아 있다.
+- 주요 소스 파일은 여전히 권장 크기 제한을 넘는다.
 
-## 13. Screenshots
+## 13. 스크린샷
 
-Real egui viewport captures were generated from reproducible startup presets:
+재현 가능한 시작 프리셋으로 실제 egui 뷰포트 캡처를 생성했다.
 
 - `docs/media/cluster-schematic-workflow.png`
 - `docs/media/cluster-pcb-workflow.png`
@@ -161,13 +128,12 @@ Real egui viewport captures were generated from reproducible startup presets:
 - `docs/media/cluster-simulation-workflow.png`
 - `docs/media/cluster-lesson-workflow.png`
 
-For example:
+예시:
 
 ```bash
 cargo run -- --demo esp32-oled --workspace pcb \
   --capture docs/media/cluster-pcb-workflow.png
 ```
 
-The capture path uses egui's viewport screenshot event and then exits. During
-this work it also exposed and fixed a pre-existing screenshot deadlock caused
-by reading the screenshot image while the input lock was still held.
+캡처 경로는 egui의 뷰포트 스크린샷 이벤트를 사용한 뒤 종료한다. 이 작업 중 입력 잠금을 잡은
+상태에서 스크린샷 이미지를 읽어 발생하던 기존 교착 상태도 발견하여 수정했다.

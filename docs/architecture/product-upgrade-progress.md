@@ -1,88 +1,52 @@
-# Product upgrade progress
+# 제품 업그레이드 진행 상황
 
-Updated: 2026-07-20.
+업데이트: 2026-07-20.
 
-This document records implemented boundaries and deliberately does not describe later product
-phases as complete.
+이 문서는 구현된 경계를 기록하며, 이후 제품 단계를 완료된 것으로 표현하지 않는다.
 
-## Completed foundation
+## 완료된 기반 작업
 
-- Runtime state now has explicit `ProjectDocument`, `EditorState`, `WorkspaceState`, and
-  `AnalysisState` owners. The board is persistent document data; PCB CAD and DRC are derived
-  analysis data.
-- `EditorCommand` receives a restricted `CommandContext` and returns a typed `ChangeSet`. One
-  dispatcher owns dirty state, connectivity/ERC/simulation/PCB invalidation, autosave eligibility,
-  status feedback, and repaint requests.
-- Command history stores entity-level reversible deltas in a `VecDeque` with a 16 MiB/512-entry
-  budget. Repeated property/drag commands merge inside a 750 ms window, and pointer movement does
-  not create one history entry per frame. A full snapshot exists only transiently while computing
-  a compatibility transaction delta; it is not retained in undo/redo.
-- Schematic placement, deletion, movement, rotation, properties, wiring, wire control points, and
-  tidy operations use commands. PCB primitive commands cover footprint movement/rotation, track
-  add/remove, via add/remove, and outline replacement, including board undo/redo.
-- Canonical connectivity stages have focused endpoint, spatial-index, intersection, junction,
-  geometry, label, union-find, and diagnostics modules while preserving the single cached
-  `CanonicalConnectivity` result. Inputs are ID-sorted, so exact pin/junction/segment net mappings
-  are independent of component and wire collection order.
-- Junction endpoints use a serialization-transparent `JunctionId` runtime type. Legacy numeric
-  JSON remains unchanged.
-- Static ERC execution is registry-driven through `ErcContext`, `ErcCheck`, stable registry IDs,
-  per-rule enablement/severity settings, and structured certainty. Annotation/no-connect and
-  ground rules now live in domain rule modules.
-- Custom-part schema v2 adds optional tags, voltage range, interfaces, footprint/pad mapping,
-  simulation metadata, and documentation. Missing `schema_version` still loads as v1. Duplicate
-  pins/pads, missing pad mappings, invalid dimensions, and future versions are rejected.
-- Save replacement now keeps three rotated backup generations, syncs the temporary file, renames
-  in the target directory, and syncs the directory on Unix.
-- Custom-part input rejects symlinks and files over 1 MiB. Poisoned registry locks recover their
-  contained data instead of panicking on a user-triggered reload.
-- CI separates Linux quality checks from build/test/release checks across Linux, macOS, and
-  Windows, and builds documentation.
+- 런타임 상태에 명시적인 `ProjectDocument`, `EditorState`, `WorkspaceState`, `AnalysisState` 소유자가 생겼다. 보드는 영속 문서 데이터이며 PCB CAD와 DRC는 파생 분석 데이터다.
+- `EditorCommand`는 제한된 `CommandContext`를 받고 타입 지정 `ChangeSet`을 반환한다. 하나의 디스패처가 변경 상태, 연결성/ERC/시뮬레이션/PCB 무효화, 자동 저장 가능 여부, 상태 피드백, 다시 그리기 요청을 소유한다.
+- 명령 이력은 엔티티 수준의 되돌릴 수 있는 델타를 16 MiB/512항목 한도의 `VecDeque`에 저장한다. 반복 속성/드래그 명령은 750ms 안에서 병합되며 포인터 이동은 프레임마다 이력 항목을 만들지 않는다. 전체 스냅샷은 호환 트랜잭션 델타 계산 중에만 일시적으로 존재하며 실행 취소/다시 실행에는 보관하지 않는다.
+- 회로도 배치, 삭제, 이동, 회전, 속성, 배선, 배선 제어점, 정리 작업은 명령을 사용한다. PCB 기본 명령은 보드 실행 취소/다시 실행을 포함해 풋프린트 이동/회전, 트랙 추가/제거, 비아 추가/제거, 외곽선 교체를 지원한다.
+- 정규 연결성 단계는 단일 캐시 `CanonicalConnectivity` 결과를 유지하면서 끝점, 공간 인덱스, 교차, 접합점, 형상, 라벨, union-find, 진단 전용 모듈을 갖는다. 입력은 ID순으로 정렬되어 정확한 핀/접합점/선분 네트 매핑이 부품과 배선 컬렉션 순서에 영향받지 않는다.
+- 접합점 끝점은 직렬화에 영향을 주지 않는 `JunctionId` 런타임 타입을 사용한다. 레거시 숫자 JSON은 바뀌지 않는다.
+- 정적 ERC 실행은 `ErcContext`, `ErcCheck`, 안정적 레지스트리 ID, 규칙별 활성화/심각도 설정, 구조화된 확실성을 통해 레지스트리 기반으로 동작한다. 주석/미연결 및 접지 규칙은 도메인 규칙 모듈에 있다.
+- 사용자 부품 스키마 v2는 선택적 태그, 전압 범위, 인터페이스, 풋프린트/패드 매핑, 시뮬레이션 메타데이터, 문서를 추가한다. `schema_version`이 없으면 여전히 v1으로 읽는다. 중복 핀/패드, 누락된 패드 매핑, 잘못된 치수, 미래 버전은 거부한다.
+- 저장 교체는 이제 순환 백업 3세대를 유지하고 임시 파일을 동기화한 뒤 대상 디렉터리에서 이름을 바꾸며 Unix에서는 디렉터리도 동기화한다.
+- 사용자 부품 입력은 심볼릭 링크와 1 MiB 초과 파일을 거부한다. 오염된 레지스트리 잠금은 사용자가 다시 불러올 때 패닉을 내지 않고 내부 데이터를 복구한다.
+- CI는 Linux 품질 검사를 Linux/macOS/Windows 빌드·테스트·릴리스 검사와 분리하고 문서도 빌드한다.
 
-No schematic, CAD, or board file schema version changed. Custom-part JSON is the only schema
-version increment (1 to 2), and v1 files remain accepted.
+회로도, CAD, 보드 파일 스키마 버전은 바뀌지 않았다. 사용자 부품 JSON만 스키마가 1에서 2로 올라갔으며 v1 파일도 계속 허용한다.
 
-## Still incomplete
+## 아직 미완료인 항목
 
-- Several page/demo/ERC-auto-fix and compound PCB operations still begin compatibility
-  transactions outside `EditorCommand`; they produce deltas, but should become explicit commands.
-- `CircuitApp` keeps a temporary `Deref<ProjectDocument>` compatibility bridge; callers should be
-  migrated to explicit owners before it is removed.
-- Canonical net generation and most fixtures still live in `engine/netlist.rs`; `net_builder` and
-  test-fixture extraction remain.
-- ERC rules execute independently through the registry, but most algorithms still live in
-  `engine/validation.rs`; more domain files and a richer precomputed context remain.
-- Unified ERC/DRC diagnostics UX, editable PCB routing state machine, start/recent-project screen,
-  typed guided lessons, probe/scope backend UI, recovery/lock/read-only workflows, property tests,
-  large-circuit benchmarks, and release packaging remain future phases.
-- There were no UI appearance changes in this slice, so before/after screenshots are not
-  applicable.
+- 일부 페이지/데모/ERC 자동 수정 및 복합 PCB 작업은 여전히 `EditorCommand` 밖에서 호환 트랜잭션을 시작한다. 델타는 만들지만 명시적 명령으로 바꿔야 한다.
+- `CircuitApp`은 임시 `Deref<ProjectDocument>` 호환 브리지를 유지한다. 제거하기 전에 호출자를 명시적 소유자로 마이그레이션해야 한다.
+- 정규 네트 생성과 대부분의 픽스처가 아직 `engine/netlist.rs`에 있다. `net_builder`와 테스트 픽스처 추출이 남아 있다.
+- ERC 규칙은 레지스트리를 통해 독립 실행되지만 대부분의 알고리즘이 `engine/validation.rs`에 남아 있다. 더 많은 도메인 파일과 풍부한 사전 계산 컨텍스트가 필요하다.
+- 통합 ERC/DRC 진단 UX, 편집 가능한 PCB 라우팅 상태 머신, 시작/최근 프로젝트 화면, 타입 지정 안내 학습, 프로브/오실로스코프 백엔드 UI, 복구/잠금/읽기 전용 흐름, 속성 테스트, 대형 회로 벤치마크, 릴리스 패키징은 향후 단계다.
+- 이 작업 범위에는 UI 외형 변경이 없어 변경 전후 스크린샷은 해당하지 않는다.
 
-## Validation
+## 검증
 
-Baseline before this slice is recorded in `product-upgrade-baseline.md`. After the implementation:
+작업 전 기준선은 `product-upgrade-baseline.md`에 기록되어 있다. 구현 후 결과는 다음과 같다.
 
-- `cargo fmt --check`: pass.
-- `cargo clippy --all-targets --all-features -- -D warnings`: pass.
-- `cargo test --all-targets`: 207 passed.
-- `cargo build --release`: pass.
-- `cargo doc --no-deps`: pass.
-- `cargo audit`: not run because the `cargo-audit` subcommand is not installed in this
-  environment.
+- `cargo fmt --check`: 통과.
+- `cargo clippy --all-targets --all-features -- -D warnings`: 통과.
+- `cargo test --all-targets`: 207개 통과.
+- `cargo build --release`: 통과.
+- `cargo doc --no-deps`: 통과.
+- `cargo audit`: 이 환경에 `cargo-audit` 하위 명령이 설치되지 않아 실행하지 않음.
 
-## 2026-07-20 PCB workflow increment
+## 2026-07-20 PCB 작업 흐름 개선
 
-- Added the dedicated PCB workspace with independent view state, layer/net
-  controls, footprint selection/drag/rotate/flip, manual 45°/90° route state,
-  via placement, copper deletion, and command-backed undo/redo.
-- Replaced visual footprint-chain ratsnest logic with copper-connected islands.
-- Made schematic-to-PCB synchronization an undoable ECO that preserves layout
-  and keeps removed components as orphans by default.
-- Expanded DRC for different-net shorts, outside copper, duplicate references,
-  and dangling tracks/vias.
-- Hardened ngspice execution with unique directories, timeout, cancellation,
-  stderr, executable configuration, and revision tagging.
-- Added reproducible real-window captures under `docs/media/`.
+- 독립 보기 상태, 레이어/네트 제어, 풋프린트 선택/드래그/회전/뒤집기, 수동 45°/90° 라우팅 상태, 비아 배치, 동박 삭제, 명령 기반 실행 취소/다시 실행을 갖춘 전용 PCB 작업공간을 추가했다.
+- 시각적 풋프린트 체인 랫츠네스트 로직을 동박 연결 아일랜드로 교체했다.
+- 회로도→PCB 동기화를 레이아웃을 보존하고 제거된 부품을 기본적으로 고아 상태로 두는 실행 취소 가능 ECO로 만들었다.
+- 서로 다른 네트 간 쇼트, 보드 밖 동박, 중복 참조명, 매달린 트랙/비아에 대한 DRC를 확장했다.
+- 고유 디렉터리, 시간 제한, 취소, 표준 오류, 실행 파일 설정, 리비전 태그로 ngspice 실행을 강화했다.
+- `docs/media/` 아래에 재현 가능한 실제 창 캡처를 추가했다.
 
-The remaining limitations and current validation results are recorded in
-`product-grade-upgrade-2026-07-20.md`.
+남은 제한과 현재 검증 결과는 `product-grade-upgrade-2026-07-20.md`에 기록되어 있다.

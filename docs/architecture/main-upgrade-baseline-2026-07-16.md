@@ -1,34 +1,32 @@
-# Main branch upgrade baseline
+# main 브랜치 업그레이드 기준선
 
-Baseline date: 2026-07-16 (Australia/Melbourne).
+기준일: 2026-07-16 (호주/멜버른).
 
-This is a fresh measurement of the current `main` working tree before the
-editor/PCB upgrade. The branch was clean and two local commits ahead of
-`origin/main`:
+편집기/PCB 업그레이드 전 현재 `main` 작업 트리를 새로 측정한 결과다. 브랜치는 깨끗했고
+`origin/main`보다 로컬 커밋 2개가 앞서 있었다.
 
 - `f96519b refactor: establish document command and analysis boundaries`
 - `cc60940 feat: version parts and harden atomic saves`
 
-No result below is inferred from an earlier report.
+아래 결과는 이전 보고서에서 추론하지 않았다.
 
-## Required command results
+## 필수 명령 결과
 
-| Command | Result |
+| 명령 | 결과 |
 | --- | --- |
-| `cargo fmt --check` | Passed. |
-| `cargo check --all-targets` | Passed with 97 `float_literal_f32_fallback` future-compatibility warnings. |
-| `cargo clippy --all-targets -- -D warnings` | Failed with 98 errors: the same 97 future-compatibility warnings plus one `clippy::collapsible_match` in `src/engine/validation.rs`. |
-| `cargo test --all-targets` | Passed: 198 tests; emitted the same 97 warnings. |
-| `cargo build --release` | Passed; emitted the same 97 warnings. |
+| `cargo fmt --check` | 통과. |
+| `cargo check --all-targets` | `float_literal_f32_fallback` 미래 호환성 경고 97건과 함께 통과. |
+| `cargo clippy --all-targets -- -D warnings` | 오류 98건으로 실패: 동일한 미래 호환성 경고 97건과 `src/engine/validation.rs`의 `clippy::collapsible_match` 1건. |
+| `cargo test --all-targets` | 198개 테스트 통과, 동일한 경고 97건 출력. |
+| `cargo build --release` | 통과, 동일한 경고 97건 출력. |
 
-The warnings and Clippy failure are recorded before repair. They are not
-suppressed as a way of making the baseline green.
+경고와 Clippy 실패는 수정 전에 기록했다. 기준선을 통과 상태로 보이게 하려고 억제하지 않았다.
 
-## Repository size and concentration
+## 저장소 크기와 코드 집중도
 
-The Rust source tree contains 34,845 lines. The largest files are:
+Rust 소스 트리는 34,845줄이며 가장 큰 파일은 다음과 같다.
 
-| File | Lines |
+| 파일 | 줄 수 |
 | --- | ---: |
 | `src/ui/app/mod.rs` | 3,440 |
 | `src/ui/app/symbols.rs` | 3,110 |
@@ -42,112 +40,75 @@ The Rust source tree contains 34,845 lines. The largest files are:
 | `src/export/svg.rs` | 1,137 |
 | `src/engine/mna/dc.rs` | 1,034 |
 
-These concentrations identify the first extraction targets; line count alone
-is not treated as proof that a module is incorrectly designed.
+이 집중도는 우선 추출 대상을 찾는 기준일 뿐, 줄 수만으로 모듈 설계가 잘못되었다고 판단하지 않는다.
 
-## State ownership at baseline
+## 기준선의 상태 소유권
 
-| State | Current owner | Boundary defect |
+| 상태 | 현재 소유자 | 경계 결함 |
 | --- | --- | --- |
-| Persistent schematic and PCB | `model::project::ProjectDocument` | The type exists, but fields remain crate-visible and `CircuitApp` exposes them through transitional `Deref` access. |
-| Editor state | `ui::app::EditorState` | Tool/selection/drag/clipboard/history are grouped, but command handlers still receive unrestricted `&mut CircuitApp`. |
-| Derived analysis | `ui::app::AnalysisState` | Caches are grouped, but invalidation uses coarse booleans and compatibility helpers. |
-| Workspace/view state | `ui::app::WorkspaceState` plus flat `CircuitApp` fields | Several dialog, status, simulation and PCB preview fields remain on the application root. |
-| Command history | `HistoryState` | Entries are complete `CircuitSnapshot` clones in `Vec`; eviction uses `Vec::remove(0)`, and continuous merge skips snapshots rather than merging reversible deltas. |
+| 영속 회로도 및 PCB | `model::project::ProjectDocument` | 타입은 존재하지만 필드가 크레이트에 공개되어 있고 `CircuitApp`이 과도기적 `Deref` 접근으로 노출한다. |
+| 편집기 상태 | `ui::app::EditorState` | 도구/선택/드래그/클립보드/이력은 묶였지만 명령 처리기가 여전히 제한 없는 `&mut CircuitApp`을 받는다. |
+| 파생 분석 | `ui::app::AnalysisState` | 캐시는 묶였지만 무효화가 거친 불리언과 호환 도우미를 사용한다. |
+| 작업공간/보기 상태 | `ui::app::WorkspaceState`와 평면 `CircuitApp` 필드 | 여러 대화상자, 상태, 시뮬레이션, PCB 미리보기 필드가 앱 루트에 남아 있다. |
+| 명령 이력 | `HistoryState` | 항목은 `Vec`에 저장한 전체 `CircuitSnapshot` 복제본이다. 제거에 `Vec::remove(0)`을 사용하고 연속 병합은 되돌릴 수 있는 델타 병합 대신 스냅샷을 건너뛴다. |
 
-`EditorCommand::apply(self, &mut CircuitApp)` is the principal ownership leak:
-every command can currently mutate UI state, caches and persistence data, not
-only the document fields it owns.
+`EditorCommand::apply(self, &mut CircuitApp)`가 주요 소유권 누출 지점이다. 현재 모든 명령이
+자신이 소유한 문서 필드뿐 아니라 UI 상태, 캐시, 영속 데이터까지 변경할 수 있다.
 
-## Persistent mutation audit
+## 영속 데이터 변경 감사
 
-Searches covered writes to component, wire, page, junction and PCB collections
-outside model/storage/test code. There are 51 syntactic candidates, including
-derived caches and builders. Confirmed user-document mutation paths are:
+모델/저장/테스트 코드 밖에서 부품, 배선, 페이지, 접합점, PCB 컬렉션에 쓰는 경로를 검색했다.
+파생 캐시와 빌더를 포함해 문법상 후보가 51개였으며 확인된 사용자 문서 변경 경로는 다음과 같다.
 
-- schematic component and wire helpers in `src/app/actions.rs`, invoked by
-  commands but still implemented on the unrestricted application object;
-- PCB footprint/track/via/outline edits and route helpers in
-  `src/app/actions.rs`;
-- page add/remove and current-page materialization in `src/app/actions.rs`;
-- `pcb::board::Board::update_from_schematic`, called from UI orchestration;
-- compatibility conversion and endpoint migration during load, which are
-  intentionally allowed at the persistence boundary.
+- 명령이 호출하지만 제한 없는 앱 객체에 구현된 `src/app/actions.rs`의 회로도 부품/배선 도우미
+- `src/app/actions.rs`의 PCB 풋프린트/트랙/비아/외곽선 편집 및 라우팅 도우미
+- `src/app/actions.rs`의 페이지 추가/제거 및 현재 페이지 구체화
+- UI 오케스트레이션에서 호출하는 `pcb::board::Board::update_from_schematic`
+- 영속성 경계에서 의도적으로 허용하는 불러오기 중 호환 변환 및 끝점 마이그레이션
 
-UI rendering code does not currently contain a confirmed direct write to the
-schematic `components` or `wires` collections. This is useful progress, but it
-is not enforceable while document fields and the `Deref` compatibility layer
-remain crate-visible.
+현재 UI 렌더링 코드에는 회로도 `components` 또는 `wires` 컬렉션에 직접 쓰는 확인된 경로가 없다.
+유의미한 진전이지만 문서 필드와 `Deref` 호환 계층이 크레이트에 공개된 동안은 강제할 수 없다.
 
-## Panic and placeholder audit
+## 패닉 및 자리표시자 감사
 
-- The tree contains 263 explicit `.unwrap()`/`.expect()` calls. Most occur in
-  tests. Product-reachable exceptions include poisoned custom-part registry
-  mutex handling and one checked current-flow invariant.
-- `#[allow(dead_code)]` appears throughout command, simulation, storage,
-  export, CAD and PCB modules. Several annotations protect UI-inaccessible PCB
-  command variants, so they are treated as evidence of incomplete workflows,
-  not harmless cleanup.
-- `LessonCommand::Noop` is a real no-op command placeholder.
-- A Breadboard status string contains the word `TODO`; it is user-facing copy,
-  not executable placeholder behavior.
+- 트리에는 명시적 `.unwrap()`/`.expect()` 호출이 263개 있으며 대부분 테스트에 있다. 제품에서 도달 가능한 예외는 오염된 사용자 부품 레지스트리 뮤텍스 처리와 검사된 전류 흐름 불변 조건 1건이다.
+- 명령, 시뮬레이션, 저장, 내보내기, CAD, PCB 모듈 전반에 `#[allow(dead_code)]`가 있다. 일부는 UI에서 접근 불가능한 PCB 명령 변형을 보호하므로 단순 정리가 아니라 미완료 흐름의 증거로 본다.
+- `LessonCommand::Noop`은 실제 무동작 명령 자리표시자다.
+- 브레드보드 상태 문자열의 `TODO`는 사용자용 문구이며 실행 가능한 자리표시 동작은 아니다.
 
-## Connectivity, ERC and PCB baseline
+## 연결성, ERC, PCB 기준선
 
-- `CanonicalConnectivity` is the shared result type and the connectivity
-  module names geometry, label, union-find and diagnostics stages.
-- The builder remains concentrated in `engine/netlist.rs`; stage boundaries
-  are not yet independently cacheable and no spatial index protects the hot
-  geometry paths.
-- ERC remains a 2,829-line module. A registry exists, but rule isolation and
-  UI-independent diagnostics are incomplete.
-- PCB has persisted two-layer primitives and data-level command variants, but
-  the reachable UI is still a bottom-dock preview. Move/rotate/route/via and
-  layer-aware editing are not a dedicated workspace.
-- Ratsnest generation chains footprint identifiers per net. It does not yet
-  compute remaining copper islands, so partial routing can report misleading
-  airwires.
+- `CanonicalConnectivity`가 공유 결과 타입이며 연결성 모듈은 형상, 라벨, union-find, 진단 단계를 구분한다.
+- 빌더는 `engine/netlist.rs`에 집중되어 있다. 단계 경계를 아직 독립적으로 캐시할 수 없고 공간 인덱스가 빈번한 형상 경로를 보호하지 않는다.
+- ERC는 2,829줄 모듈이다. 레지스트리는 있지만 규칙 격리와 UI 독립 진단은 미완성이다.
+- PCB는 영속 2레이어 기본 요소와 데이터 수준 명령 변형을 갖지만 접근 가능한 UI는 하단 도크 미리보기뿐이다. 이동/회전/라우팅/비아 및 레이어 인식 편집을 위한 전용 작업공간이 없다.
+- 랫츠네스트 생성은 네트별 풋프린트 식별자를 사슬처럼 잇는다. 남은 동박 아일랜드를 계산하지 않아 부분 라우팅에서 잘못된 에어와이어를 보고할 수 있다.
 
-## Compatibility baseline
+## 호환성 기준선
 
-- Schematic save format: schema 4, including typed optional wire endpoints and
-  legacy endpoint migration.
-- CAD project, board and library catalog: schema 1.
-- Custom-part format: schema 2 with compatible loading of schema 1.
-- Persistence uses schema DTOs; runtime ownership and command-history changes
-  must not alter those DTOs without an explicit migration.
+- 회로도 저장 형식: 타입 지정 선택적 배선 끝점과 레거시 끝점 마이그레이션을 포함한 스키마 4.
+- CAD 프로젝트, 보드, 라이브러리 카탈로그: 스키마 1.
+- 사용자 부품 형식: 스키마 1 호환 불러오기를 지원하는 스키마 2.
+- 영속성은 스키마 DTO를 사용한다. 런타임 소유권과 명령 이력 변경은 명시적 마이그레이션 없이 DTO를 바꾸면 안 된다.
 
-## Immediate execution order
+## 즉시 실행 순서
 
-1. Repair the recorded compiler/Clippy failures and restore a warning-free
-   baseline.
-2. Restrict command mutation through `CommandContext` and replace coarse dirty
-   booleans with typed invalidation.
-3. Replace snapshot history with memory-bounded reversible deltas.
-4. Remove remaining persistent mutation paths outside commands and migration.
-5. Build the dedicated PCB workspace and route state machine on that boundary.
+1. 기록된 컴파일러/Clippy 실패를 수정하고 경고 없는 기준선을 복원한다.
+2. `CommandContext`로 명령 변경 범위를 제한하고 거친 변경 불리언을 타입 지정 무효화로 교체한다.
+3. 스냅샷 이력을 메모리 제한이 있는 되돌릴 수 있는 델타로 교체한다.
+4. 명령과 마이그레이션 밖에 남은 영속 데이터 변경 경로를 제거한다.
+5. 해당 경계 위에 전용 PCB 작업공간과 라우팅 상태 머신을 구축한다.
 
-## 2026-07-18 implementation update
+## 2026-07-18 구현 업데이트
 
-- Replaced the runtime five-element page tuple with `ProjectPage`.
-- Added page-owned `SchematicAnnotations`; junction and no-connect records now
-  survive page switching, history snapshots, autosave, JSON save/load and
-  project-folder save/load.
-- Kept schematic JSON at schema 4. Existing `junction_dots` and
-  `no_connect_markers` fields are still read and written, so no file migration
-  is required.
-- Invalid or duplicate annotation records are dropped with load notes instead
-  of causing a panic.
-- The revision-cached app connectivity builder now passes document annotations
-  into the canonical graph. ERC, simulation, current-flow, Breadboard, PCB,
-  SPICE and code generation therefore consume the same annotated projection.
-- `CanonicalConnectivity` now exposes both legacy coordinate-to-net mapping and
-  stable `JunctionId`-to-`NetId` mapping.
-- Regression coverage verifies exact pin, junction-id, junction-position,
-  wire-segment and wire net equality after JSON round trips, plus independent
-  annotations on multiple pages.
+- 런타임 5요소 페이지 튜플을 `ProjectPage`로 교체했다.
+- 페이지 소유 `SchematicAnnotations`를 추가했다. 접합점과 미연결 기록이 페이지 전환, 이력 스냅샷, 자동 저장, JSON 저장/불러오기, 프로젝트 폴더 저장/불러오기를 거쳐 보존된다.
+- 회로도 JSON을 스키마 4로 유지했다. 기존 `junction_dots`와 `no_connect_markers` 필드를 계속 읽고 쓰므로 파일 마이그레이션은 필요 없다.
+- 잘못되거나 중복된 주석 기록은 패닉 대신 불러오기 메모와 함께 제외한다.
+- 리비전 캐시 앱 연결성 빌더가 문서 주석을 정규 그래프에 전달한다. 따라서 ERC, 시뮬레이션, 전류 흐름, 브레드보드, PCB, SPICE, 코드 생성이 같은 주석 포함 투영을 소비한다.
+- `CanonicalConnectivity`는 레거시 좌표→네트 매핑과 안정적인 `JunctionId`→`NetId` 매핑을 모두 노출한다.
+- 회귀 테스트는 JSON 왕복 뒤 정확한 핀, 접합점 ID, 접합점 위치, 배선 선분, 배선 네트 동등성과 다중 페이지의 독립 주석을 검증한다.
 
-Remaining Phase 2 work is deliberately not reported as complete: the canvas
-still needs explicit junction/no-connect authoring commands and interaction
-states. The compatibility `CircuitApp` dereference boundary and the main
-builder body in `engine/netlist.rs` also remain extraction targets.
+남은 2단계 작업은 의도적으로 완료로 보고하지 않는다. 캔버스에는 명시적 접합점/미연결 작성
+명령과 상호작용 상태가 더 필요하다. 호환 `CircuitApp` 역참조 경계와 `engine/netlist.rs`의
+주요 빌더 본문도 추출 대상으로 남아 있다.

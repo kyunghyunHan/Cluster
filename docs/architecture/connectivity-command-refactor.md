@@ -1,95 +1,82 @@
-# Connectivity and command refactor
+# 연결성 및 명령 리팩터링
 
-## Scope
+## 범위
 
-This document records the pre-refactor responsibilities and the staged migration used to make
-schematic connectivity authoritative without changing user-visible features or the saved JSON
-format. The compatibility boundary remains `SavedCircuit`; runtime connectivity is derived data.
+이 문서는 사용자에게 보이는 기능이나 저장 JSON 형식을 바꾸지 않으면서 회로도 연결성을
+단일 기준으로 만들기 위해, 리팩터링 전 책임과 단계별 이전 과정을 기록한다. 호환성 경계는
+계속 `SavedCircuit`이며, 런타임 연결성은 파생 데이터다.
 
-## Responsibilities before the refactor
+## 리팩터링 전 책임
 
-| Area | Existing responsibility | Dependencies and problems |
+| 영역 | 기존 책임 | 의존성과 문제점 |
 | --- | --- | --- |
-| `src/app/actions.rs` | IDs/labels, component and wire edits, ERC repairs, Breadboard actions, PCB sync/DRC/export, document save/load/migration, exports, page management, cache access | A 2,391-line `CircuitApp` implementation. Document mutations, UI status, persistence, derived-data caches, and PCB policy are coupled. |
-| `src/editor/*` | Undo/redo snapshots; command/selection/wiring placeholders | `commands.rs`, `selection.rs`, and `wiring.rs` contain no command implementation. History calls back into methods implemented in `actions.rs`. |
-| `src/model/circuit.rs` | Persistent DTOs and runtime snapshots | Pages use a compatibility tuple and annotations are persisted separately from runtime page state. |
-| `src/model/wire.rs` | Wire geometry, typed endpoints, saved endpoint conversion, segment hit testing | Geometry and electrical endpoint identity coexist correctly, but several consumers ignore `WireEndpoint` and infer contact from positions again. |
-| `src/model/net.rs` | `CircuitNetlist`, annotations, net/pin/segment projection types | `Net.id` is an untyped `usize`; it is a generated projection rather than the authoritative graph. |
-| `src/model/graph.rs` | Explicit node/segment/pin graph and a union-find builder | The builder is not authoritative: `engine/netlist.rs` invokes it only for segment projection and then independently rebuilds nodes, labels, union-find roots, nets, and pin mappings. |
-| `src/engine/netlist.rs` | Single/multi-page geometry interpretation, label merging, net generation, diagnostics, and tests | Duplicates graph construction. Pin association partly uses positions, so typed endpoints and consumer results can diverge. |
-| `src/engine/validation.rs` | Beginner ERC and DC-result checks | Mostly consumes `CircuitNetlist`, which is good, but it inherits whichever connectivity interpretation produced that projection. |
-| `src/engine/simulation.rs` | Public simulation facade | Delegates to `ui/app/energize.rs`; simulation ownership is inverted into UI code. |
-| `src/ui/app/energize.rs` | Connectivity reachability and current-flow analysis | Builds another coordinate graph through `CircuitNodes`, `wire_contact_points`, and `connect_wire_contacts`; this can disagree with ERC/netlist. |
-| `src/engine/transient.rs` | Narrow RC/PWM transient solver | Calls `build_circuit_netlist` internally, causing an independent rebuild. |
-| `src/export/spice.rs` | SPICE text generation | Calls `build_circuit_netlist` internally, causing an independent rebuild. |
-| `src/pcb/*` | Board model, schematic footprint sync, ratsnest, DRC, layers/tracks/vias | Consumes `CadNet`; conversion is initiated from `actions.rs`, so agreement with schematic connectivity depends on the conversion path. |
+| `src/app/actions.rs` | ID/라벨, 부품 및 배선 편집, ERC 수정, 브레드보드 작업, PCB 동기화/DRC/내보내기, 문서 저장/불러오기/마이그레이션, 페이지 관리, 캐시 접근 | 2,391줄의 `CircuitApp` 구현이다. 문서 변경, UI 상태, 영속성, 파생 데이터 캐시, PCB 정책이 결합되어 있다. |
+| `src/editor/*` | 실행 취소/다시 실행 스냅샷, 명령/선택/배선 자리표시자 | `commands.rs`, `selection.rs`, `wiring.rs`에 명령 구현이 없다. 이력 기능이 `actions.rs`의 메서드를 다시 호출한다. |
+| `src/model/circuit.rs` | 영속 DTO와 런타임 스냅샷 | 페이지가 호환성 튜플을 사용하고, 주석은 런타임 페이지 상태와 별도로 저장된다. |
+| `src/model/wire.rs` | 배선 형상, 타입 지정 끝점, 저장 끝점 변환, 선분 적중 검사 | 형상과 전기적 끝점 식별자가 올바르게 공존하지만, 일부 소비자가 `WireEndpoint`를 무시하고 위치에서 접점을 다시 추론한다. |
+| `src/model/net.rs` | `CircuitNetlist`, 주석, 네트/핀/선분 투영 타입 | `Net.id`는 타입이 없는 `usize`이며, 단일 기준 그래프가 아니라 생성된 투영이다. |
+| `src/model/graph.rs` | 명시적 노드/선분/핀 그래프와 union-find 빌더 | 빌더가 단일 기준이 아니다. `engine/netlist.rs`가 선분 투영에만 사용한 뒤 노드, 라벨, union-find 루트, 네트, 핀 매핑을 독립적으로 다시 만든다. |
+| `src/engine/netlist.rs` | 단일/다중 페이지 형상 해석, 라벨 병합, 네트 생성, 진단, 테스트 | 그래프 구성을 중복한다. 핀 연결 일부가 위치를 사용하므로 타입 지정 끝점과 소비자 결과가 달라질 수 있다. |
+| `src/engine/validation.rs` | 초보자용 ERC와 DC 결과 검사 | 대부분 `CircuitNetlist`를 소비하지만, 그 투영을 만든 연결성 해석을 그대로 물려받는다. |
+| `src/engine/simulation.rs` | 공개 시뮬레이션 퍼사드 | `ui/app/energize.rs`에 위임하여 시뮬레이션 소유권이 UI 코드로 역전되어 있다. |
+| `src/ui/app/energize.rs` | 연결 도달성과 전류 흐름 분석 | `CircuitNodes`, `wire_contact_points`, `connect_wire_contacts`로 별도 좌표 그래프를 만들어 ERC/네트리스트와 불일치할 수 있다. |
+| `src/engine/transient.rs` | 제한적인 RC/PWM 과도 해석기 | 내부에서 `build_circuit_netlist`를 호출하여 독립적으로 다시 구성한다. |
+| `src/export/spice.rs` | SPICE 텍스트 생성 | 내부에서 `build_circuit_netlist`를 호출하여 독립적으로 다시 구성한다. |
+| `src/pcb/*` | 보드 모델, 회로도 풋프린트 동기화, 랫츠네스트, DRC, 레이어/트랙/비아 | `CadNet`을 소비한다. 변환이 `actions.rs`에서 시작되므로 회로도 연결성과의 일치는 변환 경로에 좌우된다. |
 
-Additional mutation audit:
+추가 변경 경로 감사:
 
-- Normal editing mutations are concentrated in `actions.rs`, but paste in `ui/app/mod.rs` pushes
-  components and wires directly.
-- Tests intentionally construct fixtures by mutating public-within-crate vectors; production UI
-  must instead dispatch an editor command.
-- `same_net_wires` performs a fourth geometry traversal for hover highlighting.
-- `connected_pin_positions` performs another geometry interpretation for rendering.
+- 일반 편집 변경은 `actions.rs`에 모여 있지만 `ui/app/mod.rs`의 붙여넣기는 부품과 배선을 직접 추가한다.
+- 테스트는 의도적으로 크레이트 내부 공개 벡터를 변경해 픽스처를 만들지만, 실제 UI는 편집기 명령을 디스패치해야 한다.
+- `same_net_wires`는 마우스 오버 강조를 위해 네 번째 형상 순회를 수행한다.
+- `connected_pin_positions`는 렌더링을 위해 형상을 또다시 해석한다.
 
-## Target dependency direction
+## 목표 의존성 방향
 
 ```text
-UI intent
+UI 의도
   -> EditorCommand
   -> commands::{component,wiring,selection,properties,document,pcb,lessons}
-  -> Circuit document mutation + CommandDirtyState
+  -> 회로 문서 변경 + CommandDirtyState
   -> cached CanonicalConnectivity
-       -> CircuitNetlist compatibility projection
+       -> CircuitNetlist 호환성 투영
        -> ERC
-       -> DC / transient / current-flow
-       -> Breadboard View / code generation
+       -> DC / 과도 해석 / 전류 흐름
+       -> 브레드보드 보기 / 코드 생성
        -> CAD nets / PCB sync
-       -> SPICE export
+       -> SPICE 내보내기
 ```
 
-No consumer may inspect wire geometry to decide electrical equivalence. Geometry remains available
-for drawing, hit testing, editing, and mapping a canonical net back to source wire segments.
+어떤 소비자도 전기적 동등성을 결정하기 위해 배선 형상을 직접 검사해서는 안 된다. 형상은 그리기,
+적중 검사, 편집, 정규 네트를 원본 배선 선분으로 매핑하는 용도로만 사용한다.
 
-## Canonical connectivity build stages
+## 정규 연결성 구성 단계
 
-1. **Geometry normalization**: discard degenerate spans, preserve source wire/segment identity, and
-   establish deterministic input ordering without mutating saved geometry.
-2. **Explicit endpoint resolution**: resolve `WireEndpoint::Pin`, `Junction`, and `FreePoint`; legacy
-   free endpoints are migrated only at the load boundary.
-3. **Junction resolution**: split at wire endpoints on wire interiors and explicit junction dots;
-   crossings without a dot remain separate.
-4. **Net-label resolution**: collect normalized names and local/page/global scope.
-5. **Multi-page/global merge**: merge page labels only within their declared scope and merge GND
-   globally.
-6. **Union-find connectivity**: union only normalized segments, resolved junction contacts, and
-   label groups.
-7. **Canonical net generation**: sort stable member keys before assigning `NetId`, names, pin,
-   junction, source-wire, and wire-segment mappings.
-8. **Connectivity diagnostics**: record unresolved endpoints, degenerate/floating segments,
-   duplicate labels, and invalid annotation references without aborting graph construction.
+1. **형상 정규화**: 퇴화 구간을 버리고 원본 배선/선분 식별자를 보존하며, 저장 형상을 변경하지 않고 결정적인 입력 순서를 만든다.
+2. **명시적 끝점 해석**: `WireEndpoint::Pin`, `Junction`, `FreePoint`를 해석한다. 레거시 자유 끝점은 불러오기 경계에서만 마이그레이션한다.
+3. **접합점 해석**: 배선 내부에 닿는 배선 끝점과 명시적 접합점에서 분할한다. 점 없는 교차는 분리된 상태로 둔다.
+4. **네트 라벨 해석**: 정규화된 이름과 로컬/페이지/전역 범위를 수집한다.
+5. **다중 페이지/전역 병합**: 페이지 라벨은 선언된 범위 안에서만 병합하고 GND는 전역 병합한다.
+6. **Union-find 연결**: 정규화된 선분, 해석된 접합점 접촉, 라벨 그룹만 합친다.
+7. **정규 네트 생성**: 안정적인 멤버 키를 정렬한 뒤 `NetId`, 이름, 핀, 접합점, 원본 배선, 배선 선분 매핑을 할당한다.
+8. **연결성 진단**: 그래프 구성을 중단하지 않고 해석 불가 끝점, 퇴화/부동 선분, 중복 라벨, 잘못된 주석 참조를 기록한다.
 
-## Staged implementation plan
+## 단계별 구현 계획
 
-Each stage must compile and preserve all prior tests.
+각 단계는 컴파일되어야 하며 기존 테스트를 모두 유지해야 한다.
 
-1. Introduce the canonical graph API and make `CircuitNetlist` a lossless compatibility projection.
-2. Add exact mapping and determinism regression tests for the requested connection cases.
-3. Pass one cached graph/projection into simulation, transient, exports, Breadboard, and PCB paths;
-   remove their internal connectivity rebuilds.
-4. Introduce `EditorCommand` and `CommandDirtyState`, with one dispatcher owning history and cache
-   invalidation.
-5. Extract existing `CircuitApp` methods into role modules under `src/commands/`, beginning with
-   mutations and leaving thin compatibility wrappers where UI call-site churn would be risky.
-6. Replace production UI vector mutation (notably paste) with commands.
-7. Run format, check, tests, clippy, and release build as proportional final verification.
+1. 정규 그래프 API를 도입하고 `CircuitNetlist`를 무손실 호환성 투영으로 만든다.
+2. 요구된 연결 사례에 정확한 매핑 및 결정성 회귀 테스트를 추가한다.
+3. 캐시된 그래프/투영 하나를 시뮬레이션, 과도 해석, 내보내기, 브레드보드, PCB 경로에 전달하고 내부 재구성을 제거한다.
+4. `EditorCommand`와 `CommandDirtyState`를 도입하고 하나의 디스패처가 이력과 캐시 무효화를 소유하게 한다.
+5. 기존 `CircuitApp` 메서드를 변경 작업부터 `src/commands/` 아래 역할별 모듈로 옮긴다. UI 호출부 변경 위험이 큰 곳에는 얇은 호환 래퍼를 남긴다.
+6. 실제 UI의 벡터 직접 변경, 특히 붙여넣기를 명령으로 교체한다.
+7. 최종 검증으로 포맷, 검사, 테스트, clippy, 릴리스 빌드를 수행한다.
 
-## Compatibility constraints
+## 호환성 제약
 
-- Do not serialize the canonical graph; rebuild it from the existing document fields after load.
-- Preserve current schema parsing and legacy endpoint repair.
-- Stable IDs are derived deterministically but are not persisted, so old files remain readable.
-- Invalid endpoints become diagnostics and electrically floating nodes rather than panics.
-- Existing exports and simulations keep their public compatibility entry points for tests and
-  callers, while app/runtime paths use the cached canonical result.
+- 정규 그래프는 직렬화하지 않고, 불러온 뒤 기존 문서 필드에서 다시 구성한다.
+- 현재 스키마 파싱과 레거시 끝점 복구를 보존한다.
+- 안정적인 ID는 결정적으로 파생하지만 저장하지 않으므로 기존 파일을 계속 읽을 수 있다.
+- 잘못된 끝점은 패닉 대신 진단과 전기적 부동 노드가 된다.
+- 기존 내보내기와 시뮬레이션은 테스트 및 호출자를 위한 공개 호환 진입점을 유지하되, 앱/런타임 경로는 캐시된 정규 결과를 사용한다.

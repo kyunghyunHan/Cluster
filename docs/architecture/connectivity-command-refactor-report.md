@@ -1,97 +1,85 @@
-# Connectivity and command refactor report
+# 연결성 및 명령 리팩터링 보고서
 
-## Problems before the change
+## 변경 전 문제점
 
-- `model::graph`, `engine::netlist`, DC MNA, AC MNA, current-flow analysis, hover highlighting,
-  connected-pin rendering, transient analysis, and SPICE export could each reinterpret wire
-  geometry independently.
-- A typed `WireEndpoint::Pin` could be ignored in favor of stale coordinates after a move/rotation.
-- `CircuitApp` cached only a netlist projection, not the authoritative connectivity result.
-- Production UI paths directly edited `components` and `wires`, and dirty/history behavior depended
-  on each call site remembering the correct sequence.
-- `actions.rs` mixed mutation logic with derived analysis, export, persistence, PCB, and UI status.
+- `model::graph`, `engine::netlist`, DC MNA, AC MNA, 전류 흐름 분석, 마우스 오버 강조,
+  연결 핀 렌더링, 과도 해석, SPICE 내보내기가 각각 배선 형상을 독립적으로 재해석할 수 있었다.
+- 타입 지정 `WireEndpoint::Pin`이 이동/회전 뒤 오래된 좌표보다 우선되지 않을 수 있었다.
+- `CircuitApp`은 단일 기준 연결성 결과가 아니라 네트리스트 투영만 캐시했다.
+- 실제 UI 경로가 `components`와 `wires`를 직접 수정했으며, 변경/이력 동작은 각 호출부가 올바른 순서를 기억하는 데 의존했다.
+- `actions.rs`가 변경 로직과 파생 분석, 내보내기, 영속성, PCB, UI 상태를 섞었다.
 
-## New module structure
+## 새 모듈 구조
 
-- `model/graph.rs`: `CanonicalConnectivity`, `NetId`, exact pin/junction/segment maps, diagnostics.
-- `engine/netlist.rs`: the staged canonical builder and compatibility `CircuitNetlist` projection.
-- `commands/mod.rs`: `EditorCommand`, dispatcher, and six-field `CommandDirtyState`.
-- `commands/component.rs`: place, paste, and move commands.
-- `commands/wiring.rs`: add, control-point move, and tidy commands.
-- `commands/selection.rs`: delete, rotate, duplicate, align, and distribute commands.
-- `commands/properties.rs`: value/label edits and switch state changes.
-- `commands/document.rs`: document reset command.
-- `commands/pcb.rs` and `commands/lessons.rs`: reserved command boundaries for the next extraction;
-  existing PCB/persistence/lesson compatibility methods remain callable while migration continues.
+- `model/graph.rs`: `CanonicalConnectivity`, `NetId`, 정확한 핀/접합점/선분 맵, 진단.
+- `engine/netlist.rs`: 단계별 정규 빌더와 호환성 `CircuitNetlist` 투영.
+- `commands/mod.rs`: `EditorCommand`, 디스패처, 6필드 `CommandDirtyState`.
+- `commands/component.rs`: 배치, 붙여넣기, 이동 명령.
+- `commands/wiring.rs`: 추가, 제어점 이동, 정리 명령.
+- `commands/selection.rs`: 삭제, 회전, 복제, 정렬, 분배 명령.
+- `commands/properties.rs`: 값/라벨 편집과 스위치 상태 변경.
+- `commands/document.rs`: 문서 초기화 명령.
+- `commands/pcb.rs`, `commands/lessons.rs`: 다음 추출을 위해 예약한 명령 경계. 마이그레이션 중에는 기존 PCB/영속성/학습 호환 메서드를 계속 호출할 수 있다.
 
-`actions.rs` is 370 lines smaller and its primary interactive mutation bodies have moved to command
-modules. Persistence, page lifecycle, lesson setup, and PCB orchestration remain compatibility
-services there; moving them is the recommended next mechanical extraction.
+`actions.rs`는 370줄 줄었고 주요 대화형 변경 구현은 명령 모듈로 이동했다. 영속성, 페이지
+수명 주기, 학습 설정, PCB 오케스트레이션은 호환 서비스로 남아 있으며 다음 기계적 추출 대상으로 권장한다.
 
-## Removed duplicate logic
+## 제거한 중복 로직
 
-- Removed the second union-find and net generator formerly compiled in `model::graph.rs`.
-- DC and AC MNA now initialize their net maps from `CanonicalConnectivity`.
-- Current-flow reachability now joins canonical net members instead of rebuilding wire contacts.
-- Hover net highlighting and connected-pin rendering use the cached canonical projection.
-- Runtime transient, ERC, PCB/codegen, and SPICE export paths receive the same cached projection.
-- Production UI no longer directly mutates schematic component/wire collections.
+- 과거 `model::graph.rs`에서 컴파일되던 두 번째 union-find와 네트 생성기를 제거했다.
+- DC 및 AC MNA가 이제 `CanonicalConnectivity`에서 네트 맵을 초기화한다.
+- 전류 흐름 도달성은 배선 접점을 다시 만들지 않고 정규 네트 멤버를 연결한다.
+- 마우스 오버 네트 강조와 연결 핀 렌더링이 캐시된 정규 투영을 사용한다.
+- 런타임 과도 해석, ERC, PCB/코드 생성, SPICE 내보내기 경로가 동일한 캐시 투영을 받는다.
+- 실제 UI는 더 이상 회로도 부품/배선 컬렉션을 직접 변경하지 않는다.
 
-Compatibility wrappers used by tests or external-in-crate callers may still build a graph when no
-cached graph is supplied; runtime `CircuitApp` paths pass the cached graph explicitly.
+테스트나 크레이트 내부 외부 호출자가 사용하는 호환 래퍼는 캐시 그래프가 없을 때 그래프를
+구성할 수 있지만, 런타임 `CircuitApp` 경로는 캐시 그래프를 명시적으로 전달한다.
 
-## Canonical flow
+## 정규 처리 흐름
 
-1. Normalize geometry and diagnose degenerate wires.
-2. Resolve typed pin endpoints, including stale geometry after component movement/rotation.
-3. Resolve T-junctions and explicit junction dots; do not join unmarked crossings.
-4. Normalize local/page/global labels.
-5. Merge scoped labels and global GND.
-6. Run the single union-find connectivity pass.
-7. Generate deterministic nets plus exact pin, annotation, source-wire, and raw-segment mappings.
-8. Emit non-fatal connectivity diagnostics.
+1. 형상을 정규화하고 퇴화 배선을 진단한다.
+2. 부품 이동/회전 뒤 오래된 형상까지 고려하여 타입 지정 핀 끝점을 해석한다.
+3. T 접합과 명시적 접합점을 해석하고 표시 없는 교차는 연결하지 않는다.
+4. 로컬/페이지/전역 라벨을 정규화한다.
+5. 범위 지정 라벨과 전역 GND를 병합한다.
+6. 단일 union-find 연결성 패스를 실행한다.
+7. 결정적 네트와 정확한 핀, 주석, 원본 배선, 원시 선분 매핑을 생성한다.
+8. 치명적이지 않은 연결성 진단을 출력한다.
 
-The graph is revision-cached on `CircuitApp`; it is derived data and is intentionally absent from
-the saved JSON schema.
+그래프는 `CircuitApp`에서 리비전별로 캐시한다. 파생 데이터이므로 저장 JSON 스키마에는 의도적으로 포함하지 않는다.
 
-## Regression coverage
+## 회귀 테스트 범위
 
-Coverage now includes:
+현재 다음 항목을 검사한다.
 
-- direct pin-to-pin typed wire with exact pin and segment mapping;
-- crossing without junction and crossing with exact junction mapping;
-- T-junction, middle branch, overlapping collinear wires, and multiple branches at one junction;
-- component body endpoint and unrelated pin overflight remaining disconnected;
-- typed endpoint connectivity after component move and rotation;
-- legacy endpoint migration preserving canonical mappings;
-- local/page/global labels, same label across pages, and duplicate-label diagnostics;
-- floating/isolated wires;
-- deterministic exact pin/junction/segment signatures;
-- save/load equality for pin, junction, segment, and wire maps;
-- ERC/code generation/PCB conversion consuming the same projection;
-- command dirty-state completeness, history ownership, and cache invalidation.
+- 정확한 핀 및 선분 매핑을 가진 핀 간 타입 지정 배선
+- 접합점 없는 교차와 정확한 접합점 매핑이 있는 교차
+- T 접합, 중간 분기, 겹치는 동일 직선 배선, 한 접합점의 여러 분기
+- 부품 몸체 끝점과 무관한 핀 위를 지나는 배선이 연결되지 않는지 여부
+- 부품 이동 및 회전 뒤 타입 지정 끝점 연결성
+- 정규 매핑을 보존하는 레거시 끝점 마이그레이션
+- 로컬/페이지/전역 라벨, 페이지 간 동일 라벨, 중복 라벨 진단
+- 부동/고립 배선
+- 결정적이고 정확한 핀/접합점/선분 시그니처
+- 핀, 접합점, 선분, 배선 맵의 저장/불러오기 동등성
+- 동일 투영을 소비하는 ERC/코드 생성/PCB 변환
+- 명령 변경 상태의 완전성, 이력 소유권, 캐시 무효화
 
-All pre-existing tests remain enabled.
+기존 테스트도 모두 활성 상태로 유지한다.
 
-## Remaining risks
+## 남은 위험
 
-- `PinRef` identifies a pin by component ID and display name. Components with repeated physical pin
-  names are intentionally merged; a future physical-pin UUID/number should remove that ambiguity.
-- Runtime page annotations are still represented by compatibility storage fields; a first-class
-  `SchematicPage` should own junctions, no-connects, and label scopes.
-- `CircuitNetlist` still exposes `usize` IDs for compatibility. A later API cleanup should make the
-  `NetId` newtype non-aliasing across documents/revisions.
-- Undo for continuous drag uses one snapshot captured at drag start while intermediate command
-  updates skip extra snapshots. Pointer-cancel behavior deserves an explicit UI regression test.
-- Persistence, multi-page lifecycle, PCB orchestration, and lesson/demo construction are the
-  largest responsibilities still resident in `actions.rs`.
+- `PinRef`는 부품 ID와 표시 이름으로 핀을 식별한다. 물리 핀 이름이 반복되는 부품은 의도적으로 병합되며, 향후 물리 핀 UUID/번호로 모호성을 없애야 한다.
+- 런타임 페이지 주석은 아직 호환성 저장 필드로 표현된다. 일급 `SchematicPage`가 접합점, 미연결 표시, 라벨 범위를 소유해야 한다.
+- 호환성을 위해 `CircuitNetlist`가 여전히 `usize` ID를 노출한다. 이후 API 정리에서 `NetId` 뉴타입이 문서/리비전 간에 별칭되지 않게 해야 한다.
+- 연속 드래그 실행 취소는 드래그 시작 시 캡처한 스냅샷 하나를 사용하고 중간 명령 업데이트는 추가 스냅샷을 건너뛴다. 포인터 취소 동작은 명시적 UI 회귀 테스트가 필요하다.
+- 영속성, 다중 페이지 수명 주기, PCB 오케스트레이션, 학습/데모 구성이 `actions.rs`에 남은 가장 큰 책임이다.
 
-## Recommended next refactor targets
+## 권장하는 다음 리팩터링 대상
 
-1. Extract save/load/page lifecycle and `SavedCircuit` conversion from `actions.rs` into
-   `commands/document.rs` plus a storage service.
-2. Extract PCB sync/DRC/export orchestration into `commands/pcb.rs`.
-3. Move demo/lesson document construction into `commands/lessons.rs` transactions.
-4. Move simulation implementation out of `ui/app/energize.rs` into `engine/simulation.rs`; its
-   connectivity is canonical now, but ownership is still inverted.
-5. Split `engine/validation.rs` by rule family after the graph API has remained stable.
+1. 저장/불러오기/페이지 수명 주기와 `SavedCircuit` 변환을 `actions.rs`에서 `commands/document.rs` 및 저장 서비스로 추출한다.
+2. PCB 동기화/DRC/내보내기 오케스트레이션을 `commands/pcb.rs`로 추출한다.
+3. 데모/학습 문서 구성을 `commands/lessons.rs` 트랜잭션으로 옮긴다.
+4. 시뮬레이션 구현을 `ui/app/energize.rs`에서 `engine/simulation.rs`로 옮긴다. 연결성은 정규화되었지만 소유권은 여전히 역전되어 있다.
+5. 그래프 API가 안정화된 뒤 `engine/validation.rs`를 규칙 계열별로 분리한다.
