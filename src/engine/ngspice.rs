@@ -234,7 +234,8 @@ pub(crate) fn export_ngspice_netlist(
                 }
             }
             ComponentKind::VSource | ComponentKind::Battery => {
-                let v = crate::parse_metric_value(&comp.value, "v").unwrap_or(5.0);
+                let v = crate::engine::units::parse_leading_metric_value(&comp.value, "v")
+                    .unwrap_or(5.0);
                 if let (Some(pos), Some(neg)) = (pin_node(comp.id, "+"), pin_node(comp.id, "-")) {
                     out.push_str(&format!("V{label} {pos} {neg} DC {v:.4}\n"));
                 }

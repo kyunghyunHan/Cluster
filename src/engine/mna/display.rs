@@ -8,77 +8,7 @@
 /// Examples: `"10k"` → 10 000.0,  `"100nF"` → 100e-9,  `"3.3V"` → 3.3,
 ///           `"10mA"` → 0.01,  `"1Meg"` → 1 000 000.0
 pub fn parse_si_value(s: &str) -> Option<f64> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let s = strip_unit(s);
-    if s.is_empty() {
-        return None;
-    }
-    let num_end = numeric_end(s);
-    if num_end == 0 {
-        return None;
-    }
-    let base: f64 = s[..num_end].parse().ok()?;
-    let sfx = s[num_end..].trim().to_lowercase();
-    let mult: f64 = match sfx.as_str() {
-        "t" => 1e12,
-        "g" => 1e9,
-        "meg" | "mega" => 1e6,
-        "k" => 1e3,
-        "" => 1.0,
-        "m" => 1e-3,
-        "u" | "µ" | "μ" => 1e-6,
-        "n" => 1e-9,
-        "p" => 1e-12,
-        "f" => 1e-15,
-        _ => return None,
-    };
-    Some(base * mult)
-}
-
-fn numeric_end(s: &str) -> usize {
-    let mut end = 0usize;
-    let mut dot = false;
-    let mut exp = false;
-    for (i, c) in s.char_indices() {
-        if c.is_ascii_digit() {
-            end = i + 1;
-        } else if c == '.' && !dot {
-            dot = true;
-            end = i + 1;
-        } else if (c == 'e' || c == 'E') && end > 0 && !exp {
-            exp = true;
-            end = i + 1;
-        } else if (c == '+' || c == '-') && exp && end == i {
-            end = i + 1;
-        } else {
-            break;
-        }
-    }
-    end
-}
-
-fn strip_unit(s: &str) -> &str {
-    if let Some(stripped) = s.strip_suffix('Ω') {
-        return stripped.trim_end();
-    }
-    let up = s.to_uppercase();
-    for unit in &["OHMS", "OHM", "HZ", "VAC", "VDC", "AC", "DC"] {
-        if up.ends_with(unit) && s.len() > unit.len() {
-            return s[..s.len() - unit.len()].trim_end();
-        }
-    }
-    if let Some(last) = s.chars().last()
-        && matches!(last.to_ascii_uppercase(), 'V' | 'A' | 'W' | 'F' | 'H')
-    {
-        let cut = s[..s.len() - last.len_utf8()].trim_end();
-        if !cut.is_empty() && !cut.ends_with(['e', 'E']) {
-            return cut;
-        }
-    }
-    s
+    crate::engine::units::parse_metric_value_f64(s, "")
 }
 
 pub fn format_voltage(v: f64) -> String {

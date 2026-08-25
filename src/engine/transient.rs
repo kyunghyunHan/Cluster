@@ -178,11 +178,13 @@ pub(crate) fn solve_transient_with_netlist(
 }
 
 fn source_voltage(source: &Component) -> f64 {
-    parse_metric_value(&source.value, "v").unwrap_or(if source.kind == ComponentKind::Battery {
-        9.0
-    } else {
-        5.0
-    }) as f64
+    crate::engine::units::parse_leading_metric_value(&source.value, "v").unwrap_or(
+        if source.kind == ComponentKind::Battery {
+            9.0
+        } else {
+            5.0
+        },
+    ) as f64
 }
 
 fn parse_frequency_hz(value: &str) -> Option<f64> {
@@ -334,5 +336,17 @@ mod tests {
         assert_eq!(transient.kind, TransientKind::PwmRc);
         assert!(transient.samples.iter().any(|sample| sample.source_v > 4.9));
         assert!(transient.samples.iter().any(|sample| sample.source_v < 0.1));
+    }
+
+    #[test]
+    fn pwm_source_preserves_annotated_voltage_amplitude() {
+        let source = comp(
+            1,
+            ComponentKind::VSource,
+            Pos2::ZERO,
+            "V1",
+            "3.3V PWM 1kHz 50%",
+        );
+        assert!((source_voltage(&source) - 3.3).abs() < 1e-6);
     }
 }

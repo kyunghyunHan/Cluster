@@ -446,13 +446,12 @@ fn solve_dc_profiled_internal(
                 }
             }
             ComponentKind::VSource | ComponentKind::Battery => {
-                let vv = parse_metric_value(&comp.value, "v").unwrap_or(
-                    if comp.kind == ComponentKind::Battery {
+                let vv = crate::engine::units::parse_leading_metric_value(&comp.value, "v")
+                    .unwrap_or(if comp.kind == ComponentKind::Battery {
                         9.0
                     } else {
                         5.0
-                    },
-                ) as f64;
+                    }) as f64;
                 let pos_n = pins
                     .iter()
                     .find(|p| p.role == PinRole::Positive || p.label == "+")

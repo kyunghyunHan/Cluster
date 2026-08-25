@@ -2,6 +2,7 @@
 
 use crate::engine::mna::parse_si_value;
 use crate::engine::netlist::build_circuit_netlist;
+use crate::engine::units::{normalize_spice_value, parse_leading_metric_value};
 use crate::model::component_pin_defs;
 use crate::model::{Component, ComponentKind, Wire};
 use std::collections::HashMap;
@@ -62,7 +63,7 @@ pub(crate) fn export_spice_netlist_with_netlist(
                     spice_ref(&component.label, "R"),
                     pin_net("A"),
                     pin_net("B"),
-                    spice_value(&component.value, "1k")
+                    normalize_spice_value(&component.value, "ohm", "1k")
                 ));
             }
             ComponentKind::Capacitor => {
@@ -72,7 +73,7 @@ pub(crate) fn export_spice_netlist_with_netlist(
                     spice_ref(&component.label, "C"),
                     pin_net("A"),
                     pin_net("B"),
-                    spice_value(&component.value, "100n")
+                    normalize_spice_value(&component.value, "f", "100n")
                 ));
             }
             ComponentKind::Inductor => {
@@ -82,7 +83,7 @@ pub(crate) fn export_spice_netlist_with_netlist(
                     spice_ref(&component.label, "L"),
                     pin_net("A"),
                     pin_net("B"),
-                    spice_value(&component.value, "10u")
+                    normalize_spice_value(&component.value, "h", "10u")
                 ));
             }
             ComponentKind::Battery | ComponentKind::VSource => {
@@ -92,7 +93,9 @@ pub(crate) fn export_spice_netlist_with_netlist(
                     spice_ref(&component.label, "V"),
                     pin_net("+"),
                     pin_net("-"),
-                    parse_si_value(&component.value).unwrap_or(5.0)
+                    parse_leading_metric_value(&component.value, "v")
+                        .map(f64::from)
+                        .unwrap_or(5.0)
                 ));
             }
             ComponentKind::ISource => {
@@ -203,15 +206,6 @@ fn spice_ref(label: &str, prefix: &str) -> String {
     }
 }
 
-fn spice_value(value: &str, fallback: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        fallback.to_string()
-    } else {
-        trimmed.replace('Ω', "ohm")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +247,14 @@ mod tests {
         assert!(netlist.contains("VBAT1"));
         assert!(netlist.contains(".op"));
         assert!(netlist.contains("educational"));
+    }
+
+    #[test]
+    fn spice_export_preserves_cluster_mega_semantics() {
+        let resistor = comp(1, ComponentKind::Resistor, Pos2::new(0.0, 0.0), "R1", "1M");
+        let exported = export_spice_netlist(&[resistor], &[]);
+        assert!(exported.contains("1.000000000000e6"), "{exported}");
+        assert!(!exported.contains(" 1M\n"), "{exported}");
     }
 
     #[test]

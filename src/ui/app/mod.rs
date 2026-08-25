@@ -1219,9 +1219,24 @@ impl CircuitApp {
                             );
                             ui.add_space(8.0);
                             if self.inspector_ui.active_tab == InspectorTab::Properties {
-                            if edit_row(ui, "Label", &mut component.label)
-                                || edit_row(ui, "Value", &mut component.value)
-                            {
+                            let label_changed = edit_row(ui, "Label", &mut component.label);
+                            let original_value = component.value.clone();
+                            let mut value_changed = edit_row(ui, "Value", &mut component.value);
+                            if let Some(error) = crate::engine::units::component_value_error(
+                                component.kind,
+                                &component.value,
+                            ) {
+                                ui.label(
+                                    egui::RichText::new(error)
+                                        .size(10.5)
+                                        .color(crate::ui::theme::WARNING),
+                                );
+                                if value_changed {
+                                    component.value = original_value;
+                                    value_changed = false;
+                                }
+                            }
+                            if label_changed || value_changed {
                                 inspector_changed = true;
                             }
                             // ── Value quick-pick presets ──────────────────────────
@@ -2805,20 +2820,24 @@ impl CircuitApp {
                 let cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
                 if commit {
                     let new_val = edit_text.clone();
-                    let label = self
-                        .components
-                        .iter()
-                        .find(|c| c.id == edit_id)
-                        .map(|c| c.label.clone())
-                        .unwrap_or_default();
-                    self.execute_editor_command(crate::commands::EditorCommand::Properties(
-                        crate::commands::properties::PropertiesCommand::SetComponentValue {
-                            component_id: edit_id,
-                            value: new_val,
-                        },
-                    ));
-                    self.status = format!("{} value updated.", label);
-                    self.inline_edit = None;
+                    let component = self.components.iter().find(|c| c.id == edit_id);
+                    if let Some(error) = component.and_then(|component| {
+                        crate::engine::units::component_value_error(component.kind, &new_val)
+                    }) {
+                        self.status = format!("Value not changed: {error}");
+                    } else {
+                        let label = component
+                            .map(|component| component.label.clone())
+                            .unwrap_or_default();
+                        self.execute_editor_command(crate::commands::EditorCommand::Properties(
+                            crate::commands::properties::PropertiesCommand::SetComponentValue {
+                                component_id: edit_id,
+                                value: new_val,
+                            },
+                        ));
+                        self.status = format!("{} value updated.", label);
+                        self.inline_edit = None;
+                    }
                 } else if cancel {
                     self.inline_edit = None;
                 }

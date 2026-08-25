@@ -213,6 +213,7 @@ Cluster는 Rust + egui 기반 ESP32/Arduino 학습 및 프로토타이핑 회로
 - performance probe는 ERC rules-only/value-only/topology-only와 connectivity+ERC를 분리한다. GND 없는 synthetic MNA는 `mna_prepare_no_ground_*`로 명시하고, 실제 solver-only/parameter-update는 solvable mixed fixture로 측정한다. worker는 같은 connectivity revision의 canonical 결과를 `Arc`로 재사용한다. 2026-07-23의 3회×21표본 before/after와 남은 acceptance 상태는 `docs/architecture/commercial-completion-audit-2026-07-23.md`에 기록한다.
 - PCB footprint pad lookup/spatial index/Gerber/Excellon은 공통 `FootprintTransform`을 사용하며 0/90/180/270도와 back flip 좌표를 테스트한다. Excellon은 배치 footprint drill과 실제 tool diameter를 출력한다.
 - `v*` tag release workflow가 Linux/macOS/Windows portable archive, SHA-256 checksum, 자동 release note를 생성한다.
+- 공학 값 파서는 UI/ERC/MNA/AC/SPICE 경로가 공유하며 `M`(mega)/`m`(milli), embedded 표기와 단위를 일관되게 검사한다. SPICE export는 `M` 의미 충돌을 막기 위해 과학 표기법으로 정규화한다.
 
 ## 완료 조건
 

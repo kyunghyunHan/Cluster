@@ -942,8 +942,7 @@ mod tests {
         assert!((parse_si_value("1K").unwrap() - 1_000.0).abs() < 0.1);
         assert!((parse_si_value("10kΩ").unwrap() - 10_000.0).abs() < 0.1);
         assert!((parse_si_value("4.7k").unwrap() - 4_700.0).abs() < 0.1);
-        // SPICE-compatible: bare M means milli; use Meg for mega.
-        assert!((parse_si_value("1M").unwrap() - 0.001).abs() < 1e-12);
+        assert!((parse_si_value("1M").unwrap() - 1_000_000.0).abs() < 1.0);
         assert!((parse_si_value("100nF").unwrap() - 100e-9).abs() < 1e-12);
         assert!((parse_si_value("100u").unwrap() - 100e-6).abs() < 1e-12);
         assert!((parse_si_value("100µ").unwrap() - 100e-6).abs() < 1e-12);

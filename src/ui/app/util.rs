@@ -738,32 +738,15 @@ pub(crate) fn unique_spice_name(
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn spice_value(component: &Component, fallback: &str) -> String {
-    let normalized = component.value.trim().replace(' ', "");
-    if normalized.is_empty() {
-        return fallback.to_string();
-    }
-    let lower = normalized.to_lowercase();
-    let stripped = match component.kind {
-        ComponentKind::Resistor => lower.strip_suffix("ohm").unwrap_or(&normalized),
-        ComponentKind::Capacitor => lower.strip_suffix('f').unwrap_or(&normalized),
-        ComponentKind::Inductor => lower.strip_suffix('h').unwrap_or(&normalized),
-        ComponentKind::VSource | ComponentKind::Battery => lower
-            .strip_suffix("volts")
-            .or_else(|| lower.strip_suffix("volt"))
-            .or_else(|| lower.strip_suffix('v'))
-            .unwrap_or(&normalized),
-        ComponentKind::ISource => lower
-            .strip_suffix("amps")
-            .or_else(|| lower.strip_suffix("amp"))
-            .or_else(|| lower.strip_suffix('a'))
-            .unwrap_or(&normalized),
-        _ => &normalized,
+    let unit = match component.kind {
+        ComponentKind::Resistor | ComponentKind::Potentiometer => "ohm",
+        ComponentKind::Capacitor => "f",
+        ComponentKind::Inductor => "h",
+        ComponentKind::VSource | ComponentKind::Battery => "v",
+        ComponentKind::ISource => "a",
+        _ => "",
     };
-    if stripped.trim().is_empty() {
-        fallback.to_string()
-    } else {
-        stripped.to_string()
-    }
+    crate::engine::units::normalize_spice_value(&component.value, unit, fallback)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
