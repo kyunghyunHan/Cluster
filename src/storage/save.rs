@@ -258,7 +258,10 @@ fn component_kind_short_label(kind: ComponentKind) -> &'static str {
 /// renamed over the target so a partial write does not corrupt the save file.
 pub(crate) fn write_with_backup(path: &str, content: &str) -> Result<(), String> {
     let target = Path::new(path);
-    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let parent = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     if !parent.exists() {
         return Err(format!("Save folder does not exist: {}", parent.display()));
     }
@@ -335,6 +338,24 @@ fn temporary_path_for(target: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn relative_export_filename_is_saved_with_backup() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = format!("cluster-export-test-{}-{unique}.ino", std::process::id());
+        write_with_backup(&path, "first sketch").unwrap();
+        write_with_backup(&path, "second sketch").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second sketch");
+        assert_eq!(
+            std::fs::read_to_string(format!("{path}.bak")).unwrap(),
+            "first sketch"
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(format!("{path}.bak")).unwrap();
+    }
 
     #[test]
     fn write_with_backup_replaces_file_and_keeps_previous_copy() {

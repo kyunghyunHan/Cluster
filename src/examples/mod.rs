@@ -236,6 +236,9 @@ impl crate::CircuitApp {
     pub(crate) fn load_esp32_oled_demo(&mut self) {
         self.reset_canvas();
         let battery = self.place_component(ComponentKind::Battery, Pos2::new(170.0, 380.0));
+        if let Some(source) = self.components.iter_mut().find(|c| c.id == battery) {
+            source.value = "5V".into();
+        }
         let esp32 = self.place_component(ComponentKind::Esp32, Pos2::new(430.0, 310.0));
         let oled = self.place_component(ComponentKind::Oled, Pos2::new(720.0, 300.0));
         let sda_pullup = self.place_component(ComponentKind::Resistor, Pos2::new(590.0, 150.0));
@@ -267,6 +270,9 @@ impl crate::CircuitApp {
     pub(crate) fn load_esp32_sensor_demo(&mut self) {
         self.reset_canvas();
         let battery = self.place_component(ComponentKind::Battery, Pos2::new(170.0, 380.0));
+        if let Some(source) = self.components.iter_mut().find(|c| c.id == battery) {
+            source.value = "5V".into();
+        }
         let esp32 = self.place_component(ComponentKind::Esp32, Pos2::new(430.0, 310.0));
         let sensor = self.place_component(ComponentKind::Sensor, Pos2::new(720.0, 300.0));
         let sda_pullup = self.place_component(ComponentKind::Resistor, Pos2::new(590.0, 150.0));

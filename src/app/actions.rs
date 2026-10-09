@@ -639,14 +639,106 @@ impl crate::CircuitApp {
             .map(|pin| pin.pos)
             .filter(|pin| pin.distance(a) > 4.0 && pin.distance(b) > 4.0)
             .collect::<Vec<_>>();
-        let corner = if crate::wire_path_pin_crossings(&path_h, &pin_obstacles)
-            <= crate::wire_path_pin_crossings(&path_v, &pin_obstacles)
-        {
-            corner_h
-        } else {
-            corner_v
-        };
-        self.add_wire(vec![a, corner, b]);
+        let netlist = self.current_netlist();
+        let endpoint_nets: HashSet<_> = netlist
+            .pins
+            .iter()
+            .filter(|pin| {
+                (pin.component_id == a_id && pin.position.distance(a) < 4.0)
+                    || (pin.component_id == b_id && pin.position.distance(b) < 4.0)
+            })
+            .map(|pin| pin.net_id)
+            .collect();
+        let wire_obstacles: Vec<_> = self
+            .wires
+            .iter()
+            .filter(|wire| {
+                !netlist
+                    .wire_nets
+                    .get(&wire.id)
+                    .is_some_and(|id| endpoint_nets.contains(id))
+            })
+            .collect();
+        let mut paths = vec![path_h, path_v];
+        // A two-segment route may run through another module pin. Offer paths
+        // with short outward leads and a corridor beyond all component pins.
+        let bounds = pin_obstacles
+            .iter()
+            .fold(egui::Rect::from_two_pos(a, b), |rect, point| {
+                rect.union(egui::Rect::from_min_max(*point, *point))
+            })
+            .expand(40.0);
+        for start_offset in [-20.0, 20.0] {
+            for end_offset in [-20.0, 20.0] {
+                for y in [bounds.top(), bounds.bottom()] {
+                    paths.push(vec![
+                        a,
+                        Pos2::new(a.x + start_offset, a.y),
+                        Pos2::new(a.x + start_offset, y),
+                        Pos2::new(b.x + end_offset, y),
+                        Pos2::new(b.x + end_offset, b.y),
+                        b,
+                    ]);
+                }
+                for x in [bounds.left(), bounds.right()] {
+                    paths.push(vec![
+                        a,
+                        Pos2::new(a.x, a.y + start_offset),
+                        Pos2::new(x, a.y + start_offset),
+                        Pos2::new(x, b.y + end_offset),
+                        Pos2::new(b.x, b.y + end_offset),
+                        b,
+                    ]);
+                }
+            }
+        }
+        let path = paths.into_iter().min_by(|left, right| {
+            let crossings = |path: &[Pos2]| {
+                crate::wire_path_pin_crossings(path, &pin_obstacles)
+                    + wire_obstacles
+                        .iter()
+                        .map(|wire| {
+                            let incoming_contacts = path
+                                .iter()
+                                .filter(|point| {
+                                    point.distance(a) > 4.0
+                                        && point.distance(b) > 4.0
+                                        && wire.points.windows(2).any(|segment| {
+                                            point_touches_wire_segment(
+                                                **point, segment[0], segment[1],
+                                            )
+                                        })
+                                })
+                                .count();
+                            let existing_contacts = wire
+                                .points
+                                .iter()
+                                .filter(|point| {
+                                    point.distance(a) > 4.0
+                                        && point.distance(b) > 4.0
+                                        && path.windows(2).any(|segment| {
+                                            point_touches_wire_segment(
+                                                **point, segment[0], segment[1],
+                                            )
+                                        })
+                                })
+                                .count();
+                            incoming_contacts + existing_contacts
+                        })
+                        .sum::<usize>()
+            };
+            let length = |path: &[Pos2]| {
+                path.windows(2)
+                    .map(|pair| pair[0].distance(pair[1]))
+                    .sum::<f32>()
+            };
+            crossings(left)
+                .cmp(&crossings(right))
+                .then_with(|| length(left).total_cmp(&length(right)))
+        });
+        if let Some(path) = path {
+            self.add_wire(path);
+        }
     }
 
     pub(crate) fn select_breadboard_route(
@@ -668,9 +760,37 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn connect_breadboard_route(&mut self, route: BreadboardRoute) {
-        if route.connected {
-            let netlist = self.current_netlist();
+        let netlist = self.current_netlist();
+        let from = netlist.pins.iter().find(|pin| {
+            pin.component_id == route.from_component_id && pin.pin_name == route.from_pin
+        });
+        let to = netlist
+            .pins
+            .iter()
+            .find(|pin| pin.component_id == route.to_component_id && pin.pin_name == route.to_pin);
+        let (Some(from), Some(to)) = (from, to) else {
+            self.status = "Jumper not added: pin mapping changed. Refresh Breadboard view.".into();
+            return;
+        };
+        if from.net_id == to.net_id {
             self.select_breadboard_route(&netlist, route);
+            return;
+        }
+        if netlist.pins.iter().any(|pin| {
+            pin.net_id == to.net_id
+                && ((pin.component_id == from.component_id
+                    && matches!(route.purpose, "I2C data" | "I2C clock"))
+                    || (route.purpose == "Power rail"
+                        && pin.electrical_type == crate::model::ElectricalType::Ground)
+                    || (route.purpose == "Common ground"
+                        && matches!(
+                            pin.electrical_type,
+                            crate::model::ElectricalType::PowerIn
+                                | crate::model::ElectricalType::PowerOutput
+                        )))
+        }) {
+            self.status =
+                "Jumper not added: conflicting wiring. Remove the incorrect wire first.".into();
             return;
         }
         let from_pin = route.from_pin.clone();
@@ -1560,11 +1680,15 @@ impl crate::CircuitApp {
 
     pub(crate) fn export_arduino_code(&mut self) {
         let netlist = self.current_netlist();
-        match fs::write(
-            "cluster_arduino.ino",
-            crate::generate_arduino_code(&netlist),
-        ) {
-            Ok(()) => self.status = "Saved cluster_arduino.ino.".to_string(),
+        let code = match crate::export::arduino::generate_arduino_code_checked(&netlist) {
+            Ok(code) => code,
+            Err(error) => {
+                self.status = format!("Code export: {error}");
+                return;
+            }
+        };
+        match crate::storage::save::write_with_backup("cluster_arduino.ino", &code) {
+            Ok(()) => self.status = "Saved cluster_arduino.ino (previous file backed up). Select the matching board core.".to_string(),
             Err(err) => self.status = format!("Code export failed: {err}"),
         }
     }

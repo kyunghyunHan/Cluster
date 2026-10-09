@@ -34,110 +34,84 @@ pub(crate) fn build_breadboard_guide(
     components: &[Component],
     netlist: &CircuitNetlist,
 ) -> BreadboardGuide {
-    let controller = components.iter().find(|component| {
-        matches!(
-            component.kind,
-            ComponentKind::Esp32
-                | ComponentKind::Esp32S3
-                | ComponentKind::Esp32C3
-                | ComponentKind::ArduinoUno
-                | ComponentKind::RaspberryPiPico
-                | ComponentKind::Stm32BluePill
-                | ComponentKind::Stm32Nucleo64
-        )
-    });
-    let peripheral = components
+    let controllers: Vec<_> = components
         .iter()
-        .find(|component| matches!(component.kind, ComponentKind::Oled | ComponentKind::Sensor));
-
-    let mut guide = BreadboardGuide {
-        title: "Breadboard wiring assistant".to_string(),
-        controller: controller.map(|component| {
-            format!(
-                "{} ({})",
-                component.label,
-                crate::component_kind_label(component.kind)
+        .filter(|c| {
+            matches!(
+                c.kind,
+                ComponentKind::Esp32
+                    | ComponentKind::Esp32S3
+                    | ComponentKind::Esp32C3
+                    | ComponentKind::ArduinoUno
+                    | ComponentKind::RaspberryPiPico
+                    | ComponentKind::Stm32BluePill
+                    | ComponentKind::Stm32Nucleo64
             )
-        }),
-        peripheral: peripheral.map(|component| {
+        })
+        .collect();
+    let peripherals: Vec<_> = components
+        .iter()
+        .filter(|c| matches!(c.kind, ComponentKind::Oled | ComponentKind::Sensor))
+        .collect();
+    let mut guide = BreadboardGuide {
+        title: "Breadboard wiring assistant".into(),
+        controller: controllers
+            .first()
+            .map(|c| format!("{} ({})", c.label, crate::component_kind_label(c.kind))),
+        peripheral: peripherals.first().map(|c| {
             format!(
-                "{} ({})",
-                component.label,
-                crate::component_kind_label(component.kind)
+                "{} ({}){}",
+                c.label,
+                crate::component_kind_label(c.kind),
+                if peripherals.len() > 1 {
+                    format!(" + {} module(s)", peripherals.len() - 1)
+                } else {
+                    String::new()
+                }
             )
         }),
         routes: Vec::new(),
         notes: Vec::new(),
     };
-
-    let (Some(controller), Some(peripheral)) = (controller, peripheral) else {
-        guide.notes.push(
-            "Place an ESP32/Arduino and an OLED or sensor to get guided jumper wiring.".to_string(),
-        );
+    if controllers.is_empty() || peripherals.is_empty() {
         guide
             .notes
-            .push("Power rails are shown for VCC and GND once pins exist.".to_string());
+            .push("Place a controller and an OLED or I2C sensor to get guided wiring.".into());
         return guide;
+    }
+    if controllers.len() != 1 {
+        guide.controller = Some(format!("{} controllers", controllers.len()));
+        guide.notes.push(
+            "Guided wiring requires one controller per page; separate controllers into pages."
+                .into(),
+        );
+        return guide;
+    }
+    let controller = controllers[0];
+    let power = if controller.kind == ComponentKind::ArduinoUno {
+        "5V"
+    } else {
+        "3V3"
     };
-
-    let route_specs: Vec<(&str, &str, &'static str)> = match (controller.kind, peripheral.kind) {
-        (
-            ComponentKind::Esp32 | ComponentKind::Esp32S3 | ComponentKind::Esp32C3,
-            ComponentKind::Oled,
-        )
-        | (
-            ComponentKind::Esp32 | ComponentKind::Esp32S3 | ComponentKind::Esp32C3,
-            ComponentKind::Sensor,
-        ) => vec![
-            ("3V3", "VCC", "Power rail"),
+    for peripheral in peripherals {
+        for (from_query, to_pin, purpose) in [
+            (power, "VCC", "Power rail"),
             ("GND", "GND", "Common ground"),
-            ("GPIO21", "SDA", "I2C data"),
-            ("GPIO22", "SCL", "I2C clock"),
-        ],
-        (ComponentKind::ArduinoUno, ComponentKind::Oled)
-        | (ComponentKind::ArduinoUno, ComponentKind::Sensor) => vec![
-            ("5V", "VCC", "Power rail"),
-            ("GND", "GND", "Common ground"),
-            ("A4 SDA", "SDA", "I2C data"),
-            ("A5 SCL", "SCL", "I2C clock"),
-        ],
-        (ComponentKind::Stm32BluePill, ComponentKind::Oled)
-        | (ComponentKind::Stm32BluePill, ComponentKind::Sensor) => vec![
-            ("3V3", "VCC", "Power rail"),
-            ("GND", "GND", "Common ground"),
-            ("PB7 SDA", "SDA", "I2C data"),
-            ("PB6 SCL", "SCL", "I2C clock"),
-        ],
-        (ComponentKind::Stm32Nucleo64, ComponentKind::Oled)
-        | (ComponentKind::Stm32Nucleo64, ComponentKind::Sensor) => vec![
-            ("3V3", "VCC", "Power rail"),
-            ("GND", "GND", "Common ground"),
-            ("D14 PB9 SDA", "SDA", "I2C data"),
-            ("D15 PB8 SCL", "SCL", "I2C clock"),
-        ],
-        _ => {
-            guide.notes.push(format!(
-                "Breadboard guidance for {} + {} is not mapped yet.",
-                crate::component_kind_label(controller.kind),
-                crate::component_kind_label(peripheral.kind)
-            ));
-            Vec::new()
-        }
-    };
-
-    for (from_pin, to_pin, purpose) in route_specs {
-        if let Some(route) =
-            breadboard_route_for(netlist, controller, from_pin, peripheral, to_pin, purpose)
-        {
-            guide.routes.push(route);
-        } else {
-            guide.notes.push(format!(
-                "Missing pin mapping for {} {} -> {} {}.",
-                controller.label, from_pin, peripheral.label, to_pin
-            ));
+            ("SDA", "SDA", "I2C data"),
+            ("SCL", "SCL", "I2C clock"),
+        ] {
+            if let Some(route) =
+                breadboard_route_for(netlist, controller, from_query, peripheral, to_pin, purpose)
+            {
+                guide.routes.push(route);
+            } else {
+                guide.notes.push(format!(
+                    "Missing pin mapping: {} {from_query} -> {} {to_pin}.",
+                    controller.label, peripheral.label
+                ));
+            }
         }
     }
-
     let missing = guide.routes.iter().filter(|route| !route.connected).count();
     if missing == 0 && !guide.routes.is_empty() {
         guide
@@ -160,8 +134,28 @@ fn breadboard_route_for(
     to_pin: &str,
     purpose: &'static str,
 ) -> Option<BreadboardRoute> {
-    let from = find_netlist_pin(netlist, from_component.id, from_pin)?;
     let to = find_netlist_pin(netlist, to_component.id, to_pin)?;
+    // Preserve a wired alternate GPIO or duplicate GND pin before suggesting defaults.
+    let is_signal = matches!(from_pin, "SDA" | "SCL");
+    let matches_default = |pin: &&NetlistPin| {
+        pin.component_id == from_component.id
+            && pin
+                .pin_name
+                .split_whitespace()
+                .any(|token| token == from_pin)
+    };
+    let from = netlist
+        .pins
+        .iter()
+        .find(|pin| {
+            pin.component_id == from_component.id
+                && pin.net_id == to.net_id
+                && (matches_default(pin)
+                    || (is_signal
+                        && crate::engine::validation::pin_is_microcontroller_gpio(pin)
+                        && !crate::engine::validation::pin_is_i2c_named(&pin.pin_name)))
+        })
+        .or_else(|| netlist.pins.iter().find(matches_default))?;
     Some(BreadboardRoute {
         from_component_id: from_component.id,
         from_label: from_component.label.clone(),
@@ -170,7 +164,7 @@ fn breadboard_route_for(
         to_label: to_component.label.clone(),
         to_pin: to.pin_name.clone(),
         net_id: from.net_id,
-        connected: from.net_id == to.net_id && from.connected_by_wire && to.connected_by_wire,
+        connected: from.net_id == to.net_id,
         purpose,
     })
 }
@@ -182,7 +176,10 @@ fn find_netlist_pin<'a>(
 ) -> Option<&'a NetlistPin> {
     netlist.pins.iter().find(|pin| {
         pin.component_id == component_id
-            && (pin.pin_name == pin_query || pin.pin_name.contains(pin_query))
+            && pin
+                .pin_name
+                .split_whitespace()
+                .any(|token| token == pin_query)
     })
 }
 
@@ -201,10 +198,8 @@ pub(crate) fn render_breadboard_view(
     });
     ui.add_space(6.0);
 
-    let (board_rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width().max(360.0), 150.0),
-        Sense::hover(),
-    );
+    let (board_rect, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 150.0), Sense::hover());
     draw_breadboard_preview(ui.painter(), board_rect, guide);
     ui.add_space(8.0);
 
@@ -230,7 +225,7 @@ pub(crate) fn render_breadboard_view(
         } else {
             BreadboardTone::Warning
         };
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             status_pill(ui, if route.connected { "OK" } else { "TODO" }, tone);
             let label = format!(
                 "{} {}  ->  {} {}",
@@ -238,7 +233,7 @@ pub(crate) fn render_breadboard_view(
             );
             if ui
                 .add_sized(
-                    Vec2::new((ui.available_width() - 132.0).max(160.0), 20.0),
+                    Vec2::new((ui.available_width() - 132.0).clamp(80.0, 380.0), 20.0),
                     egui::Button::new(egui::RichText::new(label).size(11.0)),
                 )
                 .clicked()
@@ -308,13 +303,14 @@ fn draw_breadboard_preview(painter: &egui::Painter, rect: Rect, guide: &Breadboa
         Stroke::new(3.0_f32, Color32::from_rgb(90, 145, 235)),
     );
 
+    let module_width = (rect.width() * 0.3).min(120.0);
     let left_module = Rect::from_min_size(
-        Pos2::new(rect.left() + 28.0, rect.top() + 48.0),
-        Vec2::new(120.0, 58.0),
+        Pos2::new(rect.left() + 14.0, rect.top() + 48.0),
+        Vec2::new(module_width, 58.0),
     );
     let right_module = Rect::from_min_size(
-        Pos2::new(rect.right() - 148.0, rect.top() + 48.0),
-        Vec2::new(120.0, 58.0),
+        Pos2::new(rect.right() - 14.0 - module_width, rect.top() + 48.0),
+        Vec2::new(module_width, 58.0),
     );
     painter.rect_filled(left_module, 4.0, Color32::from_rgb(38, 48, 58));
     painter.rect_filled(right_module, 4.0, Color32::from_rgb(38, 48, 58));
@@ -330,14 +326,14 @@ fn draw_breadboard_preview(painter: &egui::Painter, rect: Rect, guide: &Breadboa
         Stroke::new(1.0_f32, Color32::from_rgb(95, 120, 145)),
         StrokeKind::Outside,
     );
-    painter.text(
+    painter.with_clip_rect(left_module).text(
         left_module.center(),
         Align2::CENTER_CENTER,
         guide.controller.as_deref().unwrap_or("Controller"),
         egui::FontId::proportional(10.5),
         Color32::from_rgb(215, 222, 230),
     );
-    painter.text(
+    painter.with_clip_rect(right_module).text(
         right_module.center(),
         Align2::CENTER_CENTER,
         guide.peripheral.as_deref().unwrap_or("Peripheral"),
@@ -346,7 +342,8 @@ fn draw_breadboard_preview(painter: &egui::Painter, rect: Rect, guide: &Breadboa
     );
 
     let route_y_start = rect.top() + 58.0;
-    for (index, route) in guide.routes.iter().enumerate() {
+    // The preview shows the first module; all modules have actionable rows below.
+    for (index, route) in guide.routes.iter().take(4).enumerate() {
         let y = route_y_start + index as f32 * 18.0;
         let color = match route.purpose {
             "Power rail" => Color32::from_rgb(220, 80, 80),

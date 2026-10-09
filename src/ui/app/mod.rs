@@ -13,10 +13,7 @@ use crate::engine::mna;
 #[cfg(test)]
 use crate::engine::netlist::build_circuit_netlist;
 use crate::engine::simulation::{Conductance, Simulation, SimulationStatus};
-use crate::engine::validation::{
-    ErcRule, ErcSeverity, ErcViolation, pin_is_controller_scl, pin_is_controller_sda,
-    pin_is_i2c_named, pin_is_microcontroller_gpio, validate_beginner_rules,
-};
+use crate::engine::validation::{ErcRule, ErcSeverity, ErcViolation, validate_beginner_rules};
 use crate::model::*;
 use crate::ui::bottom_dock::{
     BottomDockAction, BottomDockModel, BottomDockTab, PageTabsAction, render_bottom_dock,

@@ -237,7 +237,8 @@ fn arduino_codegen_detects_esp32_oled_i2c_pins() {
     let mut app = CircuitApp::new();
     app.load_esp32_oled_demo();
 
-    let code = generate_arduino_code(&build_circuit_netlist(&app.components, &app.wires));
+    let code = generate_arduino_code(&build_circuit_netlist(&app.components, &app.wires))
+        .expect("valid starter wiring");
 
     assert!(code.contains("#include <Wire.h>"));
     assert!(code.contains("Wire.begin(21, 22);"));
@@ -261,7 +262,7 @@ fn arduino_oled_codegen_uses_uno_i2c_defaults() {
     app.load_arduino_oled_demo();
 
     let netlist = build_circuit_netlist(&app.components, &app.wires);
-    let code = generate_arduino_code(&netlist);
+    let code = generate_arduino_code(&netlist).expect("valid starter wiring");
 
     assert!(code.contains("Wire.begin();  // UNO uses A4 SDA and A5 SCL"));
     assert!(!code.contains("Wire.begin(21, 22)"));
@@ -275,7 +276,8 @@ fn arduino_codegen_ignores_unconnected_gpio_pins() {
     let mut app = CircuitApp::new();
     app.load_arduino_led_demo();
 
-    let code = generate_arduino_code(&build_circuit_netlist(&app.components, &app.wires));
+    let code = generate_arduino_code(&build_circuit_netlist(&app.components, &app.wires))
+        .expect("valid starter wiring");
 
     assert!(code.contains("PIN_D13"));
     assert!(!code.contains("PIN_D2"));
@@ -392,7 +394,7 @@ fn canonical_projection_is_shared_by_erc_codegen_and_pcb_sync() {
     let expected_pin_nets = connectivity.pin_nets.clone();
 
     let _erc = crate::engine::validation::validate_beginner_rules(&connectivity.netlist);
-    let code = generate_arduino_code(&connectivity.netlist);
+    let code = generate_arduino_code(&connectivity.netlist).expect("valid starter wiring");
     let cad =
         crate::model::cad::CadProjectData::from_schematic(&app.components, &connectivity.netlist);
 
@@ -1026,7 +1028,7 @@ fn arduino_codegen_uses_millis_debounce_for_button_led() {
     app.load_esp32_button_debounce_demo();
 
     let netlist = build_circuit_netlist(&app.components, &app.wires);
-    let code = generate_arduino_code(&netlist);
+    let code = generate_arduino_code(&netlist).expect("valid starter wiring");
 
     assert!(
         code.contains("const int BUTTON_PIN = 21;"),
@@ -2018,4 +2020,302 @@ fn old_schema_component_without_part_id_field_still_loads() {
     }"#;
     let saved: SavedComponent = serde_json::from_str(json).unwrap();
     assert_eq!(saved.part_id, None);
+}
+
+#[test]
+fn breadboard_guide_uses_each_controller_symbol_i2c_pins() {
+    for (kind, sda, scl) in [
+        (ComponentKind::Esp32S3, "GPIO2 SDA", "GPIO3 SCL"),
+        (ComponentKind::Esp32C3, "GPIO1 SDA", "GPIO2 SCL"),
+        (ComponentKind::RaspberryPiPico, "GP4 SDA", "GP5 SCL"),
+        (ComponentKind::Stm32BluePill, "PB7 SDA", "PB6 SCL"),
+        (ComponentKind::Stm32Nucleo64, "D14 PB9 SDA", "D15 PB8 SCL"),
+    ] {
+        let mut app = CircuitApp::new();
+        app.place_component(kind, Pos2::new(200.0, 300.0));
+        app.place_component(ComponentKind::Oled, Pos2::new(700.0, 300.0));
+        let netlist = build_circuit_netlist(&app.components, &app.wires);
+        let guide = build_breadboard_guide(&app.components, &netlist);
+        assert_eq!(guide.routes.len(), 4, "{kind:?}: {guide:?}");
+        assert!(
+            guide
+                .routes
+                .iter()
+                .any(|r| r.from_pin == sda && r.to_pin == "SDA")
+        );
+        assert!(
+            guide
+                .routes
+                .iter()
+                .any(|r| r.from_pin == scl && r.to_pin == "SCL")
+        );
+        assert!(guide.routes.iter().all(|r| !r.connected));
+    }
+}
+
+#[test]
+fn breadboard_guide_includes_every_i2c_module_and_preserves_remapped_gpio() {
+    let mut app = CircuitApp::new();
+    app.load_esp32_oled_demo();
+    let controller = app
+        .components
+        .iter()
+        .find(|c| c.kind == ComponentKind::Esp32)
+        .unwrap()
+        .id;
+    let sensor = app.place_component(ComponentKind::Sensor, Pos2::new(1200.0, 800.0));
+    app.add_wire_between(controller, "GPIO4", sensor, "SDA");
+    let netlist = build_circuit_netlist(&app.components, &app.wires);
+    let guide = build_breadboard_guide(&app.components, &netlist);
+    assert_eq!(guide.routes.len(), 8, "{guide:?}");
+    assert!(
+        guide.routes.iter().any(|r| r.to_component_id == sensor
+            && r.to_pin == "SDA"
+            && r.from_pin == "GPIO4"
+            && r.connected),
+        "{guide:?}"
+    );
+}
+
+#[test]
+fn breadboard_jumper_refuses_to_short_swapped_i2c_signals() {
+    let mut app = CircuitApp::new();
+    let controller = app.place_component(ComponentKind::Esp32, Pos2::new(300.0, 300.0));
+    let oled = app.place_component(ComponentKind::Oled, Pos2::new(800.0, 300.0));
+    app.add_wire_between(controller, "GPIO22", oled, "SDA");
+    let netlist = build_circuit_netlist(&app.components, &app.wires);
+    let guide = build_breadboard_guide(&app.components, &netlist);
+    let route = guide
+        .routes
+        .iter()
+        .find(|r| r.to_pin == "SDA")
+        .unwrap()
+        .clone();
+    assert!(!route.connected);
+    let count = app.wires.len();
+    app.connect_breadboard_route(route);
+    assert_eq!(app.wires.len(), count);
+    assert!(app.status.contains("conflicting wiring"), "{}", app.status);
+}
+
+#[test]
+fn arduino_codegen_keeps_sensor_gpio_input_and_uno_analog_identity() {
+    for (controller_kind, gpio, declaration) in [
+        (
+            ComponentKind::Esp32,
+            "GPIO34",
+            "const int PIN_GPIO34_ADC = 34;",
+        ),
+        (ComponentKind::ArduinoUno, "A0", "const int PIN_A0 = A0;"),
+    ] {
+        let mut app = CircuitApp::new();
+        let ctrl = app.place_component(controller_kind, Pos2::new(200.0, 300.0));
+        let sensor = app.place_component(ComponentKind::Dht11, Pos2::new(800.0, 300.0));
+        app.add_wire_between(ctrl, gpio, sensor, "DATA");
+        let code =
+            generate_arduino_code(&build_circuit_netlist(&app.components, &app.wires)).unwrap();
+        assert!(code.contains(declaration), "{code}");
+        assert!(code.contains(", INPUT);"), "{code}");
+        assert!(!code.contains(", OUTPUT);"), "{code}");
+        assert!(!code.contains("digitalWrite("), "{code}");
+    }
+}
+
+#[test]
+fn arduino_codegen_rejects_empty_multiple_controller_and_incomplete_i2c() {
+    assert!(generate_arduino_code(&CircuitNetlist::default()).is_err());
+    let mut app = CircuitApp::new();
+    app.load_esp32_oled_demo();
+    app.wires.clear();
+    assert!(generate_arduino_code(&build_circuit_netlist(&app.components, &app.wires)).is_err());
+    app.place_component(ComponentKind::ArduinoUno, Pos2::new(1200.0, 800.0));
+    let error =
+        generate_arduino_code(&build_circuit_netlist(&app.components, &app.wires)).unwrap_err();
+    assert!(error.contains("exactly one controller"), "{error}");
+}
+
+#[test]
+fn arduino_codegen_board_core_i2c_mapping_matches_the_connected_symbol() {
+    for (kind, sda, scl, expected) in [
+        (
+            ComponentKind::Esp32S3,
+            "GPIO2 SDA",
+            "GPIO3 SCL",
+            "Wire.begin(2, 3);",
+        ),
+        (
+            ComponentKind::Esp32C3,
+            "GPIO1 SDA",
+            "GPIO2 SCL",
+            "Wire.begin(1, 2);",
+        ),
+        (
+            ComponentKind::RaspberryPiPico,
+            "GP4 SDA",
+            "GP5 SCL",
+            "Wire.setSDA(4);\n  Wire.setSCL(5);\n  Wire.begin();",
+        ),
+        (
+            ComponentKind::Stm32BluePill,
+            "PB7 SDA",
+            "PB6 SCL",
+            "Wire.setSDA(PB7);\n  Wire.setSCL(PB6);\n  Wire.begin();",
+        ),
+    ] {
+        // Use the real symbol definitions, then isolate the bus projection from routing geometry.
+        let mut app = CircuitApp::new();
+        let controller = app.place_component(kind, Pos2::new(200.0, 300.0));
+        let sensor = app.place_component(ComponentKind::Sensor, Pos2::new(800.0, 300.0));
+        let mut netlist = build_circuit_netlist(&app.components, &[]);
+        for (controller_pin, sensor_pin) in [(sda, "SDA"), (scl, "SCL"), ("GND", "GND")] {
+            let id = netlist
+                .pins
+                .iter()
+                .find(|p| p.component_id == controller && p.pin_name == controller_pin)
+                .unwrap()
+                .net_id;
+            netlist
+                .pins
+                .iter_mut()
+                .find(|p| p.component_id == sensor && p.pin_name == sensor_pin)
+                .unwrap()
+                .net_id = id;
+        }
+        let code = generate_arduino_code(&netlist).unwrap();
+        assert!(code.contains(expected), "{kind:?}: {code}");
+        assert!(code.contains("I2C scan"));
+        assert!(!code.contains("Adafruit_SSD1306"));
+    }
+}
+
+#[test]
+fn arduino_codegen_initializes_oled_even_with_button_toggle() {
+    let mut app = CircuitApp::new();
+    app.load_esp32_oled_demo();
+    let controller = app
+        .components
+        .iter()
+        .find(|c| c.kind == ComponentKind::Esp32)
+        .unwrap()
+        .id;
+    let button = app.place_component(ComponentKind::PushButton, Pos2::new(1200.0, 200.0));
+    let resistor = app.place_component(ComponentKind::Resistor, Pos2::new(1300.0, 400.0));
+    let led = app.place_component(ComponentKind::Led, Pos2::new(1500.0, 400.0));
+    let mut netlist = build_circuit_netlist(&app.components, &[]);
+    let net = |id, name: &str| {
+        netlist
+            .pins
+            .iter()
+            .find(|p| p.component_id == id && p.pin_name == name)
+            .unwrap()
+            .net_id
+    };
+    let ground = net(controller, "GND");
+    let sda = net(controller, "GPIO21 SDA");
+    let scl = net(controller, "GPIO22 SCL");
+    let button_net = net(controller, "GPIO4");
+    let led_net = net(controller, "GPIO18 SCK");
+    let series_net = net(resistor, "B");
+    for pin in &mut netlist.pins {
+        pin.connected_by_wire = true;
+        if pin.component_kind == ComponentKind::Oled {
+            pin.net_id = match pin.pin_name.as_str() {
+                "GND" => ground,
+                "SDA" => sda,
+                "SCL" => scl,
+                _ => pin.net_id,
+            };
+        }
+        if pin.component_id == button {
+            pin.net_id = if pin.pin_name == "A" {
+                button_net
+            } else {
+                ground
+            };
+        }
+        if pin.component_id == resistor {
+            pin.component_value = "330".into();
+            pin.net_id = if pin.pin_name == "A" {
+                led_net
+            } else {
+                series_net
+            };
+        }
+        if pin.component_id == led {
+            pin.net_id = if pin.pin_name == "A" {
+                series_net
+            } else {
+                ground
+            };
+        }
+    }
+    let code = generate_arduino_code(&netlist).unwrap();
+    assert!(code.contains("pinMode(BUTTON_PIN, INPUT_PULLUP)"), "{code}");
+    assert!(code.contains("displayReady = display.begin"), "{code}");
+    assert!(code.contains("Wire.begin(21, 22)"), "{code}");
+    assert!(!code.contains("while (true)"));
+    assert_eq!(code.matches("void setup()").count(), 1);
+}
+
+#[test]
+fn arduino_codegen_does_not_drive_led_without_a_valid_series_resistor() {
+    for invalid in ["", "0", "10", "invalid"] {
+        let mut app = CircuitApp::new();
+        app.load_arduino_led_demo();
+        app.components
+            .iter_mut()
+            .find(|c| c.kind == ComponentKind::Resistor)
+            .unwrap()
+            .value = invalid.into();
+        let code =
+            generate_arduino_code(&build_circuit_netlist(&app.components, &app.wires)).unwrap();
+        assert!(!code.contains(", OUTPUT);"), "{invalid}: {code}");
+        assert!(!code.contains("digitalWrite("), "{invalid}: {code}");
+    }
+}
+
+#[test]
+fn breadboard_view_renders_in_a_narrow_panel_and_empty_document() {
+    for has_circuit in [false, true] {
+        let mut app = CircuitApp::new();
+        if has_circuit {
+            app.load_esp32_oled_demo();
+        }
+        let netlist = build_circuit_netlist(&app.components, &app.wires);
+        let guide = build_breadboard_guide(&app.components, &netlist);
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 900.0))),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let width = ui.available_width();
+                render_breadboard_view(ui, &guide);
+                assert!(
+                    ui.min_rect().width() <= width + 1.0,
+                    "panel overflow: {:?}",
+                    ui.min_rect()
+                );
+            });
+        });
+        assert!(!output.shapes.is_empty());
+    }
+}
+
+#[test]
+fn esp32_oled_starter_has_no_erc_errors() {
+    let mut app = CircuitApp::new();
+    app.load_esp32_oled_demo();
+    let simulation = app.current_simulation();
+    let errors: Vec<_> = simulation
+        .erc
+        .iter()
+        .filter(|v| v.severity == ErcSeverity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "{errors:#?}\n{}",
+        circuit_to_netlist_text(&build_circuit_netlist(&app.components, &app.wires))
+    );
 }

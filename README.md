@@ -197,6 +197,21 @@ Cluster는 수정 노달 해석(MNA)으로 다음 값을 계산한다.
 SPICE 내보내기는 지원하는 기본 모델과 건너뛴 심볼 부품에 대한 주석을 포함한다. Arduino
 내보내기는 펌웨어 합성이 아닌 시작 스케치이며 임의 모듈의 애플리케이션 동작을 추론하지 않는다.
 
+Arduino 코드 생성은 컨트롤러가 하나인 페이지에서 실제 net 연결을 읽는다. 일반 신호는
+`INPUT`으로 유지하고, 220Ω 이상 직렬저항과 컨트롤러 공통 GND를 가진 단순 LED 분기만
+출력으로 구동한다. GND로 연결된 버튼은 풀업 입력과 50ms 디바운스 예제를 제공한다.
+UNO의 `A0` 같은 아날로그 핀과 STM32의 `PB7` 같은 포트 이름을 보존한다.
+OLED/I2C 센서는 공통 GND와 SDA/SCL 연결을 검사하며, 연결 누락·쇼트·여러 버스는
+내보내기 전에 status에 원인을 표시한다. 생성 스케치는 Serial Monitor에 I2C 스캔 결과를
+출력한다. OLED는 Adafruit GFX/SSD1306 라이브러리가 필요하며, 기본 주소 `0x3C`는 스캔에
+맞게 수정한다. 초기화 실패가 다른 버튼/LED 동작을 멈추게 하지 않는다.
+재내보내기는 `.ino.bak`와 이전 세대 백업을 남기고 원자적으로 교체한다.
+
+ESP32는 [Arduino-ESP32 Wire API](https://docs.espressif.com/projects/arduino-esp32/en/latest/api/i2c.html),
+Pico는 [Arduino-Pico core](https://arduino-pico.readthedocs.io/en/latest/wire.html),
+STM32는 [STM32duino core](https://github.com/stm32duino/Arduino_Core_STM32/wiki/API)의
+핀 설정 API를 사용한다. 해당 보드 코어를 선택한 뒤 컴파일·업로드한다.
+
 ### 저장 및 불러오기
 
 - 스키마 버전을 추적하는 JSON 형식
