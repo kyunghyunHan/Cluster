@@ -1035,7 +1035,10 @@ impl OffscreenFrameFixture {
             &annotations,
         );
         let revision = app.analysis.revisions.schematic_connectivity;
-        app.analysis.cached_netlist = Some((revision, Arc::new(connectivity.netlist.clone())));
+        app.analysis.cached_netlist = Some((
+            (revision, app.analysis.revisions.electrical_parameters),
+            Arc::new(connectivity.netlist.clone()),
+        ));
         app.analysis.cached_connectivity = Some((revision, Arc::new(connectivity)));
 
         let raw_input = egui::RawInput {

@@ -1,6 +1,8 @@
 pub(crate) mod board;
+pub(crate) mod copper;
 pub(crate) mod drc;
 pub(crate) mod footprint;
+pub(crate) mod geometry;
 pub(crate) mod layer;
 pub(crate) mod spatial_index;
 pub(crate) mod track;

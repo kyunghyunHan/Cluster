@@ -40,6 +40,31 @@ pub(crate) fn solve_transient_with_netlist(
     components: &[Component],
     netlist: &crate::model::CircuitNetlist,
 ) -> Option<TransientResult> {
+    // This analytic model is valid only for one series R-C load driven by
+    // one source. Extra devices require a general transient solver.
+    let count = |kind| components.iter().filter(|c| c.kind == kind).count();
+    if count(ComponentKind::Capacitor) != 1
+        || count(ComponentKind::Resistor) != 1
+        || components
+            .iter()
+            .filter(|c| matches!(c.kind, ComponentKind::Battery | ComponentKind::VSource))
+            .count()
+            != 1
+        || components.iter().any(|c| {
+            !matches!(
+                c.kind,
+                ComponentKind::Capacitor
+                    | ComponentKind::Resistor
+                    | ComponentKind::Battery
+                    | ComponentKind::VSource
+                    | ComponentKind::Ground
+                    | ComponentKind::NetLabel
+                    | ComponentKind::TextNote
+            )
+        })
+    {
+        return None;
+    }
     let capacitor = components
         .iter()
         .find(|component| component.kind == ComponentKind::Capacitor)?;
@@ -77,6 +102,28 @@ pub(crate) fn solve_transient_with_netlist(
     let source_is_pwm = source.value.to_ascii_lowercase().contains("pwm")
         || source.value.to_ascii_lowercase().contains("square");
 
+    let pin_net = |id, name: &str| {
+        netlist
+            .pins
+            .iter()
+            .find(|p| p.component_id == id && p.pin_name == name)
+            .map(|p| p.net_id)
+    };
+    let source_positive = pin_net(source.id, "+")?;
+    let source_negative = pin_net(source.id, "-")?;
+    if source_positive == source_negative {
+        return None;
+    }
+    let cap_signal = if cap_b_net == source_negative {
+        cap_a_net
+    } else if cap_a_net == source_negative {
+        cap_b_net
+    } else {
+        return None;
+    };
+    if cap_signal == source_positive {
+        return None;
+    }
     let mut resistance = None;
     for resistor in components
         .iter()
@@ -103,10 +150,8 @@ pub(crate) fn solve_transient_with_netlist(
         else {
             continue;
         };
-        if ra.net_id == cap_a_net
-            || ra.net_id == cap_b_net
-            || rb.net_id == cap_a_net
-            || rb.net_id == cap_b_net
+        if (ra.net_id == source_positive && rb.net_id == cap_signal)
+            || (rb.net_id == source_positive && ra.net_id == cap_signal)
         {
             resistance = Some(parse_metric_value(&resistor.value, "ohm").unwrap_or(1_000.0) as f64);
             break;
@@ -226,6 +271,58 @@ mod tests {
             value: value.to_string(),
             part_id: None,
         }
+    }
+
+    #[test]
+    fn audit_rc_requires_source_return_and_rejects_extra_storage() {
+        let source = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "V1", "5V");
+        let resistor = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(140.0, 0.0),
+            "R1",
+            "1k",
+        );
+        let cap = comp(
+            3,
+            ComponentKind::Capacitor,
+            Pos2::new(260.0, 0.0),
+            "C1",
+            "1uF",
+        );
+        let sp = component_pin_defs(&source);
+        let rp = component_pin_defs(&resistor);
+        let cp = component_pin_defs(&cap);
+        let mut wires = vec![
+            Wire::new(10, vec![sp[1].pos, rp[0].pos]),
+            Wire::new(11, vec![rp[1].pos, cp[0].pos]),
+        ];
+        let mut components = vec![source, resistor, cap];
+        assert!(
+            solve_transient(&components, &wires).is_none(),
+            "open capacitor return cannot charge"
+        );
+        wires.push(Wire::new(
+            12,
+            vec![
+                cp[1].pos,
+                Pos2::new(cp[1].pos.x, 100.0),
+                Pos2::new(sp[0].pos.x, 100.0),
+                sp[0].pos,
+            ],
+        ));
+        assert!(solve_transient(&components, &wires).is_some());
+        components.push(comp(
+            4,
+            ComponentKind::Capacitor,
+            Pos2::new(500.0, 0.0),
+            "C2",
+            "10uF",
+        ));
+        assert!(
+            solve_transient(&components, &wires).is_none(),
+            "multiple capacitors need a general solver"
+        );
     }
 
     #[test]

@@ -767,14 +767,29 @@ fn check_esp_gpio_overvoltage(netlist: &CircuitNetlist, v: &mut Vec<ErcViolation
                     | ComponentKind::Stm32Nucleo64
             ) && pin_is_microcontroller_gpio(pin)
         }) {
+            let tolerance =
+                crate::model::device::pin_capability(gpio.component_kind, &gpio.pin_name)
+                    .map(|p| p.five_volt_tolerance)
+                    .unwrap_or(crate::model::device::FiveVoltTolerance::Unknown);
+            let verified_unsafe = tolerance == crate::model::device::FiveVoltTolerance::No;
             v.push(ErcViolation {
                 rule: ErcRule::GpioOvervoltage5v,
-                severity: ErcSeverity::Error,
+                severity: if verified_unsafe {
+                    ErcSeverity::Error
+                } else {
+                    ErcSeverity::Warning
+                },
                 component_id: Some(gpio.component_id),
                 wire_id: None,
                 message: format!(
-                    "{} {} is connected to a 5V net. The GPIO is not 5V tolerant; use a level shifter or resistor divider.",
-                    gpio.component_label, gpio.pin_name
+                    "{} {} is connected to a high-voltage net. {}",
+                    gpio.component_label,
+                    gpio.pin_name,
+                    if verified_unsafe {
+                        "This GPIO cannot accept 5V; add level shifting."
+                    } else {
+                        "Verify board variant, supply and digital-input mode before using 5V."
+                    }
                 ),
             });
         }
@@ -2172,7 +2187,8 @@ fn pin_is_5v_source(pin: &NetlistPin) -> bool {
         || (matches!(
             pin.component_kind,
             ComponentKind::VSource | ComponentKind::Battery
-        ) && parse_metric_value(&pin.component_value, "v").is_some_and(|v| v > 3.6))
+        ) && pin.pin_name == "+"
+            && parse_metric_value(&pin.component_value, "v").is_some_and(|v| v > 3.6))
 }
 
 fn pin_name_is_3v3(name: &str) -> bool {
@@ -2307,6 +2323,23 @@ mod tests {
     // ── LED without resistor ──────────────────────────────────────────────
 
     #[test]
+    fn audit_source_negative_terminal_is_not_a_high_voltage_driver() {
+        let circuit = netlist(
+            vec![make_net(0, "RETURN")],
+            vec![
+                make_pin(1, "V1", ComponentKind::Battery, "5V", "-", 0, true),
+                make_pin(2, "ESP1", ComponentKind::Esp32, "", "GPIO2", 0, true),
+            ],
+        );
+        let violations = validate_beginner_rules(&circuit);
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == ErcRule::GpioOvervoltage5v)
+        );
+    }
+
+    #[test]
     fn reports_led_without_resistor() {
         let nl = netlist(
             vec![make_net(0, "NET_001"), make_net(1, "GND")],
@@ -2426,7 +2459,7 @@ mod tests {
         let v = validate_beginner_rules(&nl);
         assert!(v.iter().any(|e| e.rule == ErcRule::GpioOvervoltage5v
             && e.message.contains("PB7 SDA")
-            && e.message.contains("5V net")));
+            && e.message.contains("high-voltage net")));
         assert!(v.iter().any(|e| e.rule == ErcRule::AdcOvervoltage
             && e.message.contains("PA0 ADC")
             && e.message.contains("ADC input")));

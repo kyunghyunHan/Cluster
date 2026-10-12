@@ -16,6 +16,7 @@ pub enum SimulationError {
     ShortCircuit,
     UnsupportedComponent,
     Cancelled,
+    NumericalFailure,
 }
 
 impl std::fmt::Display for SimulationError {
@@ -29,6 +30,7 @@ impl std::fmt::Display for SimulationError {
             SimulationError::ShortCircuit => "Ideal source short circuit",
             SimulationError::UnsupportedComponent => "Unsupported component model",
             SimulationError::Cancelled => "Simulation cancelled",
+            SimulationError::NumericalFailure => "Non-finite or unstable circuit equations",
         };
         f.write_str(message)
     }
@@ -60,6 +62,9 @@ impl SimulationError {
                 "One or more parts need a SPICE model or are only checked by ERC in Cluster."
             }
             SimulationError::Cancelled => "The result was discarded because a newer edit exists.",
+            SimulationError::NumericalFailure => {
+                "Check component values; the equations exceed numerical limits."
+            }
         }
     }
 }

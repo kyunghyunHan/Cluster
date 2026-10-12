@@ -182,21 +182,28 @@ fn solve_dc_profiled_internal(
                 gnd_roots.insert(root);
             }
         };
-        match comp.kind {
-            ComponentKind::Ground => {
-                for pin in component_pin_defs(comp) {
-                    mark_gnd(pin.pos, &mut nm, &mut gnd_roots);
-                }
+        if comp.kind == ComponentKind::Ground {
+            for pin in component_pin_defs(comp) {
+                mark_gnd(pin.pos, &mut nm, &mut gnd_roots);
             }
-            ComponentKind::VSource | ComponentKind::Battery | ComponentKind::ISource => {
-                for pin in component_pin_defs(comp) {
-                    if pin.role == PinRole::Ground {
-                        mark_gnd(pin.pos, &mut nm, &mut gnd_roots);
-                    }
-                }
-            }
-            _ => {}
         }
+    }
+    if gnd_roots.is_empty()
+        && let Some(source) = components
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.kind,
+                    ComponentKind::VSource | ComponentKind::Battery | ComponentKind::ISource
+                )
+            })
+            .min_by_key(|c| c.id)
+        && let Some(pin) = component_pin_defs(source)
+            .into_iter()
+            .find(|p| p.label == "-")
+        && let Some(root) = nm.root_of(pin.pos)
+    {
+        gnd_roots.insert(root);
     }
     if gnd_roots.is_empty() {
         return Err(SimulationError::NoGround);
@@ -205,7 +212,8 @@ fn solve_dc_profiled_internal(
     // ── 3. Assign MNA node numbers (GND=0, others 1..N) ──────────────────
     let node_indexing_started = std::time::Instant::now();
     let node_count = nm.nodes.positions.len();
-    let all_roots: HashSet<usize> = (0..node_count).map(|i| nm.uf.find(i)).collect();
+    let all_roots: std::collections::BTreeSet<usize> =
+        (0..node_count).map(|i| nm.uf.find(i)).collect();
 
     let mut mna_of: HashMap<usize, usize> = HashMap::new();
     let mut next_node = 1usize;
@@ -853,7 +861,7 @@ fn solve_dc_profiled_internal(
         let va = vnode(re.a);
         let vb = vnode(re.b);
         let vd = va - vb;
-        let i_r = vd / re.r;
+        let i_r = vd / re.r.max(1e-9);
         component_voltage.entry(re.id).or_insert(vd);
         branch_current.entry(re.id).or_insert(i_r);
         component_power.entry(re.id).or_insert((vd * i_r).abs());

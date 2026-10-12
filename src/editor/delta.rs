@@ -42,6 +42,7 @@ struct BoardMetadata {
     footprint_library: Vec<crate::pcb::footprint::Footprint>,
     design_rules: DesignRules,
     net_classes: Vec<crate::model::cad::NetClass>,
+    net_bindings: Vec<crate::model::cad::CadNet>,
 }
 
 impl BoardMetadata {
@@ -56,6 +57,7 @@ impl BoardMetadata {
             footprint_library: board.footprint_library.clone(),
             design_rules: board.design_rules.clone(),
             net_classes: board.net_classes.clone(),
+            net_bindings: board.net_bindings.clone(),
         }
     }
 
@@ -69,6 +71,7 @@ impl BoardMetadata {
         board.footprint_library.clone_from(&self.footprint_library);
         board.design_rules = self.design_rules.clone();
         board.net_classes.clone_from(&self.net_classes);
+        board.net_bindings.clone_from(&self.net_bindings);
     }
 }
 
@@ -663,6 +666,21 @@ fn list_delta_cost<T>(values: &[ListDelta<T>]) -> usize {
 
 fn approximate_board_metadata_cost(metadata: &BoardMetadata) -> usize {
     size_of::<BoardMetadata>()
+        + metadata.net_bindings.capacity() * size_of::<crate::model::cad::CadNet>()
+        + metadata
+            .net_bindings
+            .iter()
+            .map(|net| {
+                net.name.capacity()
+                    + net.class_id.capacity()
+                    + net.connected_pins.capacity() * size_of::<crate::model::PinRef>()
+                    + net
+                        .connected_pins
+                        .iter()
+                        .map(|pin| pin.pin_name.capacity())
+                        .sum::<usize>()
+            })
+            .sum::<usize>()
         + metadata.outline.points.capacity() * size_of::<crate::model::cad::Point2>()
         + metadata.layers.capacity() * size_of::<BoardLayer>()
         + metadata.layer_visibility.capacity() * size_of::<LayerVisibility>()

@@ -98,3 +98,18 @@ pub(crate) struct NetlistAnnotations {
     pub(crate) no_connects: Vec<Pos2>,
     pub(crate) net_label_scopes: HashMap<u64, NetLabelScope>,
 }
+
+impl CircuitNetlist {
+    /// Topology is immutable at a connectivity revision; values and references are not.
+    pub(crate) fn with_component_properties(&self, components: &[super::Component]) -> Self {
+        let by_id: HashMap<_, _> = components.iter().map(|c| (c.id, c)).collect();
+        let mut netlist = self.clone();
+        for pin in &mut netlist.pins {
+            if let Some(component) = by_id.get(&pin.component_id) {
+                pin.component_label.clone_from(&component.label);
+                pin.component_value.clone_from(&component.value);
+            }
+        }
+        netlist
+    }
+}

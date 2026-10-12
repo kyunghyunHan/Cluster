@@ -98,8 +98,8 @@ pub(crate) fn repair_saved_page(
         .chain(saved_wires.iter().map(|w| w.id))
         .max()
         .unwrap_or(0)
-        .max(saved_next_id)
-        + 1;
+        .saturating_add(1)
+        .max(saved_next_id);
 
     let mut components = Vec::new();
     for sc in saved_components {

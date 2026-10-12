@@ -270,7 +270,7 @@ pub(crate) struct AnalysisState {
     pub(crate) revisions: DocumentRevisions,
     pub(crate) dirty_flags: DirtyFlags,
     pub(crate) cached_connectivity: Option<(u64, Arc<CanonicalConnectivity>)>,
-    pub(crate) cached_netlist: Option<(u64, Arc<CircuitNetlist>)>,
+    pub(crate) cached_netlist: Option<((u64, u64), Arc<CircuitNetlist>)>,
     pub(crate) cached_simulation: Option<(SimulationRevisionKey, u32, Arc<Simulation>)>,
     pub(crate) simulation_revision: u64,
     pub(crate) cached_connected_pins: ConnectedPinsCache,
@@ -283,6 +283,7 @@ pub(crate) struct AnalysisState {
     pub(crate) schematic_spatial_revision: u64,
     pub(crate) pcb_cad: Option<crate::model::cad::CadProjectData>,
     pub(crate) pcb_drc: Vec<crate::pcb::drc::DrcViolation>,
+    pub(crate) pcb_ratsnest: Vec<crate::pcb::board::RatsnestEdge>,
     pub(crate) pcb_ratsnest_by_net: std::collections::HashMap<usize, usize>,
     pub(crate) worker: crate::engine::worker::BoundedAnalysisWorker,
     pub(crate) pending_schematic: Option<(u64, SimulationRevisionKey, u32)>,
@@ -328,6 +329,7 @@ impl Default for AnalysisState {
             schematic_spatial_revision: 0,
             pcb_cad: None,
             pcb_drc: Vec::new(),
+            pcb_ratsnest: Vec::new(),
             pcb_ratsnest_by_net: std::collections::HashMap::new(),
             worker: crate::engine::worker::BoundedAnalysisWorker::new(),
             pending_schematic: None,
@@ -1332,6 +1334,11 @@ impl CircuitApp {
                             if self.inspector_ui.active_tab == InspectorTab::Model {
                             ui.add_space(8.0);
                             section_title(ui, "Electrical Model");
+                            if let Some(profile)=crate::model::device::board_profile(component.kind) {
+                                metric_row(ui,"Device profile",profile.name);
+                                metric_row(ui,"Coverage",format!("{:?}; package ratings incomplete",profile.coverage));
+                                ui.hyperlink_to("Manufacturer documentation",profile.source);
+                            }
                             metric_row(ui, "Model", metadata.model_name);
                             simulation_support_row(ui, "Simulation", metadata.simulation);
                             if let Some(warning) = metadata.simulation.warning() {
@@ -1771,12 +1778,13 @@ impl CircuitApp {
                     .analysis
                     .pcb_cad
                     .as_ref()
-                    .map(|cad| cad.nets.clone())
+                    .map(|cad| cad.nets.as_slice())
                     .unwrap_or_default();
                 let commands = crate::ui::pcb_workspace::render_pcb_workspace(
                     ui,
                     &self.document.board,
-                    &nets,
+                    nets,
+                    &self.analysis.pcb_ratsnest,
                     &mut self.pcb_ui.workspace,
                 );
                 for command in commands {

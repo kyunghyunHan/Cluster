@@ -50,7 +50,7 @@ pub fn solve_ac_with_connectivity(
     freq_hz: f64,
     connectivity: &CanonicalConnectivity,
 ) -> Option<AcResult> {
-    if freq_hz <= 0.0 {
+    if !freq_hz.is_finite() || freq_hz <= 0.0 {
         return None;
     }
     let omega = 2.0 * std::f64::consts::PI * freq_hz;
@@ -61,25 +61,30 @@ pub fn solve_ac_with_connectivity(
     // ── GND detection ────────────────────────────────────────────────────
     let mut gnd_roots: HashSet<usize> = HashSet::new();
     for comp in components {
-        match comp.kind {
-            ComponentKind::Ground => {
-                for pin in component_pin_defs(comp) {
-                    if let Some(r) = nm.root_of(pin.pos) {
-                        gnd_roots.insert(r);
-                    }
+        if comp.kind == ComponentKind::Ground {
+            for pin in component_pin_defs(comp) {
+                if let Some(r) = nm.root_of(pin.pos) {
+                    gnd_roots.insert(r);
                 }
             }
-            ComponentKind::VSource | ComponentKind::Battery | ComponentKind::ISource => {
-                for pin in component_pin_defs(comp) {
-                    if pin.role == PinRole::Ground
-                        && let Some(r) = nm.root_of(pin.pos)
-                    {
-                        gnd_roots.insert(r);
-                    }
-                }
-            }
-            _ => {}
         }
+    }
+    if gnd_roots.is_empty()
+        && let Some(source) = components
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.kind,
+                    ComponentKind::VSource | ComponentKind::Battery | ComponentKind::ISource
+                )
+            })
+            .min_by_key(|c| c.id)
+        && let Some(pin) = component_pin_defs(source)
+            .into_iter()
+            .find(|p| p.label == "-")
+        && let Some(root) = nm.root_of(pin.pos)
+    {
+        gnd_roots.insert(root);
     }
     if gnd_roots.is_empty() {
         return None;
@@ -87,7 +92,8 @@ pub fn solve_ac_with_connectivity(
 
     // ── Assign MNA node numbers ───────────────────────────────────────────
     let node_count = nm.nodes.positions.len();
-    let all_roots: HashSet<usize> = (0..node_count).map(|i| nm.uf.find(i)).collect();
+    let all_roots: std::collections::BTreeSet<usize> =
+        (0..node_count).map(|i| nm.uf.find(i)).collect();
     let mut mna_of: HashMap<usize, usize> = HashMap::new();
     let mut next_node = 1usize;
     for &root in &all_roots {
@@ -125,7 +131,7 @@ pub fn solve_ac_with_connectivity(
             _ => {}
         }
     }
-    let sz = 2 * n + vs_count;
+    let sz = 2 * (n + vs_count);
     if sz == 0 {
         return None;
     }
@@ -167,16 +173,20 @@ pub fn solve_ac_with_connectivity(
                        pos: usize,
                        neg: usize,
                        v: f64| {
-        let ki = 2 * n + k;
-        if pos > 0 {
-            a_mat[ki][2 * (pos - 1)] += 1.0;
-            a_mat[2 * (pos - 1)][ki] += 1.0;
+        for part in 0..2 {
+            let ki = 2 * (n + k) + part;
+            if pos > 0 {
+                a_mat[ki][2 * (pos - 1) + part] += 1.0;
+                a_mat[2 * (pos - 1) + part][ki] += 1.0;
+            }
+            if neg > 0 {
+                a_mat[ki][2 * (neg - 1) + part] -= 1.0;
+                a_mat[2 * (neg - 1) + part][ki] -= 1.0;
+            }
+            if part == 0 {
+                z_vec[ki] += v;
+            }
         }
-        if neg > 0 {
-            a_mat[ki][2 * (neg - 1)] -= 1.0;
-            a_mat[2 * (neg - 1)][ki] -= 1.0;
-        }
-        z_vec[ki] += v;
     };
 
     let mut vs_k = 0usize;
@@ -198,7 +208,7 @@ pub fn solve_ac_with_connectivity(
             | ComponentKind::Varistor => {
                 let r = parse_metric_value(&comp.value, "ohm").unwrap_or(10_000.0) as f64;
                 if let (Some(a), Some(b)) = (p0, p1) {
-                    stamp_y(&mut a_mat, a, b, 1.0 / r, 0.0);
+                    stamp_y(&mut a_mat, a, b, 1.0 / r.max(1e-9), 0.0);
                     comp_impedance.insert(comp.id, r);
                 }
             }
@@ -265,6 +275,9 @@ pub fn solve_ac_with_connectivity(
         }
     }
 
+    if a_mat.iter().flatten().chain(&z_vec).any(|v| !v.is_finite()) {
+        return None;
+    }
     // ── Gaussian elimination on the real-expanded system ─────────────────
     let n_eq = sz;
     for col in 0..n_eq {
@@ -303,6 +316,9 @@ pub fn solve_ac_with_connectivity(
         x[i] /= a_mat[i][i];
     }
 
+    if x.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
     // ── Extract node voltages (re, im) ────────────────────────────────────
     let vnode_c = |mna_idx: usize| -> (f64, f64) {
         if mna_idx == 0 {

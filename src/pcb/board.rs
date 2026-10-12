@@ -128,6 +128,8 @@ pub(crate) struct Board {
     pub(crate) footprint_library: Vec<Footprint>,
     pub(crate) design_rules: DesignRules,
     pub(crate) net_classes: Vec<NetClass>,
+    #[serde(default)]
+    pub(crate) net_bindings: Vec<CadNet>,
     #[serde(skip)]
     entity_index: BoardEntityIndex,
     #[serde(skip)]
@@ -148,6 +150,7 @@ impl PartialEq for Board {
             && self.footprint_library == other.footprint_library
             && self.design_rules == other.design_rules
             && self.net_classes == other.net_classes
+            && self.net_bindings == other.net_bindings
     }
 }
 
@@ -234,6 +237,9 @@ pub(crate) struct RatsnestEdge {
     pub(crate) net_id: usize,
     pub(crate) from_footprint_id: u64,
     pub(crate) to_footprint_id: u64,
+    pub(crate) from_position: Point2,
+    pub(crate) to_position: Point2,
+    pub(crate) route_layer: Option<BoardLayer>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +273,10 @@ pub(crate) struct EcoPatch {
     vias_after: Vec<(usize, Via)>,
     net_classes_before: Vec<NetClass>,
     net_classes_after: Vec<NetClass>,
+    net_bindings_before: Vec<CadNet>,
+    net_bindings_after: Vec<CadNet>,
+    zones_before: Vec<Zone>,
+    zones_after: Vec<Zone>,
 }
 
 impl EcoPatch {
@@ -276,6 +286,8 @@ impl EcoPatch {
             && self.tracks_before == self.tracks_after
             && self.vias_before == self.vias_after
             && self.net_classes_before == self.net_classes_after
+            && self.net_bindings_before == self.net_bindings_after
+            && self.zones_before == self.zones_after
     }
 
     pub(crate) fn rollback(&self, board: &mut Board) {
@@ -295,6 +307,8 @@ impl EcoPatch {
             value.id
         });
         board.net_classes.clone_from(&self.net_classes_before);
+        board.net_bindings.clone_from(&self.net_bindings_before);
+        board.zones.clone_from(&self.zones_before);
         board.rebuild_entity_index();
     }
 
@@ -315,6 +329,8 @@ impl EcoPatch {
             value.id
         });
         board.net_classes.clone_from(&self.net_classes_after);
+        board.net_bindings.clone_from(&self.net_bindings_after);
+        board.zones.clone_from(&self.zones_after);
         board.rebuild_entity_index();
     }
 }
@@ -351,6 +367,7 @@ impl Board {
             footprint_library: vec![Footprint::resistor_axial(), Footprint::led_tht_5mm()],
             design_rules: DesignRules::default(),
             net_classes: vec![NetClass::default()],
+            net_bindings: Vec::new(),
             entity_index: BoardEntityIndex::default(),
             spatial_index: PcbSpatialIndex::default(),
         };
@@ -656,6 +673,7 @@ impl Board {
         if self.outline.points.len() < 4
             || self.outline.points.iter().any(|point| !finite(*point))
             || self.outline.points.first() != self.outline.points.last()
+            || !valid_polygon(&self.outline.points)
         {
             violations.push(BoardInvariantViolation::InvalidOutline);
         }
@@ -878,7 +896,25 @@ impl Board {
                 .map(|footprint| footprint.id)
                 .collect(),
             added_nets: incoming_nets.difference(&existing_nets).copied().collect(),
-            removed_nets: existing_nets.difference(&incoming_nets).copied().collect(),
+            removed_nets: existing_nets
+                .into_iter()
+                .filter(|old_id| {
+                    if let Some(old) = self.net_bindings.iter().find(|n| n.net_id == *old_id)
+                        && !old.connected_pins.is_empty()
+                    {
+                        nets.iter()
+                            .filter(|new| {
+                                old.connected_pins
+                                    .iter()
+                                    .all(|pin| new.connected_pins.contains(pin))
+                            })
+                            .count()
+                            != 1
+                    } else {
+                        !incoming_nets.contains(old_id)
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -902,29 +938,17 @@ impl Board {
             .copied()
             .collect::<HashSet<_>>();
         let removed_nets = report.removed_nets.iter().copied().collect::<HashSet<_>>();
-        let track_ids = if removed_policy == RemovedFootprintPolicy::RemoveFootprintAndTracks {
-            self.tracks
-                .iter()
-                .filter(|track| removed_nets.contains(&track.net_id))
-                .map(|track| track.id)
-                .collect()
-        } else {
-            HashSet::new()
-        };
-        let via_ids = if removed_policy == RemovedFootprintPolicy::RemoveFootprintAndTracks {
-            self.vias
-                .iter()
-                .filter(|via| removed_nets.contains(&via.net_id))
-                .map(|via| via.id)
-                .collect()
-        } else {
-            HashSet::new()
-        };
+        // ECO can renumber any copper net, so every affected copper entity is
+        // included in the reversible patch. Physical geometry is preserved.
+        let track_ids = self.tracks.iter().map(|t| t.id).collect();
+        let via_ids = self.vias.iter().map(|v| v.id).collect();
         let footprints_before =
             capture_entities(&self.footprints, &footprint_ids, |value| value.id);
         let tracks_before = capture_entities(&self.tracks, &track_ids, |value| value.id);
         let vias_before = capture_entities(&self.vias, &via_ids, |value| value.id);
         let net_classes_before = self.net_classes.clone();
+        let net_bindings_before = self.net_bindings.clone();
+        let zones_before = self.zones.clone();
 
         let removed_ids = report
             .removed_footprints
@@ -946,6 +970,8 @@ impl Board {
                 .retain(|track| !removed_nets.contains(&track.net_id));
             self.vias.retain(|via| !removed_nets.contains(&via.net_id));
         }
+
+        self.remap_copper_nets(nets);
 
         let symbol_by_id = symbols
             .iter()
@@ -1025,10 +1051,77 @@ impl Board {
             vias_after: capture_entities(&self.vias, &via_ids, |value| value.id),
             net_classes_before,
             net_classes_after: self.net_classes.clone(),
+            net_bindings_before,
+            net_bindings_after: self.net_bindings.clone(),
+            zones_before,
+            zones_after: self.zones.clone(),
             footprint_ids,
             track_ids,
             via_ids,
         }
+    }
+
+    fn remap_copper_nets(&mut self, incoming: &[CadNet]) {
+        let copper_ids = self
+            .tracks
+            .iter()
+            .map(|t| t.net_id)
+            .chain(self.vias.iter().map(|v| v.net_id))
+            .chain(self.zones.iter().map(|z| z.net_id))
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut next_id = incoming
+            .iter()
+            .map(|n| n.net_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut bindings = incoming.to_vec();
+        let mut remap = HashMap::new();
+        for old_id in copper_ids {
+            let old = self.net_bindings.iter().find(|n| n.net_id == old_id);
+            let candidates = old
+                .filter(|n| !n.connected_pins.is_empty())
+                .map(|old| {
+                    incoming
+                        .iter()
+                        .filter(|new| {
+                            old.connected_pins
+                                .iter()
+                                .all(|p| new.connected_pins.contains(p))
+                        })
+                        .map(|n| n.net_id)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let id = if candidates.len() == 1 {
+                candidates[0]
+            } else {
+                // A split, removal or legacy unknown assignment cannot be
+                // silently attached to an unrelated incoming numeric net ID.
+                let id = next_id;
+                next_id = next_id.saturating_add(1);
+                let mut orphan = old.cloned().unwrap_or(CadNet {
+                    net_id: id,
+                    name: "Unverified legacy copper".into(),
+                    connected_pins: Vec::new(),
+                    class_id: "Default".into(),
+                });
+                orphan.net_id = id;
+                bindings.push(orphan);
+                id
+            };
+            remap.insert(old_id, id);
+        }
+        for track in &mut self.tracks {
+            track.net_id = remap[&track.net_id];
+        }
+        for via in &mut self.vias {
+            via.net_id = remap[&via.net_id];
+        }
+        for zone in &mut self.zones {
+            zone.net_id = remap[&zone.net_id];
+        }
+        self.net_bindings = bindings;
     }
 
     pub(crate) fn apply_eco(
@@ -1045,111 +1138,54 @@ impl Board {
     }
 
     pub(crate) fn ratsnest_edges(&self, nets: &[CadNet]) -> Vec<RatsnestEdge> {
-        let symbol_to_footprint = self
-            .footprints
-            .iter()
-            .filter_map(|footprint| footprint.symbol_instance_id.map(|id| (id, footprint.id)))
-            .collect::<std::collections::HashMap<_, _>>();
+        let resolved = super::copper::resolve_pads(self, nets);
         let mut edges = Vec::new();
         for net in nets {
-            let mut footprint_ids = net
-                .connected_pins
+            let pads = resolved
                 .iter()
-                .filter_map(|pin| symbol_to_footprint.get(&pin.component_id).copied())
+                .filter(|p| p.net_id == net.net_id)
+                .cloned()
                 .collect::<Vec<_>>();
-            footprint_ids.sort_unstable();
-            footprint_ids.dedup();
-            let islands = self.copper_islands(net.net_id, &footprint_ids);
+            let islands = super::copper::pad_islands(self, &pads, net.net_id);
             if islands.len() < 2 {
                 continue;
             }
             let mut joined = vec![false; islands.len()];
             joined[0] = true;
-            while joined.iter().any(|joined| !joined) {
-                let mut best: Option<(f32, usize, usize, u64, u64)> = None;
-                for (a_index, a) in islands.iter().enumerate().filter(|(i, _)| joined[*i]) {
-                    for (b_index, b) in islands.iter().enumerate().filter(|(i, _)| !joined[*i]) {
-                        for &a_id in a {
-                            for &b_id in b {
-                                let Some(a_pos) = self.footprint_position(a_id) else {
-                                    continue;
-                                };
-                                let Some(b_pos) = self.footprint_position(b_id) else {
-                                    continue;
-                                };
-                                let distance =
-                                    (a_pos.x - b_pos.x).powi(2) + (a_pos.y - b_pos.y).powi(2);
-                                if best.is_none_or(|candidate| distance < candidate.0) {
-                                    best = Some((distance, a_index, b_index, a_id, b_id));
+            while joined.iter().any(|j| !j) {
+                let mut best: Option<(f32, usize, usize, usize)> = None;
+                for (a, group) in islands.iter().enumerate().filter(|(i, _)| joined[*i]) {
+                    let _ = a;
+                    for (b, other) in islands.iter().enumerate().filter(|(i, _)| !joined[*i]) {
+                        for &i in group {
+                            for &j in other {
+                                let distance = (pads[i].position.x - pads[j].position.x)
+                                    .hypot(pads[i].position.y - pads[j].position.y);
+                                if best.is_none_or(|v| distance < v.0) {
+                                    best = Some((distance, b, i, j));
                                 }
                             }
                         }
                     }
                 }
-                let Some((_, _, b_index, from, to)) = best else {
+                let Some((_, b, i, j)) = best else {
                     break;
                 };
-                joined[b_index] = true;
+                joined[b] = true;
                 edges.push(RatsnestEdge {
                     net_id: net.net_id,
-                    from_footprint_id: from,
-                    to_footprint_id: to,
+                    from_footprint_id: pads[i].footprint_id,
+                    to_footprint_id: pads[j].footprint_id,
+                    from_position: pads[i].position,
+                    to_position: pads[j].position,
+                    route_layer: pads[i].layers.iter().copied().find(|l| {
+                        matches!(l, BoardLayer::FrontCopper | BoardLayer::BackCopper)
+                            && pads[j].layers.contains(l)
+                    }),
                 });
             }
         }
         edges
-    }
-
-    fn footprint_position(&self, id: u64) -> Option<Point2> {
-        self.footprints
-            .iter()
-            .find(|footprint| footprint.id == id)
-            .map(|footprint| footprint.position)
-    }
-
-    fn copper_islands(&self, net_id: usize, footprint_ids: &[u64]) -> Vec<Vec<u64>> {
-        const CONTACT_MM: f32 = 0.05;
-        let mut islands = footprint_ids
-            .iter()
-            .copied()
-            .map(|id| vec![id])
-            .collect::<Vec<_>>();
-        let tracks = self
-            .tracks
-            .iter()
-            .filter(|track| track.net_id == net_id)
-            .collect::<Vec<_>>();
-        let vias = self
-            .vias
-            .iter()
-            .filter(|via| via.net_id == net_id)
-            .collect::<Vec<_>>();
-        loop {
-            let mut merged = false;
-            'outer: for a in 0..islands.len() {
-                for b in (a + 1)..islands.len() {
-                    if islands[a].iter().any(|&a_id| {
-                        islands[b].iter().any(|&b_id| {
-                            let (Some(a_pos), Some(b_pos)) =
-                                (self.footprint_position(a_id), self.footprint_position(b_id))
-                            else {
-                                return false;
-                            };
-                            copper_path_exists(a_pos, b_pos, &tracks, &vias, CONTACT_MM)
-                        })
-                    }) {
-                        let other = islands.remove(b);
-                        islands[a].extend(other);
-                        merged = true;
-                        break 'outer;
-                    }
-                }
-            }
-            if !merged {
-                break;
-            }
-        }
-        islands
     }
 }
 
@@ -1173,7 +1209,7 @@ fn validate_known_net(
     }
 }
 
-fn valid_polygon(points: &[Point2]) -> bool {
+pub(crate) fn valid_polygon(points: &[Point2]) -> bool {
     if points.len() < 3 || points.iter().any(|point| !finite(*point)) {
         return false;
     }
@@ -1282,67 +1318,97 @@ fn restore_entities<T: Clone>(
     }
 }
 
-fn copper_path_exists(
-    start: Point2,
-    end: Point2,
-    tracks: &[&TrackSegment],
-    vias: &[&Via],
-    tolerance: f32,
-) -> bool {
-    let close =
-        |a: Point2, b: Point2| (a.x - b.x).powi(2) + (a.y - b.y).powi(2) <= tolerance * tolerance;
-    let mut reached = vec![false; tracks.len()];
-    let mut frontier = tracks
-        .iter()
-        .enumerate()
-        .filter(|(_, track)| close(start, track.start) || close(start, track.end))
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    while let Some(index) = frontier.pop() {
-        if reached[index] {
-            continue;
-        }
-        reached[index] = true;
-        let track = tracks[index];
-        if close(end, track.start) || close(end, track.end) {
-            return true;
-        }
-        for (candidate_index, candidate) in tracks.iter().enumerate() {
-            let same_layer_contact = track.layer == candidate.layer
-                && (close(track.start, candidate.start)
-                    || close(track.start, candidate.end)
-                    || close(track.end, candidate.start)
-                    || close(track.end, candidate.end));
-            let via_contact = vias.iter().any(|via| {
-                point_to_segment(via.position, track.start, track.end)
-                    <= via.diameter_mm * 0.5 + tolerance
-                    && point_to_segment(via.position, candidate.start, candidate.end)
-                        <= via.diameter_mm * 0.5 + tolerance
-            });
-            if !reached[candidate_index] && (same_layer_contact || via_contact) {
-                frontier.push(candidate_index);
-            }
-        }
-    }
-    false
-}
-
-fn point_to_segment(point: Point2, start: Point2, end: Point2) -> f32 {
-    let dx = end.x - start.x;
-    let dy = end.y - start.y;
-    let length_squared = dx * dx + dy * dy;
-    if length_squared <= f32::EPSILON {
-        return ((point.x - start.x).powi(2) + (point.y - start.y).powi(2)).sqrt();
-    }
-    let t =
-        (((point.x - start.x) * dx + (point.y - start.y) * dy) / length_squared).clamp(0.0, 1.0);
-    let closest = Point2::new(start.x + dx * t, start.y + dy * t);
-    ((point.x - closest.x).powi(2) + (point.y - closest.y).powi(2)).sqrt()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_eco_net_renumbering_preserves_copper_identity_and_undo() {
+        let mut board = Board::new_two_layer(20.0, 20.0);
+        let old = CadNet {
+            net_id: 7,
+            name: "LOAD".into(),
+            connected_pins: vec![crate::PinRef {
+                component_id: 1,
+                pin_name: "A".into(),
+            }],
+            class_id: "Default".into(),
+        };
+        board.apply_eco(
+            &[],
+            std::slice::from_ref(&old),
+            RemovedFootprintPolicy::KeepAsOrphan,
+        );
+        board.add_track(TrackSegment {
+            id: 1,
+            net_id: 7,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(2.0, 2.0),
+            end: Point2::new(5.0, 2.0),
+            width_mm: 0.25,
+        });
+        board.zones.push(Zone {
+            id: 2,
+            net_id: 7,
+            layer: BoardLayer::FrontCopper,
+            outline: vec![
+                Point2::new(1.0, 1.0),
+                Point2::new(4.0, 1.0),
+                Point2::new(4.0, 4.0),
+                Point2::new(1.0, 1.0),
+            ],
+        });
+        let mut renamed = old;
+        renamed.net_id = 8;
+        let patch = board.apply_eco_patch(&[], &[renamed], RemovedFootprintPolicy::KeepAsOrphan);
+        assert_eq!(board.tracks[0].net_id, 8);
+        assert_eq!(board.zones[0].net_id, 8);
+        patch.rollback(&mut board);
+        assert_eq!(board.tracks[0].net_id, 7);
+        assert_eq!(board.zones[0].net_id, 7);
+        patch.reapply(&mut board);
+        assert_eq!(board.tracks[0].net_id, 8);
+        assert_eq!(board.zones[0].net_id, 8);
+    }
+
+    #[test]
+    fn audit_eco_explicit_removal_policy_preserves_renumbered_net() {
+        let mut board = Board::new_two_layer(20.0, 20.0);
+        let old = CadNet {
+            net_id: 7,
+            name: "LOAD".into(),
+            connected_pins: vec![crate::PinRef {
+                component_id: 1,
+                pin_name: "A".into(),
+            }],
+            class_id: "Default".into(),
+        };
+        board.apply_eco(
+            &[],
+            std::slice::from_ref(&old),
+            RemovedFootprintPolicy::RemoveFootprintAndTracks,
+        );
+        board.add_track(TrackSegment {
+            id: 1,
+            net_id: 7,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(2.0, 2.0),
+            end: Point2::new(5.0, 2.0),
+            width_mm: 0.25,
+        });
+        let mut renamed = old;
+        renamed.net_id = 8;
+        let patch = board.apply_eco_patch(
+            &[],
+            &[renamed],
+            RemovedFootprintPolicy::RemoveFootprintAndTracks,
+        );
+        assert_eq!(board.tracks[0].net_id, 8);
+        patch.rollback(&mut board);
+        assert_eq!(board.tracks[0].net_id, 7);
+        patch.reapply(&mut board);
+        assert_eq!(board.tracks[0].net_id, 8);
+    }
 
     #[test]
     fn new_board_has_two_copper_layers_and_edge_outline() {
@@ -1530,7 +1596,7 @@ mod tests {
             id: 1,
             net_id: 7,
             layer: BoardLayer::FrontCopper,
-            start: Point2::new(5.0, 5.0),
+            start: Point2::new(-0.08, 5.0),
             end: Point2::new(15.0, 5.0),
             width_mm: 0.25,
         });
@@ -1541,7 +1607,7 @@ mod tests {
             net_id: 7,
             layer: BoardLayer::FrontCopper,
             start: Point2::new(15.0, 5.0),
-            end: Point2::new(25.0, 5.0),
+            end: Point2::new(19.92, 5.0),
             width_mm: 0.25,
         });
         assert!(board.ratsnest_edges(&nets).is_empty());
@@ -1558,7 +1624,7 @@ mod tests {
                 id: 1,
                 symbol_instance_id: Some(10),
                 reference: "U1".to_string(),
-                footprint_id: "A".to_string(),
+                footprint_id: "R_THT_Axial".to_string(),
                 position: Point2::new(5.0, 5.0),
                 rotation_deg: 0.0,
                 flipped: false,
@@ -1568,7 +1634,7 @@ mod tests {
                 id: 2,
                 symbol_instance_id: Some(20),
                 reference: "U2".to_string(),
-                footprint_id: "B".to_string(),
+                footprint_id: "R_THT_Axial".to_string(),
                 position: Point2::new(25.0, 5.0),
                 rotation_deg: 0.0,
                 flipped: false,
@@ -1580,7 +1646,7 @@ mod tests {
                 id: 1,
                 net_id: 9,
                 layer: BoardLayer::FrontCopper,
-                start: Point2::new(5.0, 5.0),
+                start: Point2::new(-0.08, 5.0),
                 end: Point2::new(15.0, 5.0),
                 width_mm: 0.25,
             },
@@ -1589,7 +1655,7 @@ mod tests {
                 net_id: 9,
                 layer: BoardLayer::BackCopper,
                 start: Point2::new(15.0, 5.0),
-                end: Point2::new(25.0, 5.0),
+                end: Point2::new(19.92, 5.0),
                 width_mm: 0.25,
             },
         ];
@@ -1794,5 +1860,126 @@ mod tests {
 
         board.rebuild_entity_index();
         assert!(board.validate_invariants().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod audit_physical_tests {
+    use super::*;
+    fn fixture() -> (Board, Vec<CadNet>) {
+        let mut board = Board::new_two_layer(40.0, 20.0);
+        for (id, x) in [(1, 10.0), (2, 30.0)] {
+            board.footprints.push(BoardFootprint {
+                id,
+                symbol_instance_id: Some(id),
+                reference: format!("R{id}"),
+                footprint_id: "R_THT_Axial".into(),
+                position: Point2::new(x, 10.0),
+                rotation_deg: 0.0,
+                flipped: false,
+                placed: true,
+            });
+        }
+        board.rebuild_entity_index();
+        let nets = vec![CadNet {
+            net_id: 7,
+            name: "N".into(),
+            connected_pins: vec![
+                crate::PinRef {
+                    component_id: 1,
+                    pin_name: "1".into(),
+                },
+                crate::PinRef {
+                    component_id: 2,
+                    pin_name: "1".into(),
+                },
+            ],
+            class_id: "Default".into(),
+        }];
+        (board, nets)
+    }
+    #[test]
+    fn audit_footprint_origins_are_not_electrical_terminals() {
+        let (mut board, nets) = fixture();
+        board.add_track(TrackSegment {
+            id: 1,
+            net_id: 7,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(10.0, 10.0),
+            end: Point2::new(30.0, 10.0),
+            width_mm: 0.25,
+        });
+        assert_eq!(board.ratsnest_edges(&nets).len(), 1);
+    }
+    #[test]
+    fn audit_actual_pad_copper_completes_the_route() {
+        let (mut board, nets) = fixture();
+        board.add_track(TrackSegment {
+            id: 1,
+            net_id: 7,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(4.92, 10.0),
+            end: Point2::new(24.92, 10.0),
+            width_mm: 0.25,
+        });
+        assert!(board.ratsnest_edges(&nets).is_empty());
+    }
+    #[test]
+    fn audit_two_same_net_pads_on_one_footprint_need_copper() {
+        let (board, _) = fixture();
+        let nets = vec![CadNet {
+            net_id: 7,
+            name: "N".into(),
+            connected_pins: vec![
+                crate::PinRef {
+                    component_id: 1,
+                    pin_name: "1".into(),
+                },
+                crate::PinRef {
+                    component_id: 1,
+                    pin_name: "2".into(),
+                },
+            ],
+            class_id: "Default".into(),
+        }];
+        assert_eq!(board.ratsnest_edges(&nets).len(), 1);
+    }
+    #[test]
+    fn audit_collinear_copper_gap_and_opposite_layers_stay_disconnected() {
+        let (mut board, nets) = fixture();
+        board.add_track(TrackSegment {
+            id: 1,
+            net_id: 7,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(4.92, 10.0),
+            end: Point2::new(15.0, 10.0),
+            width_mm: 0.25,
+        });
+        board.add_track(TrackSegment {
+            id: 2,
+            net_id: 7,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(15.3, 10.0),
+            end: Point2::new(24.92, 10.0),
+            width_mm: 0.25,
+        });
+        assert_eq!(board.ratsnest_edges(&nets).len(), 1);
+        board.edit_track(TrackSegment {
+            id: 2,
+            net_id: 7,
+            layer: BoardLayer::BackCopper,
+            start: Point2::new(15.0, 10.0),
+            end: Point2::new(24.92, 10.0),
+            width_mm: 0.25,
+        });
+        assert_eq!(board.ratsnest_edges(&nets).len(), 1);
+        board.add_via(Via {
+            id: 3,
+            net_id: 7,
+            position: Point2::new(15.0, 10.0),
+            diameter_mm: 0.8,
+            drill_mm: 0.4,
+        });
+        assert!(board.ratsnest_edges(&nets).is_empty());
     }
 }

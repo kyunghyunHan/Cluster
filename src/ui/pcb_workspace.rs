@@ -27,10 +27,6 @@ pub(crate) enum CornerMode {
 pub(crate) enum RoutingState {
     #[default]
     Idle,
-    Armed {
-        source_footprint: u64,
-        net: usize,
-    },
     Routing {
         net: usize,
         layer: BoardLayer,
@@ -117,6 +113,7 @@ pub(crate) fn render_pcb_workspace(
     ui: &mut egui::Ui,
     board: &Board,
     nets: &[CadNet],
+    ratsnest: &[crate::pcb::board::RatsnestEdge],
     state: &mut PcbWorkspaceState,
 ) -> Vec<PcbCommand> {
     let mut commands = Vec::new();
@@ -206,7 +203,6 @@ pub(crate) fn render_pcb_workspace(
                 ui.separator();
                 ui.label(match &state.routing {
                     RoutingState::Idle => "Routing idle".to_string(),
-                    RoutingState::Armed { net, .. } => format!("Net {net} armed"),
                     RoutingState::Routing {
                         net,
                         anchors,
@@ -239,7 +235,7 @@ pub(crate) fn render_pcb_workspace(
             &painter,
             rect,
             board,
-            nets,
+            ratsnest,
             state,
             Point2::new((-state.pan.x) / state.zoom, (-state.pan.y) / state.zoom),
             Point2::new(
@@ -308,7 +304,7 @@ fn draw_board(
     painter: &egui::Painter,
     rect: Rect,
     board: &Board,
-    nets: &[CadNet],
+    ratsnest: &[crate::pcb::board::RatsnestEdge],
     state: &PcbWorkspaceState,
     viewport_min: Point2,
     viewport_max: Point2,
@@ -397,15 +393,11 @@ fn draw_board(
             Color32::from_rgb(20, 24, 28),
         );
     }
-    for edge in board.ratsnest_edges(nets) {
-        let from = board.footprint(edge.from_footprint_id);
-        let to = board.footprint(edge.to_footprint_id);
-        if let Some((from, to)) = from.zip(to) {
-            painter.line_segment(
-                [map(from.position), map(to.position)],
-                Stroke::new(1.0_f32, Color32::from_rgb(220, 205, 85)),
-            );
-        }
+    for edge in ratsnest {
+        painter.line_segment(
+            [map(edge.from_position), map(edge.to_position)],
+            Stroke::new(1.0_f32, Color32::from_rgb(220, 205, 85)),
+        );
     }
     for footprint in board
         .footprints_in_rect(viewport_min, viewport_max)
@@ -659,34 +651,30 @@ fn route_click(
     world: Point2,
     commands: &mut Vec<PcbCommand>,
 ) {
-    let hit = hit_footprint(board, world);
+    let pads = crate::pcb::copper::resolve_pads(board, nets);
+    let hit = pads
+        .iter()
+        .filter(|p| p.layers.contains(&state.active_layer))
+        .filter(|p| {
+            crate::pcb::geometry::pad_segment_distance(&p.pad, p.transform, world, world) <= 0.05
+        })
+        .min_by(|a, b| {
+            (a.position.x - world.x)
+                .hypot(a.position.y - world.y)
+                .total_cmp(&(b.position.x - world.x).hypot(b.position.y - world.y))
+        });
     match &mut state.routing {
         RoutingState::Idle => {
-            let Some(source_id) = hit else {
+            let Some(pad) = hit else {
                 return;
             };
-            let Some(net) = footprint_net(board, nets, source_id) else {
-                return;
-            };
-            state.highlighted_net = Some(net);
-            state.routing = RoutingState::Armed {
-                source_footprint: source_id,
-                net,
-            };
-        }
-        RoutingState::Armed {
-            source_footprint,
-            net,
-        } => {
-            let start = board
-                .footprint(*source_footprint)
-                .map_or(world, |footprint| footprint.position);
+            state.highlighted_net = Some(pad.net_id);
             state.routing = RoutingState::Routing {
-                net: *net,
+                net: pad.net_id,
                 layer: state.active_layer,
                 width_mm: board.design_rules.min_track_width_mm.max(0.25),
-                anchors: vec![start, world],
-                cursor: world,
+                anchors: vec![pad.position],
+                cursor: pad.position,
                 corner_mode: state.corner_mode,
                 vias: Vec::new(),
             };
@@ -700,8 +688,8 @@ fn route_click(
             vias,
             ..
         } => {
-            if hit.is_some_and(|id| footprint_net(board, nets, id) == Some(*net)) {
-                anchors.push(world);
+            if let Some(pad) = hit.filter(|p| p.net_id == *net && p.layers.contains(layer)) {
+                anchors.push(pad.position);
                 let mut next_id = board.tracks.iter().map(|track| track.id).max().unwrap_or(0) + 1;
                 let mut tracks = Vec::new();
                 for points in anchors.windows(2) {
@@ -787,17 +775,6 @@ fn point_distance(left: Point2, right: Point2) -> f32 {
     ((left.x - right.x).powi(2) + (left.y - right.y).powi(2)).sqrt()
 }
 
-fn footprint_net(board: &Board, nets: &[CadNet], footprint_id: u64) -> Option<usize> {
-    let symbol_id = board.footprint(footprint_id)?.symbol_instance_id?;
-    nets.iter()
-        .find(|net| {
-            net.connected_pins
-                .iter()
-                .any(|pin| pin.component_id == symbol_id)
-        })
-        .map(|net| net.net_id)
-}
-
 fn snap_point(point: Point2, grid: f32) -> Point2 {
     if grid <= f32::EPSILON {
         point
@@ -837,4 +814,66 @@ fn route_segments(start: Point2, end: Point2, mode: CornerMode) -> Vec<(Point2, 
         }
     };
     vec![(start, corner), (corner, end)]
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    #[test]
+    fn audit_route_starts_at_the_selected_pad_on_its_net() {
+        let mut board = Board::new_two_layer(40.0, 20.0);
+        board.footprints.push(crate::pcb::board::BoardFootprint {
+            id: 1,
+            symbol_instance_id: Some(10),
+            reference: "R1".into(),
+            footprint_id: "R_THT_Axial".into(),
+            position: Point2::new(10.0, 10.0),
+            rotation_deg: 0.0,
+            flipped: false,
+            placed: true,
+        });
+        board.rebuild_entity_index();
+        let nets = vec![
+            CadNet {
+                net_id: 7,
+                name: "A".into(),
+                connected_pins: vec![crate::PinRef {
+                    component_id: 10,
+                    pin_name: "A".into(),
+                }],
+                class_id: "Default".into(),
+            },
+            CadNet {
+                net_id: 8,
+                name: "B".into(),
+                connected_pins: vec![crate::PinRef {
+                    component_id: 10,
+                    pin_name: "B".into(),
+                }],
+                class_id: "Default".into(),
+            },
+        ];
+        let mut state = PcbWorkspaceState::initialized();
+        let mut commands = Vec::new();
+        route_click(
+            &board,
+            &nets,
+            &mut state,
+            Point2::new(10.0, 10.0),
+            &mut commands,
+        );
+        assert_eq!(state.routing, RoutingState::Idle, "the body is not a pad");
+        route_click(
+            &board,
+            &nets,
+            &mut state,
+            Point2::new(15.08, 10.0),
+            &mut commands,
+        );
+        let RoutingState::Routing { net, anchors, .. } = state.routing else {
+            panic!("pad starts route")
+        };
+        assert_eq!(net, 8);
+        assert_eq!(anchors, vec![Point2::new(15.08, 10.0)]);
+    }
 }

@@ -163,6 +163,10 @@ pub(crate) struct CadProjectData {
     pub(crate) net_classes: Vec<NetClass>,
     pub(crate) board: Option<crate::pcb::board::Board>,
     pub(crate) properties: HashMap<String, String>,
+    /// When present, project.json is the atomic commit of all workspaces.
+    /// The standalone schematic/board files remain readable mirrors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) schematic: Option<super::SavedCircuit>,
 }
 
 impl CadProjectData {
@@ -178,6 +182,7 @@ impl CadProjectData {
             net_classes: vec![default_class],
             board: None,
             properties: HashMap::new(),
+            schematic: None,
         }
     }
 }

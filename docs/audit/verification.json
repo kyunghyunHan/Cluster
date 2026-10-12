@@ -1,0 +1,32 @@
+[
+  {
+    "command": "cargo fmt --check",
+    "exit_code": 0,
+    "seconds": 0.56,
+    "log": "final-fmt.log"
+  },
+  {
+    "command": "cargo check",
+    "exit_code": 0,
+    "seconds": 1.738,
+    "log": "final-check.log"
+  },
+  {
+    "command": "cargo clippy --all-targets --all-features -- -D warnings",
+    "exit_code": 0,
+    "seconds": 2.757,
+    "log": "final-clippy.log"
+  },
+  {
+    "command": "cargo test --all-targets",
+    "exit_code": 0,
+    "seconds": 8.989,
+    "log": "final-test.log"
+  },
+  {
+    "command": "cargo build --release",
+    "exit_code": 0,
+    "seconds": 59.754,
+    "log": "final-release.log"
+  }
+]

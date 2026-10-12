@@ -47,8 +47,9 @@ pub(crate) fn run_drc(board: &Board) -> Vec<DrcViolation> {
                 object_id: Some(track.id),
             });
         }
-        let edge_distance = distance_to_board_edge(board, track.start)
-            .min(distance_to_board_edge(board, track.end));
+        let edge_distance =
+            super::geometry::edge_distance(&board.outline.points, track.start, track.end)
+                - track.width_mm * 0.5;
         if edge_distance < rules.board_edge_clearance_mm {
             violations.push(DrcViolation {
                 severity: DrcSeverity::Error,
@@ -103,7 +104,9 @@ pub(crate) fn run_drc(board: &Board) -> Vec<DrcViolation> {
         }
     }
 
-    if board.outline.points.len() < 4 || board.outline.points.first() != board.outline.points.last()
+    if board.outline.points.len() < 4
+        || board.outline.points.first() != board.outline.points.last()
+        || !crate::pcb::board::valid_polygon(&board.outline.points)
     {
         violations.push(DrcViolation {
             severity: DrcSeverity::Error,
@@ -123,7 +126,7 @@ pub(crate) fn run_drc(board: &Board) -> Vec<DrcViolation> {
             let distance = segment_distance(a.start, a.end, b.start, b.end);
             let required = rules.default_clearance_mm + (a.width_mm + b.width_mm) * 0.5;
             if distance < required {
-                let short = distance <= f32::EPSILON;
+                let short = distance <= (a.width_mm + b.width_mm) * 0.5;
                 violations.push(DrcViolation {
                     severity: DrcSeverity::Error,
                     title: if short {
@@ -166,6 +169,88 @@ pub(crate) fn run_drc(board: &Board) -> Vec<DrcViolation> {
                 ),
                 location: Some(footprint.position),
                 object_id: Some(footprint.id),
+            });
+        }
+    }
+
+    // Check physical pad extents, not just footprint origins. Arbitrary
+    // rotation uses the same transform as rendering, snapping and drilling.
+    for footprint in board.footprints.iter().filter(|f| f.placed) {
+        let Some(definition) = board
+            .footprint_library
+            .iter()
+            .find(|d| d.footprint_id == footprint.footprint_id)
+        else {
+            continue;
+        };
+        for pad in &definition.pads {
+            let center = footprint.transform().local_to_board(pad.position);
+            let half_w = pad.size.w * 0.5;
+            let half_h = pad.size.h * 0.5;
+            let corners = [
+                (-half_w, -half_h),
+                (half_w, -half_h),
+                (half_w, half_h),
+                (-half_w, half_h),
+            ]
+            .map(|(x, y)| {
+                footprint
+                    .transform()
+                    .local_to_board(Point2::new(pad.position.x + x, pad.position.y + y))
+            });
+            let outside = if pad.shape == crate::pcb::footprint::PadShape::Circle {
+                !point_inside_board_bounds(board, center)
+                    || super::geometry::edge_distance(&board.outline.points, center, center)
+                        < half_w
+            } else {
+                corners
+                    .iter()
+                    .any(|p| !point_inside_board_bounds(board, *p))
+            };
+            let copper_edge = board
+                .outline
+                .points
+                .windows(2)
+                .map(|edge| {
+                    super::geometry::pad_segment_distance(
+                        pad,
+                        footprint.transform(),
+                        edge[0],
+                        edge[1],
+                    )
+                })
+                .fold(f32::INFINITY, f32::min);
+            if outside || copper_edge < rules.board_edge_clearance_mm {
+                violations.push(DrcViolation {
+                    severity: DrcSeverity::Error,
+                    title: if outside {
+                        "Pad outside board"
+                    } else {
+                        "Pad too close to edge"
+                    }
+                    .into(),
+                    message: format!(
+                        "{} pad {} violates Edge.Cuts clearance.",
+                        footprint.reference, pad.number
+                    ),
+                    location: Some(center),
+                    object_id: Some(footprint.id),
+                });
+            }
+        }
+    }
+    for via in &board.vias {
+        if !point_inside_board_bounds(board, via.position)
+            || super::geometry::edge_distance(&board.outline.points, via.position, via.position)
+                - via.diameter_mm * 0.5
+                < rules.board_edge_clearance_mm
+        {
+            violations.push(DrcViolation {
+                severity: DrcSeverity::Error,
+                title: "Via outside board or too close to edge".into(),
+                message: format!("Via {} violates Edge.Cuts clearance.", via.id),
+                location: Some(via.position),
+                object_id: Some(via.id),
             });
         }
     }
@@ -292,6 +377,185 @@ pub(crate) fn run_local_drc(
 
 pub(crate) fn run_drc_with_nets(board: &Board, nets: &[CadNet]) -> Vec<DrcViolation> {
     let mut violations = run_drc(board);
+    let pads = super::copper::resolve_pads(board, nets);
+    let clearance = |a: usize, b: usize| {
+        let mut required = board.design_rules.default_clearance_mm;
+        for id in [a, b] {
+            if let Some(class) = nets
+                .iter()
+                .find(|n| n.net_id == id)
+                .and_then(|n| board.net_classes.iter().find(|c| c.class_id == n.class_id))
+            {
+                required = required.max(class.clearance_mm);
+            }
+        }
+        required
+    };
+    for track in &board.tracks {
+        if !nets.iter().any(|n| n.net_id == track.net_id) {
+            violations.push(DrcViolation {severity:DrcSeverity::Error,title:"Unverified copper net".into(),message:format!("Track {} has an orphan or ambiguous ECO assignment; verify its net before fabrication.",track.id),location:Some(track.start),object_id:Some(track.id)});
+        }
+    }
+    // Per-instance assignments prevent shared library pad definitions from
+    // connecting every instance of a part to the same net.
+    for (i, a) in pads.iter().enumerate().filter(|(_, p)| {
+        board
+            .footprints
+            .iter()
+            .any(|f| f.id == p.footprint_id && f.placed)
+    }) {
+        for b in pads.iter().skip(i + 1).filter(|p| {
+            board
+                .footprints
+                .iter()
+                .any(|f| f.id == p.footprint_id && f.placed)
+        }) {
+            if a.net_id == b.net_id || !a.layers.iter().any(|l| b.layers.contains(l)) {
+                continue;
+            }
+            let distance = super::geometry::pad_distance(&a.pad, a.transform, &b.pad, b.transform);
+            if distance < clearance(a.net_id, b.net_id) {
+                violations.push(DrcViolation {
+                    severity: DrcSeverity::Error,
+                    title: "Pad copper clearance".into(),
+                    message: format!(
+                        "Pads {}.{} and {}.{} have {:.3} mm copper clearance.",
+                        a.footprint_id, a.number, b.footprint_id, b.number, distance
+                    ),
+                    location: Some(a.position),
+                    object_id: Some(a.footprint_id),
+                });
+            }
+        }
+        for track in &board.tracks {
+            if a.net_id == track.net_id || !a.layers.contains(&track.layer) {
+                continue;
+            }
+            let distance =
+                super::geometry::pad_segment_distance(&a.pad, a.transform, track.start, track.end)
+                    - track.width_mm * 0.5;
+            if distance < clearance(a.net_id, track.net_id) {
+                violations.push(DrcViolation {
+                    severity: DrcSeverity::Error,
+                    title: "Track to pad clearance".into(),
+                    message: format!(
+                        "Track {} violates pad {}.{} copper clearance.",
+                        track.id, a.footprint_id, a.number
+                    ),
+                    location: Some(a.position),
+                    object_id: Some(track.id),
+                });
+            }
+        }
+        for via in &board.vias {
+            if a.net_id == via.net_id {
+                continue;
+            }
+            let distance = super::geometry::pad_segment_distance(
+                &a.pad,
+                a.transform,
+                via.position,
+                via.position,
+            ) - via.diameter_mm * 0.5;
+            if distance < clearance(a.net_id, via.net_id) {
+                violations.push(DrcViolation {
+                    severity: DrcSeverity::Error,
+                    title: "Via to pad clearance".into(),
+                    message: format!(
+                        "Via {} violates pad {}.{} copper clearance.",
+                        via.id, a.footprint_id, a.number
+                    ),
+                    location: Some(via.position),
+                    object_id: Some(via.id),
+                });
+            }
+        }
+    }
+    for (i, a) in board.tracks.iter().enumerate() {
+        for b in board.tracks.iter().skip(i + 1) {
+            if a.net_id == b.net_id
+                || a.layer != b.layer
+                || clearance(a.net_id, b.net_id) <= board.design_rules.default_clearance_mm
+            {
+                continue;
+            }
+            if segment_distance(a.start, a.end, b.start, b.end) - (a.width_mm + b.width_mm) * 0.5
+                < clearance(a.net_id, b.net_id)
+            {
+                violations.push(DrcViolation {
+                    severity: DrcSeverity::Error,
+                    title: "Net class clearance".into(),
+                    message: format!("Tracks {} and {} violate net class clearance.", a.id, b.id),
+                    location: Some(a.start),
+                    object_id: Some(a.id),
+                });
+            }
+        }
+        for via in &board.vias {
+            if a.net_id == via.net_id {
+                continue;
+            }
+            if point_segment_distance(via.position, a.start, a.end)
+                - (via.diameter_mm + a.width_mm) * 0.5
+                < clearance(a.net_id, via.net_id)
+            {
+                violations.push(DrcViolation {
+                    severity: DrcSeverity::Error,
+                    title: "Track to via clearance".into(),
+                    message: format!("Track {} violates via {} copper clearance.", a.id, via.id),
+                    location: Some(via.position),
+                    object_id: Some(a.id),
+                });
+            }
+        }
+    }
+    for (i, a) in board.vias.iter().enumerate() {
+        for b in board.vias.iter().skip(i + 1) {
+            if a.net_id != b.net_id
+                && (a.position.x - b.position.x).hypot(a.position.y - b.position.y)
+                    - (a.diameter_mm + b.diameter_mm) * 0.5
+                    < clearance(a.net_id, b.net_id)
+            {
+                violations.push(DrcViolation {
+                    severity: DrcSeverity::Error,
+                    title: "Via copper clearance".into(),
+                    message: format!("Vias {} and {} violate copper clearance.", a.id, b.id),
+                    location: Some(a.position),
+                    object_id: Some(a.id),
+                });
+            }
+        }
+    }
+    for footprint in &board.footprints {
+        let Some(symbol) = footprint.symbol_instance_id else {
+            continue;
+        };
+        for net in nets {
+            for pin in net
+                .connected_pins
+                .iter()
+                .filter(|p| p.component_id == symbol)
+            {
+                let known = pads.iter().any(|p| {
+                    p.footprint_id == footprint.id
+                        && p.net_id == net.net_id
+                        && p.schematic_pin == pin.pin_name
+                });
+                if !known {
+                    violations.push(DrcViolation {
+                        severity: DrcSeverity::Error,
+                        title: "Unmapped schematic pin".into(),
+                        message: format!(
+                            "{} pin {} has no verified footprint pad mapping.",
+                            footprint.reference, pin.pin_name
+                        ),
+                        location: Some(footprint.position),
+                        object_id: Some(footprint.id),
+                    });
+                }
+            }
+        }
+    }
     for ratsnest in board.ratsnest_edges(nets) {
         let from = board
             .footprints
@@ -302,7 +566,7 @@ pub(crate) fn run_drc_with_nets(board: &Board, nets: &[CadNet]) -> Vec<DrcViolat
             .iter()
             .find(|footprint| footprint.id == ratsnest.to_footprint_id);
         violations.push(DrcViolation {
-            severity: DrcSeverity::Warning,
+            severity: DrcSeverity::Error,
             title: "Unrouted ratsnest".to_string(),
             message: format!(
                 "Net {} still has an unrouted connection between footprints {} and {}.",
@@ -322,97 +586,148 @@ fn copper_endpoint_connected(
     current: &crate::pcb::track::TrackSegment,
     point: Point2,
 ) -> bool {
-    const CONTACT_MM: f32 = 0.05;
-    board.footprints.iter().any(|footprint| {
-        footprint.placed
-            && ((footprint.position.x - point.x).powi(2) + (footprint.position.y - point.y).powi(2))
-                .sqrt()
-                <= CONTACT_MM
-    }) || board.vias.iter().any(|via| {
-        via.net_id == current.net_id
-            && ((via.position.x - point.x).powi(2) + (via.position.y - point.y).powi(2)).sqrt()
-                <= via.diameter_mm * 0.5
-    }) || board.tracks.iter().any(|track| {
-        track.id != current.id
-            && track.net_id == current.net_id
-            && track.layer == current.layer
-            && (point_segment_distance(point, track.start, track.end) <= CONTACT_MM)
-    })
+    const CONTACT_MM: f32 = 0.000001;
+    board
+        .footprints
+        .iter()
+        .filter(|f| f.placed)
+        .any(|footprint| {
+            board
+                .footprint_library
+                .iter()
+                .find(|d| d.footprint_id == footprint.footprint_id)
+                .is_some_and(|definition| {
+                    definition.pads.iter().any(|pad| {
+                        footprint
+                            .transform()
+                            .transform_pad(pad)
+                            .layers
+                            .contains(&current.layer)
+                            && super::geometry::pad_segment_distance(
+                                pad,
+                                footprint.transform(),
+                                point,
+                                point,
+                            ) <= current.width_mm * 0.5
+                    })
+                })
+        })
+        || board.vias.iter().any(|via| {
+            via.net_id == current.net_id
+                && ((via.position.x - point.x).powi(2) + (via.position.y - point.y).powi(2)).sqrt()
+                    <= via.diameter_mm * 0.5
+        })
+        || board.tracks.iter().any(|track| {
+            track.id != current.id
+                && track.net_id == current.net_id
+                && track.layer == current.layer
+                && (point_segment_distance(point, track.start, track.end) <= CONTACT_MM)
+        })
 }
 
 fn midpoint(a: Point2, b: Point2) -> Point2 {
     Point2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5)
 }
 
-fn board_bounds(board: &Board) -> Option<(Point2, Point2)> {
-    let first = *board.outline.points.first()?;
-    let mut min = first;
-    let mut max = first;
-    for point in &board.outline.points {
-        min.x = min.x.min(point.x);
-        min.y = min.y.min(point.y);
-        max.x = max.x.max(point.x);
-        max.y = max.y.max(point.y);
-    }
-    Some((min, max))
-}
-
 fn point_inside_board_bounds(board: &Board, point: Point2) -> bool {
-    let Some((min, max)) = board_bounds(board) else {
-        return false;
-    };
-    point.x >= min.x && point.x <= max.x && point.y >= min.y && point.y <= max.y
+    super::geometry::inside_polygon(&board.outline.points, point)
 }
 
-fn distance_to_board_edge(board: &Board, point: Point2) -> f32 {
-    let Some((min, max)) = board_bounds(board) else {
-        return 0.0;
-    };
-    (point.x - min.x)
-        .abs()
-        .min((max.x - point.x).abs())
-        .min((point.y - min.y).abs())
-        .min((max.y - point.y).abs())
-}
-
-fn segment_distance(a1: Point2, a2: Point2, b1: Point2, b2: Point2) -> f32 {
-    if segments_intersect(a1, a2, b1, b2) {
-        return 0.0;
-    }
-    point_segment_distance(a1, b1, b2)
-        .min(point_segment_distance(a2, b1, b2))
-        .min(point_segment_distance(b1, a1, a2))
-        .min(point_segment_distance(b2, a1, a2))
-}
-
-fn point_segment_distance(p: Point2, a: Point2, b: Point2) -> f32 {
-    let ab = Point2::new(b.x - a.x, b.y - a.y);
-    let ap = Point2::new(p.x - a.x, p.y - a.y);
-    let len2 = ab.x * ab.x + ab.y * ab.y;
-    if len2 <= f32::EPSILON {
-        return ((p.x - a.x).powi(2) + (p.y - a.y).powi(2)).sqrt();
-    }
-    let t = ((ap.x * ab.x + ap.y * ab.y) / len2).clamp(0.0, 1.0);
-    let closest = Point2::new(a.x + ab.x * t, a.y + ab.y * t);
-    ((p.x - closest.x).powi(2) + (p.y - closest.y).powi(2)).sqrt()
-}
-
-fn segments_intersect(a1: Point2, a2: Point2, b1: Point2, b2: Point2) -> bool {
-    fn orient(a: Point2, b: Point2, c: Point2) -> f32 {
-        (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
-    }
-    let o1 = orient(a1, a2, b1);
-    let o2 = orient(a1, a2, b2);
-    let o3 = orient(b1, b2, a1);
-    let o4 = orient(b1, b2, a2);
-    o1.signum() != o2.signum() && o3.signum() != o4.signum()
-}
+use super::geometry::{point_segment_distance, segment_distance};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pcb::layer::BoardLayer;
     use crate::pcb::track::TrackSegment;
+
+    #[test]
+    fn audit_concave_outline_and_copper_width_are_checked() {
+        let mut board = Board::new_two_layer(10.0, 10.0);
+        board.outline.points = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(10.0, 0.0),
+            Point2::new(10.0, 10.0),
+            Point2::new(6.0, 10.0),
+            Point2::new(6.0, 4.0),
+            Point2::new(4.0, 4.0),
+            Point2::new(4.0, 10.0),
+            Point2::new(0.0, 10.0),
+            Point2::new(0.0, 0.0),
+        ];
+        board.tracks.push(TrackSegment {
+            id: 1,
+            net_id: 1,
+            layer: BoardLayer::FrontCopper,
+            start: Point2::new(2.0, 8.0),
+            end: Point2::new(8.0, 8.0),
+            width_mm: 0.25,
+        });
+        assert!(run_drc(&board).iter().any(|v| v.title == "Copper too close to edge" || v.title == "Copper outside board"));
+        board.outline = crate::pcb::board::BoardOutline::rectangular(10.0, 10.0);
+        board.tracks[0].start = Point2::new(0.4, 2.0);
+        board.tracks[0].end = Point2::new(0.4, 8.0);
+        board.tracks[0].width_mm = 0.4;
+        assert!(
+            run_drc(&board)
+                .iter()
+                .any(|v| v.title == "Copper too close to edge")
+        );
+    }
+
+    #[test]
+    fn audit_every_schematic_pin_needs_its_own_pad_mapping() {
+        let mut board = Board::new_two_layer(40.0, 30.0);
+        board.footprints.push(crate::pcb::board::BoardFootprint {
+            id: 1,
+            symbol_instance_id: Some(1),
+            reference: "R1".into(),
+            footprint_id: "R_THT_Axial".into(),
+            position: Point2::new(20.0, 15.0),
+            rotation_deg: 0.0,
+            flipped: false,
+            placed: true,
+        });
+        board.rebuild_entity_index();
+        let nets = vec![CadNet {
+            net_id: 1,
+            name: "LOAD".into(),
+            class_id: "Default".into(),
+            connected_pins: ["A", "UNKNOWN"]
+                .into_iter()
+                .map(|name| crate::PinRef {
+                    component_id: 1,
+                    pin_name: name.into(),
+                })
+                .collect(),
+        }];
+        assert!(
+            run_drc_with_nets(&board, &nets)
+                .iter()
+                .any(|v| v.title == "Unmapped schematic pin" && v.message.contains("UNKNOWN"))
+        );
+    }
+
+    #[test]
+    fn audit_pad_extent_outside_board_is_not_hidden_by_footprint_origin() {
+        let mut board = Board::new_two_layer(10.0, 10.0);
+        board.footprints.push(crate::pcb::board::BoardFootprint {
+            id: 1,
+            symbol_instance_id: None,
+            reference: "R1".into(),
+            footprint_id: "R_THT_Axial".into(),
+            position: Point2::new(5.0, 5.0),
+            rotation_deg: 0.0,
+            flipped: false,
+            placed: true,
+        });
+        board.rebuild_entity_index();
+        assert!(
+            run_drc(&board)
+                .iter()
+                .any(|v| v.title == "Pad outside board")
+        );
+    }
 
     #[test]
     fn drc_reports_track_width_below_minimum() {
@@ -460,7 +775,11 @@ mod tests {
 
         let violations = run_drc(&board);
 
-        assert!(violations.iter().any(|v| v.title == "Clearance violation"));
+        assert!(
+            violations.iter().any(
+                |v| v.title == "Clearance violation" || v.title == "Different-net copper short"
+            )
+        );
         assert!(
             violations
                 .iter()

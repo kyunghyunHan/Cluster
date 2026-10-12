@@ -31,10 +31,13 @@ impl Mna {
     /// Stamp a resistor with resistance `r` (Ω) between MNA nodes `a` and `b`.
     /// Node 0 = GND (reference); use 0 for ground-connected terminals.
     pub(super) fn stamp_r(&mut self, a: usize, b: usize, r: f64) {
-        if r < 1e-18 {
-            return;
-        }
-        let g = 1.0 / r;
+        // A zero-ohm jumper uses a documented 1 nΩ floor, never an open.
+        // Invalid resistance poisons the equations so solve returns an error.
+        let g = if r.is_finite() && r >= 0.0 {
+            1.0 / r.max(1e-9)
+        } else {
+            f64::NAN
+        };
         if a > 0 {
             self.a[a - 1][a - 1] += g;
         }
@@ -137,6 +140,32 @@ impl Mna {
         let original_z = self.z.clone();
         let mut a = self.a;
         let mut b = self.z;
+        if a.iter().flatten().chain(&b).any(|v| !v.is_finite()) {
+            return Err(SimulationError::NumericalFailure);
+        }
+        // Equilibrate rows and columns before testing pivots: conductances
+        // and ideal-source constraints use different units and magnitudes.
+        for (row, rhs) in a.iter_mut().zip(&mut b) {
+            let scale = row.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+            if scale == 0.0 {
+                return Err(SimulationError::SingularMatrix);
+            }
+            for value in row {
+                *value /= scale;
+            }
+            *rhs /= scale;
+        }
+        let mut column_scale = vec![0.0_f64; sz];
+        for col in 0..sz {
+            column_scale[col] = a.iter().map(|row| row[col].abs()).fold(0.0, f64::max);
+            if column_scale[col] == 0.0 {
+                return Err(SimulationError::SingularMatrix);
+            }
+            for row in &mut a {
+                row[col] /= column_scale[col];
+            }
+        }
+        let pivot_tolerance = f64::EPSILON * sz as f64;
 
         for col in 0..sz {
             if cancellation.is_some_and(|token| token.is_cancelled()) {
@@ -148,7 +177,7 @@ impl Mna {
                     prow = row;
                 }
             }
-            if a[prow][col].abs() < 1e-12 {
+            if a[prow][col].abs() <= pivot_tolerance {
                 return Err(SimulationError::SingularMatrix);
             }
             a.swap(col, prow);
@@ -157,7 +186,7 @@ impl Mna {
             let piv = a[col][col];
             for row in (col + 1)..sz {
                 let f = a[row][col] / piv;
-                if f.abs() < 1e-18 {
+                if f == 0.0 {
                     continue;
                 }
                 b[row] -= f * b[col];
@@ -176,10 +205,16 @@ impl Mna {
             for j in (i + 1)..sz {
                 x[i] -= a[i][j] * x[j];
             }
-            if a[i][i].abs() < 1e-12 {
+            if a[i][i].abs() <= pivot_tolerance {
                 return Err(SimulationError::SingularMatrix);
             }
             x[i] /= a[i][i];
+        }
+        for (value, scale) in x.iter_mut().zip(column_scale) {
+            *value /= scale;
+        }
+        if x.iter().any(|v| !v.is_finite()) {
+            return Err(SimulationError::NumericalFailure);
         }
         let max_kcl_residual = original_a
             .iter()
@@ -205,32 +240,90 @@ pub(super) struct SolveSolution {
 pub(super) fn validate_voltage_sources(
     vs: &[super::models::VsEntry],
 ) -> Result<(), SimulationError> {
-    let mut constraints: HashMap<(usize, usize), f64> = HashMap::new();
+    let mut adjacency = HashMap::<usize, Vec<(usize, f64)>>::new();
     for source in vs {
-        if source.pos == source.neg {
-            if source.v.abs() > 1.0e-12 {
-                return Err(SimulationError::VoltageSourceConflict);
-            }
+        if !source.v.is_finite() {
+            return Err(SimulationError::NumericalFailure);
+        }
+        adjacency
+            .entry(source.neg)
+            .or_default()
+            .push((source.pos, source.v));
+        adjacency
+            .entry(source.pos)
+            .or_default()
+            .push((source.neg, -source.v));
+    }
+    let mut potentials = HashMap::<usize, f64>::new();
+    let mut connected_groups = 0;
+    for &start in adjacency.keys() {
+        if potentials.contains_key(&start) {
             continue;
         }
-        let key = if source.pos < source.neg {
-            (source.pos, source.neg)
-        } else {
-            (source.neg, source.pos)
-        };
-        let signed_v = if source.pos < source.neg {
-            source.v
-        } else {
-            -source.v
-        };
-        if let Some(existing) = constraints.get(&key) {
-            if (existing - signed_v).abs() <= 1.0e-9 {
-                return Err(SimulationError::VoltageSourceLoop);
+        connected_groups += 1;
+        potentials.insert(start, 0.0);
+        let mut frontier = vec![start];
+        while let Some(node) = frontier.pop() {
+            let voltage = potentials[&node];
+            for &(next, delta) in &adjacency[&node] {
+                let expected = voltage + delta;
+                if let Some(&actual) = potentials.get(&next) {
+                    let tolerance = 1e-9 + 1e-12 * actual.abs().max(expected.abs());
+                    if (actual - expected).abs() > tolerance {
+                        return Err(SimulationError::VoltageSourceConflict);
+                    }
+                } else {
+                    potentials.insert(next, expected);
+                    frontier.push(next);
+                }
             }
-            return Err(SimulationError::VoltageSourceConflict);
-        } else {
-            constraints.insert(key, signed_v);
         }
     }
+    if vs.len() > adjacency.len().saturating_sub(connected_groups) {
+        return Err(SimulationError::VoltageSourceLoop);
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    #[test]
+    fn audit_tiny_admittance_is_not_a_singular_matrix() {
+        let mut m = Mna::new(1, 0);
+        m.stamp_r(1, 0, 1e15);
+        m.stamp_is(1, 0, 1e-15);
+        let solved = m.solve().unwrap();
+        assert!((solved.x[0] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn audit_zero_resistance_is_not_silently_open() {
+        let mut m = Mna::new(1, 0);
+        m.stamp_r(1, 0, 0.0);
+        m.stamp_is(1, 0, 1.0);
+        let solved = m.solve().unwrap();
+        assert!(solved.x[0].abs() <= 1e-9);
+    }
+
+    #[test]
+    fn audit_nonfinite_matrix_never_returns_success() {
+        let mut m = Mna::new(1, 0);
+        m.stamp_r(1, 0, f64::NAN);
+        assert!(m.solve().is_err());
+    }
+
+    #[test]
+    fn audit_three_source_loops_are_classified() {
+        let source = |pos, neg, v| super::super::models::VsEntry { id: 1, pos, neg, v };
+        assert_eq!(
+            validate_voltage_sources(&[source(1, 0, 5.0), source(2, 1, 3.0), source(2, 0, 9.0)]),
+            Err(SimulationError::VoltageSourceConflict)
+        );
+        assert_eq!(
+            validate_voltage_sources(&[source(1, 0, 5.0), source(2, 1, 3.0), source(2, 0, 8.0)]),
+            Err(SimulationError::VoltageSourceLoop)
+        );
+    }
 }

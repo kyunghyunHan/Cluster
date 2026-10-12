@@ -1,6 +1,6 @@
 use crate::commands::ChangeSet;
 use crate::commands::context::{CommandContext, CommandOutcome};
-use crate::model::{Component, ComponentKind, Wire};
+use crate::model::{Component, ComponentKind, Wire, WireEndpoint};
 use egui::{Pos2, Vec2};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -77,12 +77,27 @@ impl ComponentCommand {
                 let wire_count = wires.len();
                 for source in wires {
                     let new_wire_id = context.next_id();
-                    let points = source
+                    let points: Vec<Pos2> = source
                         .points
                         .into_iter()
                         .map(|point| point + offset)
                         .collect();
-                    context.insert_wire(Wire::new(new_wire_id, points));
+                    let remap = |endpoint: WireEndpoint, fallback: Pos2| match endpoint {
+                        WireEndpoint::Pin(mut pin) => {
+                            if let Some(&new_id) = id_map.get(&pin.component_id) {
+                                pin.component_id = new_id;
+                                WireEndpoint::Pin(pin)
+                            } else {
+                                WireEndpoint::FreePoint(fallback)
+                            }
+                        }
+                        WireEndpoint::FreePoint(point) => WireEndpoint::FreePoint(point + offset),
+                        // Junction markers are outside this clipboard payload.
+                        WireEndpoint::Junction(_) => WireEndpoint::FreePoint(fallback),
+                    };
+                    let start = remap(source.start, points.first().copied().unwrap_or(Pos2::ZERO));
+                    let end = remap(source.end, points.last().copied().unwrap_or(Pos2::ZERO));
+                    context.insert_wire(Wire::with_endpoints(new_wire_id, points, start, end));
                 }
                 context.set_multi_selected(new_ids.iter().copied().collect());
                 context.set_selected(None);

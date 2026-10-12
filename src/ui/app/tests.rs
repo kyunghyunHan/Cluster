@@ -468,6 +468,7 @@ fn page_switch_and_save_preserve_annotations_per_page() {
 #[test]
 fn legacy_single_page_annotations_load_without_schema_change() {
     let saved = SavedCircuit {
+        board: None,
         schema_version: 4,
         next_id: 2,
         counters: Counters::default(),
@@ -578,6 +579,7 @@ fn bom_csv_includes_all_pages_and_escapes_cells() {
 #[test]
 fn saved_circuit_repairs_duplicate_ids_and_skips_invalid_geometry() {
     let saved = SavedCircuit {
+        board: None,
         schema_version: 1,
         next_id: 2,
         counters: Counters::default(),
@@ -2318,4 +2320,172 @@ fn esp32_oled_starter_has_no_erc_errors() {
         "{errors:#?}\n{}",
         circuit_to_netlist_text(&build_circuit_netlist(&app.components, &app.wires))
     );
+}
+
+#[test]
+fn audit_project_commit_survives_torn_mirror_files() {
+    let root = std::env::temp_dir().join(format!("cluster-audit-commit-{}", std::process::id()));
+    let mut app = CircuitApp::new();
+    app.load_led_demo();
+    app.update_pcb_from_schematic();
+    app.save_project_folder_to(&root).unwrap();
+    let count = app.components.len();
+    let board = app.document.board.clone();
+    // A power failure before replacing project.json leaves mirrors from a newer save.
+    fs::write(root.join("schematic.json"), "corrupt partial mirror").unwrap();
+    fs::write(root.join("board.json"), "{}").unwrap();
+    let mut loaded = CircuitApp::new();
+    loaded.load_project_folder_from(&root).unwrap();
+    assert_eq!(loaded.components.len(), count);
+    assert_eq!(loaded.document.board, board);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn audit_exhausted_saved_identity_is_rejected_before_mutation() {
+    let app = CircuitApp::new();
+    let mut saved = SavedCircuit::from_app(&app);
+    saved.next_id = u64::MAX;
+    assert!(saved.into_snapshot().is_err());
+}
+
+#[test]
+fn audit_partial_copper_does_not_hide_unrouted_nets() {
+    let mut app = CircuitApp::new();
+    app.load_led_demo();
+    app.update_pcb_from_schematic();
+    let cad = app.analysis.pcb_cad.clone().unwrap();
+    let edge = app.document.board.ratsnest_edges(&cad.nets)[0].clone();
+    app.document
+        .board
+        .add_track(crate::pcb::track::TrackSegment {
+            id: 500,
+            net_id: edge.net_id,
+            layer: crate::pcb::layer::BoardLayer::FrontCopper,
+            start: crate::model::cad::Point2::new(60.0, 40.0),
+            end: crate::model::cad::Point2::new(65.0, 40.0),
+            width_mm: 0.25,
+        });
+    app.refresh_pcb_analysis(&cad);
+    assert!(app.pcb_dock_summary().ratsnest_count > 0);
+}
+
+#[test]
+fn audit_save_load_save_preserves_allocator_state() {
+    for mut app in [CircuitApp::new(), {
+        let mut a = CircuitApp::new();
+        a.load_led_demo();
+        a
+    }] {
+        let saved = SavedCircuit::from_app(&app);
+        let original = saved.clone();
+        let (snapshot, notes) = saved.into_snapshot().unwrap();
+        assert!(notes.is_empty());
+        app.restore_snapshot(snapshot);
+        assert_eq!(SavedCircuit::from_app(&app), original);
+    }
+}
+
+#[test]
+fn audit_autorecovery_preserves_pcb_edits() {
+    let mut app = CircuitApp::new();
+    app.document
+        .board
+        .add_track(crate::pcb::track::TrackSegment {
+            id: 77,
+            net_id: 0,
+            layer: crate::pcb::layer::BoardLayer::FrontCopper,
+            start: crate::model::cad::Point2::new(1.0, 2.0),
+            end: crate::model::cad::Point2::new(3.0, 4.0),
+            width_mm: 0.25,
+        });
+    let board = app.document.board.clone();
+    let serialized = serde_json::to_string(&SavedCircuit::from_app(&app)).unwrap();
+    let saved: SavedCircuit = serde_json::from_str(&serialized).unwrap();
+    let (snapshot, _) = saved.into_snapshot().unwrap();
+    assert_eq!(snapshot.board, board);
+}
+
+#[test]
+fn audit_autosave_failure_allows_retry_of_same_revision() {
+    let mut app = CircuitApp::new();
+    let revision = app.analysis.revisions.persistence;
+    app.last_autorecover_revision = revision;
+    let blocker = std::env::temp_dir().join(format!(
+        "cluster-audit-autosave-blocker-{}",
+        std::process::id()
+    ));
+    fs::write(&blocker, "parent is a file").unwrap();
+    let path = blocker.join("save.json");
+    app.analysis
+        .worker
+        .submit(
+            revision,
+            crate::engine::worker::AnalysisRequest::Autosave {
+                saved: Box::new(SavedCircuit::from_app(&app)),
+                path,
+            },
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !app.status.contains("Auto backup failed") && std::time::Instant::now() < deadline {
+        app.poll_analysis_worker();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    fs::remove_file(blocker).unwrap();
+    assert!(app.status.contains("Auto backup failed"));
+    assert_ne!(app.last_autorecover_revision, revision);
+}
+
+#[test]
+fn audit_paste_remaps_explicit_pin_identity_and_is_atomic() {
+    let mut app = CircuitApp::new();
+    let first = Component {
+        id: 10,
+        kind: ComponentKind::Resistor,
+        pos: Pos2::new(100.0, 0.0),
+        rotation: 0,
+        label: "R1".into(),
+        value: "1k".into(),
+        part_id: None,
+    };
+    let second = Component {
+        id: 20,
+        pos: Pos2::new(300.0, 0.0),
+        ..first.clone()
+    };
+    let wire = Wire::with_endpoints(
+        30,
+        vec![Pos2::new(0.0, 100.0), Pos2::new(200.0, 100.0)],
+        WireEndpoint::Pin(PinRef {
+            component_id: 10,
+            pin_name: "A".into(),
+        }),
+        WireEndpoint::Pin(PinRef {
+            component_id: 20,
+            pin_name: "A".into(),
+        }),
+    );
+    app.execute_editor_command(crate::commands::EditorCommand::Component(
+        crate::commands::component::ComponentCommand::Paste {
+            components: vec![first, second],
+            wires: vec![wire],
+            offset: Vec2::new(500.0, 0.0),
+        },
+    ));
+    let a = PinRef {
+        component_id: app.components[0].id,
+        pin_name: "A".into(),
+    };
+    let b = PinRef {
+        component_id: app.components[1].id,
+        pin_name: "A".into(),
+    };
+    assert_eq!(app.wires[0].start, WireEndpoint::Pin(a.clone()));
+    let graph = app.current_connectivity();
+    assert_eq!(graph.net_for_pin(&a), graph.net_for_pin(&b));
+    app.undo();
+    assert!(app.components.is_empty() && app.wires.is_empty());
+    app.redo();
+    assert_eq!(app.wires[0].start, WireEndpoint::Pin(a));
 }

@@ -56,6 +56,94 @@ mod tests {
         }
     }
 
+    #[test]
+    fn audit_series_sources_preserve_floating_negative_terminal() {
+        let first = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "V1", "5V");
+        let second = comp(2, ComponentKind::Battery, Pos2::new(200.0, 0.0), "V2", "3V");
+        let load = comp(
+            3,
+            ComponentKind::Resistor,
+            Pos2::new(400.0, 0.0),
+            "R1",
+            "1k",
+        );
+        let ground = comp(
+            4,
+            ComponentKind::Ground,
+            Pos2::new(-100.0, 100.0),
+            "GND",
+            "",
+        );
+        let a = component_pin_defs(&first);
+        let b = component_pin_defs(&second);
+        let r = component_pin_defs(&load);
+        let g = component_pin_defs(&ground);
+        let wires = vec![
+            Wire::new(10, vec![a[1].pos, b[0].pos]),
+            Wire::new(11, vec![b[1].pos, r[0].pos]),
+            Wire::new(
+                12,
+                vec![
+                    r[1].pos,
+                    Pos2::new(436.0, 150.0),
+                    Pos2::new(-32.0, 150.0),
+                    a[0].pos,
+                ],
+            ),
+            Wire::new(13, vec![a[0].pos, g[0].pos]),
+        ];
+        let components = [first, second, load, ground];
+        let dc = solve_dc_detailed(&components, &wires).unwrap();
+        assert!((dc.branch_current[&3] - 0.008).abs() < 1e-9);
+        let ac = solve_ac(&components, &wires, 1000.0).unwrap();
+        assert!((ac.wire_voltage_mag[&11] - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn audit_ac_rc_lowpass_matches_complex_transfer_function() {
+        let source = comp(1, ComponentKind::Battery, Pos2::new(0.0, 0.0), "V1", "1V");
+        let resistor = comp(
+            2,
+            ComponentKind::Resistor,
+            Pos2::new(200.0, 0.0),
+            "R1",
+            "1k",
+        );
+        let cap = comp(
+            3,
+            ComponentKind::Capacitor,
+            Pos2::new(400.0, 0.0),
+            "C1",
+            "1uF",
+        );
+        let v = component_pin_defs(&source);
+        let r = component_pin_defs(&resistor);
+        let c = component_pin_defs(&cap);
+        let wires = vec![
+            Wire::new(10, vec![v[1].pos, r[0].pos]),
+            Wire::new(11, vec![r[1].pos, c[0].pos]),
+            Wire::new(
+                12,
+                vec![
+                    c[1].pos,
+                    Pos2::new(c[1].pos.x, 100.0),
+                    Pos2::new(v[0].pos.x, 100.0),
+                    v[0].pos,
+                ],
+            ),
+        ];
+        let result = solve_ac(
+            &[source, resistor, cap],
+            &wires,
+            1.0 / (2.0 * std::f64::consts::PI * 0.001),
+        )
+        .unwrap();
+        assert!((result.wire_voltage_mag[&10] - 1.0).abs() < 1e-8);
+        assert!(result.wire_voltage_phase[&10].abs() < 1e-8);
+        assert!((result.wire_voltage_mag[&11] - 1.0 / 2.0_f64.sqrt()).abs() < 1e-7);
+        assert!((result.wire_voltage_phase[&11] + 45.0).abs() < 1e-5);
+    }
+
     // Helper: multi-point wire.
     fn lseg(id: u64, points: Vec<Pos2>) -> Wire {
         Wire::new(id, points)

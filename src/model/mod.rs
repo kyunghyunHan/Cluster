@@ -42,3 +42,4 @@ pub(crate) use wire::{
 };
 mod allocator;
 pub(crate) use allocator::IdAllocator;
+pub(crate) mod device;

@@ -59,7 +59,7 @@ struct Job {
 struct WorkerCache {
     connectivity_revision: Option<u64>,
     connectivity: Option<Arc<crate::model::CanonicalConnectivity>>,
-    erc_topology_revision: Option<u64>,
+    erc_topology_revision: Option<(u64, u64)>,
     erc_topology: Vec<crate::engine::validation::ErcViolation>,
 }
 
@@ -226,6 +226,7 @@ fn execute(
                     (connectivity, false)
                 };
             let connectivity_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            let netlist = connectivity.netlist.with_component_properties(&components);
             if cancellation.is_cancelled() {
                 return AnalysisPayload::Schematic(Box::new(SchematicAnalysis {
                     connectivity,
@@ -256,7 +257,7 @@ fn execute(
                     crate::engine::backend::BackendKind::InternalMna => {
                         crate::engine::transient::solve_transient_with_netlist(
                             &components,
-                            &connectivity.netlist,
+                            &netlist,
                         )
                     }
                     crate::engine::backend::BackendKind::NgSpice => {
@@ -267,7 +268,7 @@ fn execute(
                         let circuit = crate::engine::backend::SimulationCircuit {
                             components: &components,
                             wires: &wires,
-                            netlist: &connectivity.netlist,
+                            netlist: &netlist,
                             document_revision: revision_key.connectivity,
                         };
                         match backend.transient(
@@ -293,18 +294,23 @@ fn execute(
             let started = std::time::Instant::now();
             if !cancellation.is_cancelled() {
                 use crate::engine::erc::ErcDependency;
-                if cache.erc_topology_revision != Some(revision_key.topology) {
+                // Several structural rules also read source values and reference labels.
+                // Conservatively refresh them on electrical edits until each rule dependency is split.
+                if cache.erc_topology_revision
+                    != Some((revision_key.topology, revision_key.electrical))
+                {
                     cache.erc_topology = crate::engine::validation::validate_beginner_rules_for(
-                        &connectivity.netlist,
+                        &netlist,
                         &[ErcDependency::Topology],
                     );
-                    cache.erc_topology_revision = Some(revision_key.topology);
+                    cache.erc_topology_revision =
+                        Some((revision_key.topology, revision_key.electrical));
                 }
                 simulation.erc.clone_from(&cache.erc_topology);
                 simulation
                     .erc
                     .extend(crate::engine::validation::validate_beginner_rules_for(
-                        &connectivity.netlist,
+                        &netlist,
                         &[ErcDependency::Values],
                     ));
                 let mut dynamic = Vec::new();
@@ -354,6 +360,7 @@ mod tests {
     fn empty_autosave(revision: u64) -> AnalysisRequest {
         AnalysisRequest::Autosave {
             saved: Box::new(SavedCircuit {
+                board: None,
                 schema_version: 4,
                 next_id: revision + 1,
                 counters: Counters::default(),
@@ -383,6 +390,82 @@ mod tests {
             },
             ac_key: 1_000.0_f32.to_bits(),
         }
+    }
+
+    #[test]
+    fn audit_value_edit_updates_worker_overvoltage_erc() {
+        use crate::model::{ComponentKind, component_pin_defs};
+        let source = Component {
+            id: 1,
+            kind: ComponentKind::Battery,
+            pos: egui::Pos2::ZERO,
+            rotation: 0,
+            label: "V1".into(),
+            value: "3.3V".into(),
+            part_id: None,
+        };
+        let mcu = Component {
+            id: 2,
+            kind: ComponentKind::Esp32,
+            pos: egui::pos2(400.0, 0.0),
+            rotation: 0,
+            label: "ESP1".into(),
+            value: "".into(),
+            part_id: None,
+        };
+        let positive = component_pin_defs(&source)
+            .into_iter()
+            .find(|p| p.label == "+")
+            .unwrap()
+            .pos;
+        let gpio = component_pin_defs(&mcu)
+            .into_iter()
+            .find(|p| p.label == "GPIO2")
+            .unwrap()
+            .pos;
+        let wire = Wire::new(3, vec![positive, gpio]);
+        let request = |value: &str, revision: u64| {
+            let mut components = vec![source.clone(), mcu.clone()];
+            components[0].value = value.into();
+            let mut request = empty_schematic(1, revision);
+            if let AnalysisRequest::Schematic {
+                components: c,
+                wires,
+                ..
+            } = &mut request
+            {
+                *c = components;
+                *wires = vec![wire.clone()];
+            }
+            request
+        };
+        let mut cache = WorkerCache::default();
+        let cancellation = CancellationToken::default();
+        let AnalysisPayload::Schematic(before) =
+            execute(request("3.3V", 1), &cancellation, &mut cache)
+        else {
+            panic!()
+        };
+        let AnalysisPayload::Schematic(after) =
+            execute(request("5V", 2), &cancellation, &mut cache)
+        else {
+            panic!()
+        };
+        assert!(Arc::ptr_eq(&before.connectivity, &after.connectivity));
+        assert!(
+            !before
+                .simulation
+                .erc
+                .iter()
+                .any(|v| v.rule == crate::engine::validation::ErcRule::GpioOvervoltage5v)
+        );
+        assert!(
+            after
+                .simulation
+                .erc
+                .iter()
+                .any(|v| v.rule == crate::engine::validation::ErcRule::GpioOvervoltage5v)
+        );
     }
 
     #[test]

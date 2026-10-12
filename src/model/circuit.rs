@@ -57,8 +57,11 @@ pub(crate) struct CircuitSnapshot {
     pub(crate) board: crate::pcb::board::Board,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SavedCircuit {
+    /// Recovery and circuit saves include the PCB; absent in legacy files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) board: Option<crate::pcb::board::Board>,
     pub(crate) schema_version: u32,
     pub(crate) next_id: u64,
     pub(crate) counters: Counters,
@@ -74,7 +77,7 @@ pub(crate) struct SavedCircuit {
     pub(crate) current_page: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SavedPage {
     pub(crate) name: String,
     pub(crate) next_id: u64,
@@ -87,7 +90,7 @@ pub(crate) struct SavedPage {
     pub(crate) no_connect_markers: Vec<SavedNoConnectMarker>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SavedComponent {
     pub(crate) id: u64,
     pub(crate) kind: ComponentKind,
@@ -102,7 +105,7 @@ pub(crate) struct SavedComponent {
     pub(crate) part_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SavedWire {
     pub(crate) id: u64,
     pub(crate) points: Vec<SavedPoint>,
@@ -112,21 +115,21 @@ pub(crate) struct SavedWire {
     pub(crate) end: Option<SavedWireEndpoint>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SavedJunctionDot {
     pub(crate) id: u64,
     pub(crate) x: f32,
     pub(crate) y: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SavedNoConnectMarker {
     pub(crate) id: u64,
     pub(crate) x: f32,
     pub(crate) y: f32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SavedPoint {
     pub(crate) x: f32,
     pub(crate) y: f32,

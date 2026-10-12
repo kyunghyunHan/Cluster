@@ -217,6 +217,17 @@ Cluster는 Rust + egui 기반 ESP32/Arduino 학습 및 프로토타이핑 회로
 - `v*` tag release workflow가 Linux/macOS/Windows portable archive, SHA-256 checksum, 자동 release note를 생성한다.
 - 공학 값 파서는 UI/ERC/MNA/AC/SPICE 경로가 공유하며 `M`(mega)/`m`(milli), embedded 표기와 단위를 일관되게 검사한다. SPICE export는 `M` 의미 충돌을 막기 위해 과학 표기법으로 정규화한다.
 
+## 2026-10-12 소스 감사 체크포인트
+
+- 근거와 재현 로그는 `docs/audit/architecture-audit.md`, `electrical-correctness.md`, `pcb-manufacturing.md`, `performance.md`, `remaining-risks.md`에 기록한다. baseline은 `a998077419fd59d91141ce2b9b1fe48ae0d2d7aa`다.
+- MNA는 명시적 GND 우선/단일 fallback return, 저항 1 nΩ regularization, 행·열 scaling/finite 검사, 다중 ideal source cycle 검사, AC real/imaginary source constraint를 사용한다. RC transient는 실제 단일 RC charging loop만 지원한다. SPICE 정확도를 주장하지 않는다.
+- canonical connectivity는 topology snapshot이다. 값/라벨을 읽는 소비자는 `current_netlist` 또는 `with_component_properties` projection을 사용한다. structural ERC에도 값 의존성이 남아 있어 worker cache는 electrical revision 변경 시 다시 검사한다.
+- project.json은 schematic+board의 authoritative commit으로 마지막에 저장한다. 기존 separate JSON은 mirror/legacy fallback이다. SavedCircuit/자동복구는 optional PCB snapshot을 보존하고 exhausted ID 입력은 거부한다. autosave 실패는 같은 revision을 재시도할 수 있다.
+- PCB net mapping은 schematic pin과 실제 per-instance pad로 계산하고 copper/layer overlap으로 island를 구분한다. ECO는 저장한 pin identity로 net을 remap하며 split/unknown은 orphan 처리한다. export는 fresh full DRC 및 미지원 geometry 검사를 수행한다.
+- Gerber/Excellon은 immutable aperture, 실제 pad shape/via copper, decimal mm drill과 독립 golden fixture를 사용한다. 제조 출력은 **experimental**이다. mask/silk/PTH-NPTH/외부 viewer/fabrication 검증은 미완료다.
+- `model/device.rs` capability/profile은 제조사 문서로 확인한 부분만 제공한다. package/current rating/clone header/Nucleo exact variant는 unknown이며 전체 hardware validation이 아니다.
+- 최종 295 library tests와 fmt/check/all-targets·all-features clippy/release가 통과했다. physical pad DRC 강화로 큰 PCB full DRC가 느려졌으며 broad-phase/cancellation 개선은 후속 과제다. 실제 desktop GUI/firmware/hardware 검증은 하지 않았다.
+
 ## 완료 조건
 
 작업 완료 전 확인한다.

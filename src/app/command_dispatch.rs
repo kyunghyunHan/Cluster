@@ -736,6 +736,37 @@ mod tests {
     }
 
     #[test]
+    fn audit_property_changes_refresh_netlist_without_rebuilding_connectivity() {
+        use crate::commands::properties::PropertiesCommand;
+        let mut app = crate::CircuitApp::new();
+        app.execute_editor_command(EditorCommand::Component(ComponentCommand::Place {
+            kind: ComponentKind::Resistor,
+            position: Pos2::ZERO,
+            value: "330".into(),
+        }));
+        let id = app.components[0].id;
+        let connectivity = app.current_connectivity();
+        let _before = app.current_netlist();
+        app.execute_editor_command(EditorCommand::Properties(
+            PropertiesCommand::SetComponentValue {
+                component_id: id,
+                value: "0".into(),
+            },
+        ));
+        assert!(
+            app.current_netlist()
+                .pins
+                .iter()
+                .filter(|p| p.component_id == id)
+                .all(|p| p.component_value == "0")
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &connectivity,
+            &app.current_connectivity()
+        ));
+    }
+
+    #[test]
     fn property_change_reuses_connectivity_projections() {
         let mut app = crate::CircuitApp::new();
         let connectivity = app.current_connectivity();

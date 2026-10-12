@@ -181,6 +181,8 @@ impl PcbCommand {
                 );
                 scope.capture_new_footprints = true;
                 scope.board_metadata = true;
+                scope.track_ids.extend(board.tracks.iter().map(|t| t.id));
+                scope.via_ids.extend(board.vias.iter().map(|v| v.id));
                 if *removed_policy == RemovedFootprintPolicy::RemoveFootprintAndTracks {
                     let removed_nets = report.removed_nets.iter().copied().collect::<HashSet<_>>();
                     scope.track_ids.extend(

@@ -22,7 +22,7 @@ use crate::ui::bottom_dock::{
 };
 use crate::ui::breadboard::BreadboardRoute;
 use egui::{Pos2, Vec2};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -971,13 +971,6 @@ impl crate::CircuitApp {
             self.status = "Update PCB before routing ratsnest.".to_string();
             return;
         };
-        let footprint_by_id = self
-            .document
-            .board
-            .footprints
-            .iter()
-            .map(|footprint| (footprint.id, footprint.position))
-            .collect::<HashMap<_, _>>();
         let mut next_id = self
             .document
             .board
@@ -989,25 +982,15 @@ impl crate::CircuitApp {
             + 1;
         let mut tracks = Vec::new();
         for ratsnest in self.document.board.ratsnest_edges(&cad.nets) {
-            if self
-                .document
-                .board
-                .tracks
-                .iter()
-                .any(|track| track.net_id == ratsnest.net_id)
-            {
-                continue;
-            }
-            let (Some(start), Some(end)) = (
-                footprint_by_id.get(&ratsnest.from_footprint_id).copied(),
-                footprint_by_id.get(&ratsnest.to_footprint_id).copied(),
-            ) else {
+            let Some(layer) = ratsnest.route_layer else {
                 continue;
             };
+            let start = ratsnest.from_position;
+            let end = ratsnest.to_position;
             tracks.push(TrackSegment {
                 id: next_id,
                 net_id: ratsnest.net_id,
-                layer: BoardLayer::FrontCopper,
+                layer,
                 start,
                 end,
                 width_mm: self
@@ -1057,6 +1040,7 @@ impl crate::CircuitApp {
             );
             return;
         }
+        self.analysis.pcb_drc = run_drc_with_nets(&self.document.board, &cad.nets);
         let drc_errors = self
             .analysis
             .pcb_drc
@@ -1065,6 +1049,11 @@ impl crate::CircuitApp {
             .count();
         if drc_errors > 0 {
             self.status = format!("PCB export blocked: fix {drc_errors} DRC error(s) first.");
+            return;
+        }
+        let limitations = crate::export::gerber::manufacturing_limitations(&self.document.board);
+        if let Some(first) = limitations.first() {
+            self.status = format!("PCB export blocked: {first}");
             return;
         }
         cad.board = Some(self.document.board.clone());
@@ -1095,13 +1084,13 @@ impl crate::CircuitApp {
             ("cluster_pcb_cpl.csv", crate::export::gerber::cpl_csv(&cad)),
         ];
         for (path, contents) in writes {
-            if let Err(error) = fs::write(path, contents) {
+            if let Err(error) = crate::storage::save::write_with_backup(path, &contents) {
                 self.status = format!("PCB export failed at {path}: {error}");
                 return;
             }
         }
         self.status =
-            "Exported PCB Gerber, drill, BOM, and CPL files in the project folder.".to_string();
+            "Exported experimental PCB files in the working folder; review geometry before fabrication.".to_string();
     }
 
     pub(crate) fn save_project_folder(&mut self) {
@@ -1147,8 +1136,11 @@ impl crate::CircuitApp {
             self.analysis.circuit_revision.to_string(),
         );
 
-        let schematic_json = serde_json::to_string_pretty(&SavedCircuit::from_app(self))
-            .map_err(|error| error.to_string())?;
+        let mut saved = SavedCircuit::from_app(self);
+        saved.board = None; // The same commit already owns cad.board.
+        cad.schematic = Some(saved);
+        let schematic_json =
+            serde_json::to_string_pretty(&cad.schematic).map_err(|error| error.to_string())?;
         let board_json = serde_json::to_string_pretty(&self.document.board)
             .map_err(|error| error.to_string())?;
         let project_json = serde_json::to_string_pretty(&cad).map_err(|error| error.to_string())?;
@@ -1165,21 +1157,45 @@ impl crate::CircuitApp {
     ) -> Result<(), String> {
         self.backup_dirty_work("project load");
         let layout = ProjectFolderLayout::new(root.as_ref());
-        let schematic_json = fs::read_to_string(&layout.schematic_json)
-            .map_err(|error| format!("Read {}: {error}", layout.schematic_json.display()))?;
-        let board_json = fs::read_to_string(&layout.board_json)
-            .map_err(|error| format!("Read {}: {error}", layout.board_json.display()))?;
         let project_json = fs::read_to_string(&layout.project_json)
             .map_err(|error| format!("Read {}: {error}", layout.project_json.display()))?;
-
-        let saved = serde_json::from_str::<SavedCircuit>(&schematic_json)
-            .map_err(|error| format!("Parse schematic.json: {error}"))?;
-        let (snapshot, load_notes) = saved.into_snapshot()?;
-        let mut board = serde_json::from_str::<Board>(&board_json)
-            .map_err(|error| format!("Parse board.json: {error}"))?;
-        board.rebuild_entity_index();
         let mut cad = serde_json::from_str::<CadProjectData>(&project_json)
             .map_err(|error| format!("Parse project.json: {error}"))?;
+        if cad.schema_version > crate::model::cad::CAD_SCHEMA_VERSION {
+            return Err(format!(
+                "Unsupported CAD schema version {}.",
+                cad.schema_version
+            ));
+        }
+        let (saved, mut board) = if let Some(saved) = cad.schematic.take() {
+            let board = cad
+                .board
+                .clone()
+                .ok_or("Committed project has no board snapshot.")?;
+            (saved, board)
+        } else {
+            // Legacy projects predate the single-file commit boundary.
+            let schematic_json = fs::read_to_string(&layout.schematic_json)
+                .map_err(|error| format!("Read schematic.json: {error}"))?;
+            let board_json = fs::read_to_string(&layout.board_json)
+                .map_err(|error| format!("Read board.json: {error}"))?;
+            let saved = serde_json::from_str::<SavedCircuit>(&schematic_json)
+                .map_err(|error| format!("Parse schematic.json: {error}"))?;
+            let board = serde_json::from_str::<Board>(&board_json)
+                .map_err(|error| format!("Parse board.json: {error}"))?;
+            (saved, board)
+        };
+        if board.schema_version > crate::pcb::board::BOARD_SCHEMA_VERSION {
+            return Err(format!(
+                "Unsupported board schema version {}.",
+                board.schema_version
+            ));
+        }
+        let (snapshot, load_notes) = saved.into_snapshot()?;
+        if board.net_bindings.is_empty() {
+            board.net_bindings = cad.nets.clone();
+        }
+        board.rebuild_entity_index();
         let known_net_ids = cad
             .nets
             .iter()
@@ -1343,32 +1359,18 @@ impl crate::CircuitApp {
         ));
         let edges = self.document.board.ratsnest_edges(&cad.nets);
         for net_id in affected_net_ids {
-            let routed = self
-                .document
-                .board
-                .tracks
-                .iter()
-                .any(|track| track.net_id == *net_id)
-                || self
-                    .document
-                    .board
-                    .vias
-                    .iter()
-                    .any(|via| via.net_id == *net_id);
-            let count = if routed {
-                0
-            } else {
-                edges.iter().filter(|edge| edge.net_id == *net_id).count()
-            };
+            let count = edges.iter().filter(|edge| edge.net_id == *net_id).count();
             self.analysis.pcb_ratsnest_by_net.insert(*net_id, count);
         }
+        self.analysis.pcb_ratsnest = edges;
         self.pcb_ui.ratsnest_count = self.analysis.pcb_ratsnest_by_net.values().sum();
-        self.analysis.dirty_flags.pcb_drc_dirty = false;
+        self.analysis.dirty_flags.pcb_drc_dirty = true;
     }
 
     fn rebuild_pcb_ratsnest_counts(&mut self, cad: &CadProjectData) {
         self.analysis.pcb_ratsnest_by_net.clear();
-        for edge in self.unrouted_pcb_ratsnest(cad) {
+        self.analysis.pcb_ratsnest = self.document.board.ratsnest_edges(&cad.nets);
+        for edge in &self.analysis.pcb_ratsnest {
             *self
                 .analysis
                 .pcb_ratsnest_by_net
@@ -1378,26 +1380,8 @@ impl crate::CircuitApp {
         self.pcb_ui.ratsnest_count = self.analysis.pcb_ratsnest_by_net.values().sum();
     }
 
-    fn unrouted_pcb_ratsnest(&self, cad: &CadProjectData) -> Vec<crate::pcb::board::RatsnestEdge> {
-        self.document
-            .board
-            .ratsnest_edges(&cad.nets)
-            .into_iter()
-            .filter(|edge| {
-                !self
-                    .document
-                    .board
-                    .tracks
-                    .iter()
-                    .any(|track| track.net_id == edge.net_id)
-                    && !self
-                        .document
-                        .board
-                        .vias
-                        .iter()
-                        .any(|via| via.net_id == edge.net_id)
-            })
-            .collect()
+    fn unrouted_pcb_ratsnest(&self, _cad: &CadProjectData) -> Vec<crate::pcb::board::RatsnestEdge> {
+        self.analysis.pcb_ratsnest.clone()
     }
 
     pub(crate) fn pcb_dock_summary(&self) -> PcbDockSummary {
@@ -1478,13 +1462,6 @@ impl crate::CircuitApp {
 
     fn pcb_preview_data(&self) -> PcbPreviewData {
         let (width_mm, height_mm) = pcb_outline_size(&self.document.board.outline);
-        let footprint_positions = self
-            .document
-            .board
-            .footprints
-            .iter()
-            .map(|footprint| (footprint.id, footprint.position))
-            .collect::<HashMap<_, _>>();
         let ratsnest = self
             .analysis
             .pcb_cad
@@ -1492,15 +1469,15 @@ impl crate::CircuitApp {
             .map(|cad| {
                 self.unrouted_pcb_ratsnest(cad)
                     .into_iter()
-                    .filter_map(|edge| {
-                        let start = footprint_positions.get(&edge.from_footprint_id)?;
-                        let end = footprint_positions.get(&edge.to_footprint_id)?;
-                        Some(PcbPreviewRatsnest {
+                    .map(|edge| {
+                        let start = edge.from_position;
+                        let end = edge.to_position;
+                        PcbPreviewRatsnest {
                             start_x_mm: start.x,
                             start_y_mm: start.y,
                             end_x_mm: end.x,
                             end_y_mm: end.y,
-                        })
+                        }
                     })
                     .collect()
             })
@@ -1976,6 +1953,7 @@ impl crate::CircuitApp {
             self.performance.simulation_cache_misses.saturating_add(1);
         self.simulation_run_state = crate::ui::app::SimulationRunState::Solving;
         let connectivity = self.current_connectivity();
+        let netlist = self.current_netlist();
         let mna_started = std::time::Instant::now();
         let mut simulation = simulation_engine::analyze_circuit_with_connectivity(
             &self.components,
@@ -1988,18 +1966,12 @@ impl crate::CircuitApp {
             self.simulation_ui.ac_freq_hz as f64,
             &connectivity,
         );
-        simulation.transient = crate::engine::transient::solve_transient_with_netlist(
-            &self.components,
-            &connectivity.netlist,
-        );
+        simulation.transient =
+            crate::engine::transient::solve_transient_with_netlist(&self.components, &netlist);
         self.performance.mna_ms = mna_started.elapsed().as_secs_f64() * 1_000.0;
         let erc_started = std::time::Instant::now();
-        simulation.erc = crate::run_erc_with_netlist(
-            &self.components,
-            &self.wires,
-            &simulation,
-            &connectivity.netlist,
-        );
+        simulation.erc =
+            crate::run_erc_with_netlist(&self.components, &self.wires, &simulation, &netlist);
         self.performance.erc_ms = erc_started.elapsed().as_secs_f64() * 1_000.0;
         let simulation = std::sync::Arc::new(simulation);
         self.analysis.cached_simulation =
@@ -2093,14 +2065,21 @@ impl crate::CircuitApp {
     }
 
     pub(crate) fn current_netlist(&mut self) -> std::sync::Arc<CircuitNetlist> {
-        let revision = self.analysis.revisions.schematic_connectivity;
+        let revision = (
+            self.analysis.revisions.schematic_connectivity,
+            self.analysis.revisions.electrical_parameters,
+        );
         if let Some((cached_revision, netlist)) = &self.analysis.cached_netlist
             && *cached_revision == revision
         {
             return std::sync::Arc::clone(netlist);
         }
         let connectivity = self.current_connectivity();
-        let netlist = std::sync::Arc::new(connectivity.netlist.clone());
+        let netlist = std::sync::Arc::new(
+            connectivity
+                .netlist
+                .with_component_properties(&self.components),
+        );
         self.analysis.cached_netlist = Some((revision, std::sync::Arc::clone(&netlist)));
         netlist
     }
@@ -2128,8 +2107,14 @@ impl crate::CircuitApp {
         self.performance.netlist_ms = started.elapsed().as_secs_f64() * 1_000.0;
         let connectivity = std::sync::Arc::new(connectivity);
         self.analysis.cached_connectivity = Some((revision, std::sync::Arc::clone(&connectivity)));
-        self.analysis.cached_netlist =
-            Some((revision, std::sync::Arc::new(connectivity.netlist.clone())));
+        self.analysis.cached_netlist = Some((
+            (revision, self.analysis.revisions.electrical_parameters),
+            std::sync::Arc::new(
+                connectivity
+                    .netlist
+                    .with_component_properties(&self.components),
+            ),
+        ));
         self.analysis.dirty_flags.connectivity_dirty = false;
         connectivity
     }
@@ -2198,8 +2183,15 @@ impl crate::CircuitApp {
                     }
                     let connectivity = result.connectivity;
                     self.analysis.cached_netlist = Some((
-                        result.revision_key.connectivity,
-                        std::sync::Arc::new(connectivity.netlist.clone()),
+                        (
+                            result.revision_key.connectivity,
+                            result.revision_key.electrical,
+                        ),
+                        std::sync::Arc::new(
+                            connectivity
+                                .netlist
+                                .with_component_properties(&self.components),
+                        ),
                     ));
                     self.analysis.cached_connectivity = Some((
                         result.revision_key.connectivity,
@@ -2249,6 +2241,7 @@ impl crate::CircuitApp {
                 }
                 crate::engine::worker::AnalysisPayload::Autosave(Err(error)) => {
                     self.status = format!("Auto backup failed: {error}");
+                    self.last_autorecover_revision = 0;
                 }
                 crate::engine::worker::AnalysisPayload::Autosave(Ok(_)) => {}
             }
@@ -2355,6 +2348,7 @@ impl SavedCircuit {
             .collect::<Vec<_>>();
         let (junction_dots, no_connect_markers) = saved_annotations_from(&app.annotations);
         Self {
+            board: Some(app.document.board.clone()),
             schema_version: 4,
             next_id: app.next_id,
             counters: app.counters.clone(),
@@ -2374,6 +2368,34 @@ impl SavedCircuit {
                 self.schema_version
             ));
         }
+        validate_saved_identity_space(
+            self.next_id,
+            &self.components,
+            &self.wires,
+            &self.junction_dots,
+            &self.no_connect_markers,
+            &self.counters,
+        )?;
+        for page in &self.pages {
+            validate_saved_identity_space(
+                page.next_id,
+                &page.components,
+                &page.wires,
+                &page.junction_dots,
+                &page.no_connect_markers,
+                &page.counters,
+            )?;
+        }
+        let mut board = self
+            .board
+            .unwrap_or_else(|| Board::new_two_layer(80.0, 50.0));
+        if board.schema_version > crate::pcb::board::BOARD_SCHEMA_VERSION {
+            return Err(format!(
+                "Unsupported board schema version {}.",
+                board.schema_version
+            ));
+        }
+        board.rebuild_entity_index();
         let current_page = self.current_page;
         let mut load_notes = Vec::new();
 
@@ -2436,11 +2458,49 @@ impl SavedCircuit {
                 annotations: current.annotations,
                 pages,
                 current_page,
-                board: Board::new_two_layer(80.0, 50.0),
+                board,
             },
             load_notes,
         ))
     }
+}
+
+fn validate_saved_identity_space(
+    next_id: u64,
+    components: &[SavedComponent],
+    wires: &[SavedWire],
+    junctions: &[SavedJunctionDot],
+    markers: &[SavedNoConnectMarker],
+    counters: &Counters,
+) -> Result<(), String> {
+    let max_id = components
+        .iter()
+        .map(|c| c.id)
+        .chain(wires.iter().map(|w| w.id))
+        .chain(junctions.iter().map(|j| j.id))
+        .chain(markers.iter().map(|m| m.id))
+        .max()
+        .unwrap_or(0)
+        .max(next_id);
+    let repair_headroom = components.len() as u64
+        + wires.len() as u64
+        + junctions.len() as u64
+        + markers.len() as u64
+        + 2;
+    max_id
+        .checked_add(repair_headroom)
+        .ok_or("Saved ID space exhausted; document was not loaded.")?;
+    let counters_json = serde_json::to_value(counters).map_err(|e| e.to_string())?;
+    if counters_json.as_object().is_some_and(|fields| {
+        fields.values().any(|value| {
+            value
+                .as_u64()
+                .is_some_and(|v| v > (usize::MAX as u64).saturating_sub(201))
+        })
+    }) {
+        return Err("Saved label counter exhausted; document was not loaded.".to_string());
+    }
+    Ok(())
 }
 
 fn saved_components_from(components: &[Component]) -> Vec<SavedComponent> {
@@ -2531,8 +2591,8 @@ fn repair_saved_page(
         .max()
         .unwrap_or(0)
         .max(annotation_max_id)
-        .max(saved_next_id)
-        + 1;
+        .saturating_add(1)
+        .max(saved_next_id);
 
     let mut components = Vec::new();
     for component in saved_components {
