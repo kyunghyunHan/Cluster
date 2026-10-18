@@ -10,6 +10,7 @@ use crate::engine::{
     mna, netlist::build_canonical_connectivity_with_annotations, simulation as simulation_engine,
 };
 use crate::model::cad::{CadProjectData, Point2};
+use crate::model::wire::SavedWireEndpoint;
 use crate::model::*;
 use crate::pcb::board::{Board, BoardOutline, RemovedFootprintPolicy};
 use crate::pcb::drc::{DrcSeverity, run_drc_with_nets};
@@ -1083,14 +1084,16 @@ impl crate::CircuitApp {
             ("cluster_pcb_bom.csv", crate::export::gerber::bom_csv(&cad)),
             ("cluster_pcb_cpl.csv", crate::export::gerber::cpl_csv(&cad)),
         ];
-        for (path, contents) in writes {
-            if let Err(error) = crate::storage::save::write_with_backup(path, &contents) {
-                self.status = format!("PCB export failed at {path}: {error}");
-                return;
-            }
-        }
-        self.status =
-            "Exported experimental PCB files in the working folder; review geometry before fabrication.".to_string();
+        self.status = match crate::storage::bundle::publish_text_bundle(
+            Path::new("cluster_pcb_exports"),
+            &writes,
+        ) {
+            Ok(path) => format!(
+                "Exported experimental PCB bundle to {}. Review before fabrication.",
+                path.display()
+            ),
+            Err(error) => format!("PCB export failed: {error}"),
+        };
     }
 
     pub(crate) fn save_project_folder(&mut self) {
@@ -1109,9 +1112,7 @@ impl crate::CircuitApp {
 
     pub(crate) fn load_project_folder(&mut self) {
         match self.load_project_folder_from("project.cluster") {
-            Ok(()) => {
-                self.status = "Loaded project.cluster schematic and PCB data.".to_string();
-            }
+            Ok(()) => {}
             Err(error) => {
                 self.status = format!("Project load failed: {error}");
             }
@@ -1235,8 +1236,12 @@ impl crate::CircuitApp {
         self.pcb_ui.last_sync_revision = self.analysis.circuit_revision;
         self.pcb_ui.selected_drc_index = None;
         self.refresh_pcb_analysis(&cad);
-        self.editor.history.dirty = false;
-        self.last_autorecover_revision = self.analysis.revisions.persistence;
+        self.editor.history.dirty = !load_notes.is_empty();
+        self.last_autorecover_revision = self
+            .analysis
+            .revisions
+            .persistence
+            .saturating_sub(u64::from(self.editor.history.dirty));
         self.analysis.dirty_flags.geometry_dirty = false;
         self.analysis.dirty_flags.connectivity_dirty = false;
         self.analysis.dirty_flags.validation_dirty = false;
@@ -1245,6 +1250,8 @@ impl crate::CircuitApp {
         self.pending_fit = true;
         let invariant_warnings =
             document_invariant_warnings + schematic_derived_warnings + board_invariant_warnings;
+        self.workspace_state.load_notes.clone_from(&load_notes);
+        self.workspace_state.show_load_notes = false;
         if !load_notes.is_empty() || invariant_warnings > 0 {
             self.status = format!(
                 "Loaded project with {} repair note(s) and {} invariant warning(s).",
@@ -1609,9 +1616,9 @@ impl crate::CircuitApp {
     // ── Export ───────────────────────────────────────────────────────────────
 
     pub(crate) fn export_svg(&mut self) {
-        match fs::write(
+        match write_with_backup(
             "cluster_circuit.svg",
-            crate::circuit_to_svg(&self.components, &self.wires),
+            &crate::circuit_to_svg(&self.components, &self.wires),
         ) {
             Ok(()) => {
                 self.status = "Saved cluster_circuit.svg.".to_string();
@@ -1632,7 +1639,7 @@ impl crate::CircuitApp {
         let netlist = self.current_netlist();
         let output =
             crate::export::spice::export_spice_netlist_with_netlist(&self.components, &netlist);
-        match fs::write("cluster_circuit.cir", output) {
+        match write_with_backup("cluster_circuit.cir", &output) {
             Ok(()) => {
                 self.status = "Saved cluster_circuit.cir.".to_string();
             }
@@ -1644,9 +1651,9 @@ impl crate::CircuitApp {
 
     pub(crate) fn export_netlist_text(&mut self) {
         let netlist = self.current_netlist();
-        match fs::write(
+        match write_with_backup(
             "cluster_netlist.txt",
-            crate::circuit_to_netlist_text(&netlist),
+            &crate::circuit_to_netlist_text(&netlist),
         ) {
             Ok(()) => {
                 self.status = format!("Saved cluster_netlist.txt ({} nets).", netlist.nets.len())
@@ -1693,7 +1700,7 @@ impl crate::CircuitApp {
             .flat_map(|(_, components, _, _, _)| components)
             .filter(|component| component.kind != ComponentKind::Ground)
             .count();
-        match fs::write("cluster_bom.csv", csv) {
+        match write_with_backup("cluster_bom.csv", &csv) {
             Ok(()) => self.status = format!("Saved cluster_bom.csv ({part_count} parts)."),
             Err(e) => self.status = format!("BOM export failed: {e}"),
         }
@@ -1886,9 +1893,15 @@ impl crate::CircuitApp {
                 if recovery {
                     self.editor.history.dirty = true;
                 } else {
-                    self.editor.history.dirty = false;
-                    self.last_autorecover_revision = self.analysis.revisions.persistence;
+                    self.editor.history.dirty = !load_notes.is_empty();
+                    self.last_autorecover_revision = self
+                        .analysis
+                        .revisions
+                        .persistence
+                        .saturating_sub(u64::from(self.editor.history.dirty));
                 }
+                self.workspace_state.load_notes.clone_from(&load_notes);
+                self.workspace_state.show_load_notes = false;
                 self.status = if load_notes.is_empty() && invariant_warnings == 0 {
                     format!("Loaded {}.", path.display())
                 } else {
@@ -2473,6 +2486,37 @@ fn validate_saved_identity_space(
     markers: &[SavedNoConnectMarker],
     counters: &Counters,
 ) -> Result<(), String> {
+    // Geometry cannot disambiguate a saved typed identity, whose endpoint
+    // position may legitimately be stale. Reject before replacing the document.
+    let mut component_ids = HashSet::new();
+    let duplicate_components = components
+        .iter()
+        .filter_map(|c| (!component_ids.insert(c.id)).then_some(c.id))
+        .collect::<HashSet<_>>();
+    let mut junction_ids = HashSet::new();
+    let duplicate_junctions = junctions
+        .iter()
+        .filter_map(|j| (!junction_ids.insert(j.id)).then_some(j.id))
+        .collect::<HashSet<_>>();
+    for wire in wires {
+        for endpoint in wire.start.iter().chain(wire.end.iter()) {
+            let ambiguous = match endpoint {
+                SavedWireEndpoint::Pin { component_id, .. } => {
+                    duplicate_components.contains(component_id)
+                }
+                SavedWireEndpoint::Junction { junction_id } => {
+                    duplicate_junctions.contains(junction_id)
+                }
+                SavedWireEndpoint::FreePoint { .. } => false,
+            };
+            if ambiguous {
+                return Err(format!(
+                    "Wire {} references a duplicate component or junction ID. Restore a backup or repair the duplicate IDs; document was not loaded.",
+                    wire.id
+                ));
+            }
+        }
+    }
     let max_id = components
         .iter()
         .map(|c| c.id)
@@ -2681,6 +2725,53 @@ fn repair_saved_page(
             )
         });
         wires.push(Wire::with_endpoints(id, points, start, end));
+    }
+
+    let available_pins = components
+        .iter()
+        .map(|component| {
+            let pins = if component.kind == ComponentKind::Custom
+                && component.part_id.as_deref().and_then(custom_part).is_none()
+            {
+                None
+            } else {
+                Some(
+                    component_pin_defs(component)
+                        .into_iter()
+                        .map(|p| p.label)
+                        .collect::<HashSet<_>>(),
+                )
+            };
+            (component.id, pins)
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let available_junctions = annotations
+        .junction_dots
+        .iter()
+        .map(|dot| dot.id)
+        .collect::<HashSet<_>>();
+    for wire in &mut wires {
+        let positions = [
+            wire.points[0],
+            *wire.points.last().unwrap_or(&wire.points[0]),
+        ];
+        for (endpoint, position) in [&mut wire.start, &mut wire.end].into_iter().zip(positions) {
+            let missing = match endpoint {
+                WireEndpoint::Pin(pin) => match available_pins.get(&pin.component_id) {
+                    Some(None) => false, // Keep identities until the custom definition is available.
+                    Some(Some(pins)) => !pins.contains(pin.pin_name.as_str()),
+                    None => true,
+                },
+                WireEndpoint::Junction(id) => !available_junctions.contains(id),
+                WireEndpoint::FreePoint(_) => false,
+            };
+            if missing {
+                load_notes.push(format!("Wire {} had a missing pin or junction reference. Kept the wire at its saved position; check its connection.", wire.id));
+                *endpoint = WireEndpoint::FreePoint(position);
+            } else if matches!(endpoint, WireEndpoint::FreePoint(_)) {
+                *endpoint = WireEndpoint::FreePoint(position);
+            }
+        }
     }
 
     let max_id = components

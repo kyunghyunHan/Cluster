@@ -3,6 +3,90 @@ use egui::Pos2;
 use crate::model::ComponentKind;
 
 impl crate::CircuitApp {
+    pub(crate) fn load_resistor_series_demo(&mut self) {
+        self.load_resistor_network_demo(false);
+    }
+
+    pub(crate) fn load_resistor_parallel_demo(&mut self) {
+        self.load_resistor_network_demo(true);
+    }
+
+    fn load_resistor_network_demo(&mut self, parallel: bool) {
+        self.reset_canvas();
+        let battery = self.place_component(ComponentKind::Battery, Pos2::new(440.0, 440.0));
+        // Positive on the left, matching the usual textbook loop drawing.
+        self.editor.selected = Some(crate::app::Selection::Component(battery));
+        self.rotate_selected();
+        self.rotate_selected();
+        self.editor.selected = None;
+        if let Some(component) = self.components.iter_mut().find(|c| c.id == battery) {
+            component.value = "6V".to_string();
+        }
+        let r1 = self.place_component(
+            ComponentKind::Resistor,
+            Pos2::new(if parallel { 440.0 } else { 340.0 }, 200.0),
+        );
+        let r2 = self.place_component(
+            ComponentKind::Resistor,
+            Pos2::new(
+                if parallel { 440.0 } else { 540.0 },
+                if parallel { 320.0 } else { 200.0 },
+            ),
+        );
+        for component in self
+            .components
+            .iter_mut()
+            .filter(|c| c.id == r1 || c.id == r2)
+        {
+            component.value = "1k".to_string();
+        }
+        let pin = |app: &Self, id, name| app.pin_pos(id, name);
+        let (Some(plus), Some(minus), Some(a1), Some(b1), Some(a2), Some(b2)) = (
+            pin(self, battery, "+"),
+            pin(self, battery, "-"),
+            pin(self, r1, "A"),
+            pin(self, r1, "B"),
+            pin(self, r2, "A"),
+            pin(self, r2, "B"),
+        ) else {
+            self.status = "Could not create resistor example: missing component pin.".to_string();
+            return;
+        };
+        self.add_wire(vec![
+            plus,
+            Pos2::new(220.0, plus.y),
+            Pos2::new(220.0, a1.y),
+            a1,
+        ]);
+        self.add_wire(vec![
+            b2,
+            Pos2::new(660.0, b2.y),
+            Pos2::new(660.0, minus.y),
+            minus,
+        ]);
+        if parallel {
+            self.add_wire(vec![Pos2::new(220.0, a2.y), a2]);
+            self.add_wire(vec![b1, Pos2::new(660.0, b1.y), Pos2::new(660.0, b2.y)]);
+        } else {
+            self.add_wire(vec![b1, a2]);
+        }
+        self.place_note(
+            Pos2::new(440.0, 100.0),
+            if parallel {
+                "PARALLEL RESISTORS\n6 V / (1k || 1k) = 12 mA total\nEach branch: 6 V, 6 mA"
+            } else {
+                "SERIES RESISTORS\n6 V / (1k + 1k) = 3 mA\nEach resistor: 3 V, same current"
+            },
+        );
+        self.status = if parallel {
+            "Loaded parallel resistors: two current paths."
+        } else {
+            "Loaded series resistors: one current path."
+        }
+        .to_string();
+        self.pending_fit = true;
+    }
+
     pub(crate) fn load_led_demo(&mut self) {
         self.reset_canvas();
         let battery = self.place_component(ComponentKind::Battery, Pos2::new(180.0, 390.0));

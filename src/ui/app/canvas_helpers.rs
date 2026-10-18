@@ -8,13 +8,24 @@ pub(crate) fn snap_pos(pos: Pos2, _rect: Rect, grid: f32, snap: bool) -> Pos2 {
     }
 }
 
-pub(crate) fn straighten_neighbor_segments(wire: &mut Wire, point_index: usize) {
+pub(crate) fn straighten_neighbor_segments(
+    wire: &mut Wire,
+    mut point_index: usize,
+    old_point: Pos2,
+) -> usize {
     let point = wire.points[point_index];
     if point_index > 0 {
         let prev = wire.points[point_index - 1];
-        let dx = (point.x - prev.x).abs();
-        let dy = (point.y - prev.y).abs();
-        if dx <= dy {
+        let vertical = (old_point.x - prev.x).abs() <= (old_point.y - prev.y).abs();
+        if point_index == 1 {
+            let corner = if vertical {
+                Pos2::new(prev.x, point.y)
+            } else {
+                Pos2::new(point.x, prev.y)
+            };
+            wire.points.insert(point_index, corner);
+            point_index += 1;
+        } else if vertical {
             wire.points[point_index - 1].x = point.x;
         } else {
             wire.points[point_index - 1].y = point.y;
@@ -22,14 +33,21 @@ pub(crate) fn straighten_neighbor_segments(wire: &mut Wire, point_index: usize) 
     }
     if point_index + 1 < wire.points.len() {
         let next = wire.points[point_index + 1];
-        let dx = (point.x - next.x).abs();
-        let dy = (point.y - next.y).abs();
-        if dx <= dy {
+        let vertical = (old_point.x - next.x).abs() <= (old_point.y - next.y).abs();
+        if point_index + 2 == wire.points.len() {
+            let corner = if vertical {
+                Pos2::new(next.x, point.y)
+            } else {
+                Pos2::new(point.x, next.y)
+            };
+            wire.points.insert(point_index + 1, corner);
+        } else if vertical {
             wire.points[point_index + 1].x = point.x;
         } else {
             wire.points[point_index + 1].y = point.y;
         }
     }
+    point_index
 }
 
 pub(crate) fn is_connection_point(pos: Pos2, components: &[Component], wires: &[Wire]) -> bool {
@@ -82,6 +100,15 @@ pub(crate) fn snap_to_nearest_connection(
     components: &[Component],
     wires: &[Wire],
 ) -> Option<Pos2> {
+    snap_to_nearest_connection_except(pos, components, wires, None)
+}
+
+pub(crate) fn snap_to_nearest_connection_except(
+    pos: Pos2,
+    components: &[Component],
+    wires: &[Wire],
+    ignored_wire: Option<u64>,
+) -> Option<Pos2> {
     let mut best: Option<Pos2> = None;
     // Pins get priority (smaller threshold)
     let mut best_dist_pin = 30.0_f32;
@@ -100,6 +127,9 @@ pub(crate) fn snap_to_nearest_connection(
 
     // Wire endpoints and all intermediate points
     for wire in wires {
+        if ignored_wire == Some(wire.id) {
+            continue;
+        }
         for &pt in &wire.points {
             let d = pt.distance(pos);
             if d < best_dist_wire {
@@ -232,36 +262,6 @@ pub(crate) fn wire_path_pin_crossings(points: &[Pos2], pins: &[Pos2]) -> usize {
         .count()
 }
 
-pub(crate) fn keep_wire_end_orthogonal(wire: &mut Wire, first: bool) {
-    if wire.points.len() < 2 {
-        return;
-    }
-    if wire.points.len() == 2 {
-        let start = wire.points[0];
-        let end = wire.points[1];
-        if (start.x - end.x).abs() <= 0.5 || (start.y - end.y).abs() <= 0.5 {
-            return;
-        }
-        let corner = Pos2::new(end.x, start.y);
-        wire.points = simplify_wire(vec![start, corner, end]);
-        return;
-    }
-    let (end_index, neighbor_index) = if first {
-        (0, 1)
-    } else {
-        (wire.points.len() - 1, wire.points.len() - 2)
-    };
-    let end = wire.points[end_index];
-    let neighbor = wire.points[neighbor_index];
-    let dx = (end.x - neighbor.x).abs();
-    let dy = (end.y - neighbor.y).abs();
-    if dx <= dy {
-        wire.points[neighbor_index].x = end.x;
-    } else {
-        wire.points[neighbor_index].y = end.y;
-    }
-}
-
 pub(crate) fn simplify_wire(points: Vec<Pos2>) -> Vec<Pos2> {
     let mut deduped = Vec::new();
     for point in points {
@@ -278,7 +278,13 @@ pub(crate) fn simplify_wire(points: Vec<Pos2>) -> Vec<Pos2> {
             let c = simplified[len - 1];
             let horizontal = (a.y - b.y).abs() < 0.5 && (b.y - c.y).abs() < 0.5;
             let vertical = (a.x - b.x).abs() < 0.5 && (b.x - c.x).abs() < 0.5;
-            if horizontal || vertical {
+            // A reversal can be a real branch anchor; removing it shortens
+            // the conductor and can silently disconnect the branch.
+            let between = b.x >= a.x.min(c.x)
+                && b.x <= a.x.max(c.x)
+                && b.y >= a.y.min(c.y)
+                && b.y <= a.y.max(c.y);
+            if (horizontal || vertical) && between {
                 simplified.remove(len - 2);
             } else {
                 break;

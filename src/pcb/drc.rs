@@ -20,8 +20,33 @@ pub(crate) struct DrcViolation {
 }
 
 pub(crate) fn run_drc(board: &Board) -> Vec<DrcViolation> {
+    run_drc_internal(board, true)
+}
+
+fn run_drc_internal(board: &Board, prune_distant: bool) -> Vec<DrcViolation> {
     let mut violations = Vec::new();
     let rules = &board.design_rules;
+    // Resolve each physical pad once. Checking every track endpoint used to
+    // repeat library lookups, transforms and pad clones for the whole board.
+    let mut pad_contacts = Vec::new();
+    for footprint in board.footprints.iter().filter(|f| f.placed) {
+        let Some(definition) = board
+            .footprint_library
+            .iter()
+            .find(|d| d.footprint_id == footprint.footprint_id)
+        else {
+            continue;
+        };
+        let transform = footprint.transform();
+        for pad in &definition.pads {
+            pad_contacts.push(PadContact {
+                pad,
+                transform,
+                layers: transform.transform_pad(pad).layers,
+                bounds: super::geometry::CopperBounds::pad(pad, transform),
+            });
+        }
+    }
 
     for track in &board.tracks {
         if track.width_mm < rules.min_track_width_mm {
@@ -256,8 +281,10 @@ pub(crate) fn run_drc(board: &Board) -> Vec<DrcViolation> {
     }
 
     for track in &board.tracks {
-        let start_connected = copper_endpoint_connected(board, track, track.start);
-        let end_connected = copper_endpoint_connected(board, track, track.end);
+        let start_connected =
+            copper_endpoint_connected(board, track, track.start, &pad_contacts, prune_distant);
+        let end_connected =
+            copper_endpoint_connected(board, track, track.end, &pad_contacts, prune_distant);
         if !start_connected || !end_connected {
             violations.push(DrcViolation {
                 severity: DrcSeverity::Warning,
@@ -376,21 +403,70 @@ pub(crate) fn run_local_drc(
 }
 
 pub(crate) fn run_drc_with_nets(board: &Board, nets: &[CadNet]) -> Vec<DrcViolation> {
-    let mut violations = run_drc(board);
+    run_drc_with_nets_internal(board, nets, true)
+}
+
+fn run_drc_with_nets_internal(
+    board: &Board,
+    nets: &[CadNet],
+    prune_distant: bool,
+) -> Vec<DrcViolation> {
+    use super::geometry::CopperBounds;
+    let mut violations = run_drc_internal(board, prune_distant);
     let pads = super::copper::resolve_pads(board, nets);
-    let clearance = |a: usize, b: usize| {
-        let mut required = board.design_rules.default_clearance_mm;
-        for id in [a, b] {
-            if let Some(class) = nets
+    let placed = board
+        .footprints
+        .iter()
+        .filter(|f| f.placed)
+        .map(|f| f.id)
+        .collect::<std::collections::HashSet<_>>();
+    let placed_pads = pads
+        .iter()
+        .filter(|p| placed.contains(&p.footprint_id))
+        .collect::<Vec<_>>();
+    let pad_bounds = placed_pads
+        .iter()
+        .map(|p| CopperBounds::pad(&p.pad, p.transform))
+        .collect::<Vec<_>>();
+    let track_bounds = board
+        .tracks
+        .iter()
+        .map(|t| CopperBounds::segment(t.start, t.end, t.width_mm * 0.5))
+        .collect::<Vec<_>>();
+    let via_bounds = board
+        .vias
+        .iter()
+        .map(|v| CopperBounds::segment(v.position, v.position, v.diameter_mm * 0.5))
+        .collect::<Vec<_>>();
+    let net_clearances = nets
+        .iter()
+        .map(|net| {
+            let clearance = board
+                .net_classes
                 .iter()
-                .find(|n| n.net_id == id)
-                .and_then(|n| board.net_classes.iter().find(|c| c.class_id == n.class_id))
-            {
-                required = required.max(class.clearance_mm);
-            }
-        }
-        required
+                .find(|c| c.class_id == net.class_id)
+                .map_or(board.design_rules.default_clearance_mm, |c| {
+                    c.clearance_mm.max(board.design_rules.default_clearance_mm)
+                });
+            (net.net_id, clearance)
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let clearance = |a: usize, b: usize| {
+        net_clearances
+            .get(&a)
+            .copied()
+            .unwrap_or(board.design_rules.default_clearance_mm)
+            .max(
+                net_clearances
+                    .get(&b)
+                    .copied()
+                    .unwrap_or(board.design_rules.default_clearance_mm),
+            )
     };
+    let maximum_clearance = net_clearances
+        .values()
+        .copied()
+        .fold(board.design_rules.default_clearance_mm, f32::max);
     for track in &board.tracks {
         if !nets.iter().any(|n| n.net_id == track.net_id) {
             violations.push(DrcViolation {severity:DrcSeverity::Error,title:"Unverified copper net".into(),message:format!("Track {} has an orphan or ambiguous ECO assignment; verify its net before fabrication.",track.id),location:Some(track.start),object_id:Some(track.id)});
@@ -398,19 +474,12 @@ pub(crate) fn run_drc_with_nets(board: &Board, nets: &[CadNet]) -> Vec<DrcViolat
     }
     // Per-instance assignments prevent shared library pad definitions from
     // connecting every instance of a part to the same net.
-    for (i, a) in pads.iter().enumerate().filter(|(_, p)| {
-        board
-            .footprints
-            .iter()
-            .any(|f| f.id == p.footprint_id && f.placed)
-    }) {
-        for b in pads.iter().skip(i + 1).filter(|p| {
-            board
-                .footprints
-                .iter()
-                .any(|f| f.id == p.footprint_id && f.placed)
-        }) {
+    for (i, a) in placed_pads.iter().enumerate() {
+        for (j, b) in placed_pads.iter().enumerate().skip(i + 1) {
             if a.net_id == b.net_id || !a.layers.iter().any(|l| b.layers.contains(l)) {
+                continue;
+            }
+            if prune_distant && !pad_bounds[i].may_touch(pad_bounds[j], maximum_clearance) {
                 continue;
             }
             let distance = super::geometry::pad_distance(&a.pad, a.transform, &b.pad, b.transform);
@@ -427,8 +496,11 @@ pub(crate) fn run_drc_with_nets(board: &Board, nets: &[CadNet]) -> Vec<DrcViolat
                 });
             }
         }
-        for track in &board.tracks {
+        for (j, track) in board.tracks.iter().enumerate() {
             if a.net_id == track.net_id || !a.layers.contains(&track.layer) {
+                continue;
+            }
+            if prune_distant && !pad_bounds[i].may_touch(track_bounds[j], maximum_clearance) {
                 continue;
             }
             let distance =
@@ -447,8 +519,11 @@ pub(crate) fn run_drc_with_nets(board: &Board, nets: &[CadNet]) -> Vec<DrcViolat
                 });
             }
         }
-        for via in &board.vias {
+        for (j, via) in board.vias.iter().enumerate() {
             if a.net_id == via.net_id {
+                continue;
+            }
+            if prune_distant && !pad_bounds[i].may_touch(via_bounds[j], maximum_clearance) {
                 continue;
             }
             let distance = super::geometry::pad_segment_distance(
@@ -472,11 +547,15 @@ pub(crate) fn run_drc_with_nets(board: &Board, nets: &[CadNet]) -> Vec<DrcViolat
         }
     }
     for (i, a) in board.tracks.iter().enumerate() {
-        for b in board.tracks.iter().skip(i + 1) {
+        for (j, b) in board.tracks.iter().enumerate().skip(i + 1) {
             if a.net_id == b.net_id
                 || a.layer != b.layer
+                || maximum_clearance <= board.design_rules.default_clearance_mm
                 || clearance(a.net_id, b.net_id) <= board.design_rules.default_clearance_mm
             {
+                continue;
+            }
+            if prune_distant && !track_bounds[i].may_touch(track_bounds[j], maximum_clearance) {
                 continue;
             }
             if segment_distance(a.start, a.end, b.start, b.end) - (a.width_mm + b.width_mm) * 0.5
@@ -491,8 +570,11 @@ pub(crate) fn run_drc_with_nets(board: &Board, nets: &[CadNet]) -> Vec<DrcViolat
                 });
             }
         }
-        for via in &board.vias {
+        for (j, via) in board.vias.iter().enumerate() {
             if a.net_id == via.net_id {
+                continue;
+            }
+            if prune_distant && !track_bounds[i].may_touch(via_bounds[j], maximum_clearance) {
                 continue;
             }
             if point_segment_distance(via.position, a.start, a.end)
@@ -510,7 +592,10 @@ pub(crate) fn run_drc_with_nets(board: &Board, nets: &[CadNet]) -> Vec<DrcViolat
         }
     }
     for (i, a) in board.vias.iter().enumerate() {
-        for b in board.vias.iter().skip(i + 1) {
+        for (j, b) in board.vias.iter().enumerate().skip(i + 1) {
+            if prune_distant && !via_bounds[i].may_touch(via_bounds[j], maximum_clearance) {
+                continue;
+            }
             if a.net_id != b.net_id
                 && (a.position.x - b.position.x).hypot(a.position.y - b.position.y)
                     - (a.diameter_mm + b.diameter_mm) * 0.5
@@ -581,48 +666,38 @@ pub(crate) fn run_drc_with_nets(board: &Board, nets: &[CadNet]) -> Vec<DrcViolat
     violations
 }
 
+struct PadContact<'a> {
+    pad: &'a crate::pcb::footprint::Pad,
+    transform: crate::pcb::footprint::FootprintTransform,
+    layers: Vec<crate::pcb::layer::BoardLayer>,
+    bounds: super::geometry::CopperBounds,
+}
+
 fn copper_endpoint_connected(
     board: &Board,
     current: &crate::pcb::track::TrackSegment,
     point: Point2,
+    pads: &[PadContact<'_>],
+    prune_distant: bool,
 ) -> bool {
     const CONTACT_MM: f32 = 0.000001;
-    board
-        .footprints
-        .iter()
-        .filter(|f| f.placed)
-        .any(|footprint| {
-            board
-                .footprint_library
-                .iter()
-                .find(|d| d.footprint_id == footprint.footprint_id)
-                .is_some_and(|definition| {
-                    definition.pads.iter().any(|pad| {
-                        footprint
-                            .transform()
-                            .transform_pad(pad)
-                            .layers
-                            .contains(&current.layer)
-                            && super::geometry::pad_segment_distance(
-                                pad,
-                                footprint.transform(),
-                                point,
-                                point,
-                            ) <= current.width_mm * 0.5
-                    })
-                })
-        })
-        || board.vias.iter().any(|via| {
-            via.net_id == current.net_id
-                && ((via.position.x - point.x).powi(2) + (via.position.y - point.y).powi(2)).sqrt()
-                    <= via.diameter_mm * 0.5
-        })
-        || board.tracks.iter().any(|track| {
-            track.id != current.id
-                && track.net_id == current.net_id
-                && track.layer == current.layer
-                && (point_segment_distance(point, track.start, track.end) <= CONTACT_MM)
-        })
+    let endpoint_bounds =
+        super::geometry::CopperBounds::segment(point, point, current.width_mm * 0.5);
+    pads.iter().any(|pad| {
+        pad.layers.contains(&current.layer)
+            && (!prune_distant || pad.bounds.may_touch(endpoint_bounds, CONTACT_MM))
+            && super::geometry::pad_segment_distance(pad.pad, pad.transform, point, point)
+                <= current.width_mm * 0.5
+    }) || board.vias.iter().any(|via| {
+        via.net_id == current.net_id
+            && ((via.position.x - point.x).powi(2) + (via.position.y - point.y).powi(2)).sqrt()
+                <= via.diameter_mm * 0.5
+    }) || board.tracks.iter().any(|track| {
+        track.id != current.id
+            && track.net_id == current.net_id
+            && track.layer == current.layer
+            && (point_segment_distance(point, track.start, track.end) <= CONTACT_MM)
+    })
 }
 
 fn midpoint(a: Point2, b: Point2) -> Point2 {
@@ -638,6 +713,83 @@ use super::geometry::{point_segment_distance, segment_distance};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conservative_copper_pruning_matches_unpruned_diagnostics() {
+        use crate::model::cad::NetClass;
+        use crate::pcb::board::BoardFootprint;
+        use crate::pcb::layer::BoardLayer;
+        use crate::pcb::track::TrackSegment;
+        use crate::pcb::via::Via;
+        let mut seed = 4123_u64;
+        let mut number = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((seed >> 32) as u32 % 5000) as f32 / 100.0
+        };
+        for scenario in 0..4 {
+            let mut board = Board::new_two_layer(80.0, 80.0);
+            board.net_classes.push(NetClass {
+                class_id: "Wide".into(),
+                clearance_mm: 2.0,
+                ..NetClass::default()
+            });
+            let mut nets = (0..6)
+                .map(|id| CadNet {
+                    net_id: id,
+                    name: format!("NET_{id}"),
+                    class_id: if id % 2 == 0 { "Wide" } else { "Default" }.into(),
+                    connected_pins: Vec::new(),
+                })
+                .collect::<Vec<_>>();
+            for i in 0..30 {
+                board.footprints.push(BoardFootprint {
+                    id: i + 1,
+                    symbol_instance_id: Some(i + 1),
+                    reference: format!("R{i}"),
+                    footprint_id: "R_THT_Axial".into(),
+                    position: Point2::new(10.0 + number(), 10.0 + number()),
+                    rotation_deg: (i % 4) as f32 * 90.0 + if scenario == 3 { 17.0 } else { 0.0 },
+                    flipped: i % 2 == 0,
+                    placed: i % 5 != 0,
+                });
+                for (offset, name) in ["A", "B"].into_iter().enumerate() {
+                    nets[(i as usize + offset) % 6]
+                        .connected_pins
+                        .push(crate::PinRef {
+                            component_id: i + 1,
+                            pin_name: name.into(),
+                        });
+                }
+                board.tracks.push(TrackSegment {
+                    id: 100 + i,
+                    net_id: i as usize % 6,
+                    layer: if i % 2 == 0 {
+                        BoardLayer::FrontCopper
+                    } else {
+                        BoardLayer::BackCopper
+                    },
+                    start: Point2::new(10.0 + number(), 10.0 + number()),
+                    end: Point2::new(10.0 + number(), 10.0 + number()),
+                    width_mm: 0.25 + scenario as f32 * 0.2,
+                });
+                board.vias.push(Via {
+                    id: 200 + i,
+                    net_id: i as usize % 6,
+                    position: Point2::new(10.0 + number(), 10.0 + number()),
+                    diameter_mm: 0.8,
+                    drill_mm: 0.4,
+                });
+            }
+            board.rebuild_entity_index();
+            let expected = run_drc_with_nets_internal(&board, &nets, false);
+            assert!(expected.iter().any(|v| v.title.contains("clearance")));
+            assert_eq!(
+                run_drc_with_nets(&board, &nets),
+                expected,
+                "scenario {scenario}"
+            );
+        }
+    }
     use crate::pcb::layer::BoardLayer;
     use crate::pcb::track::TrackSegment;
 

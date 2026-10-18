@@ -82,6 +82,10 @@ pub(crate) use widgets::*;
 
 pub(crate) struct WorkspaceState {
     pub(crate) show_help: bool,
+    pub(crate) load_notes: Vec<String>,
+    pub(crate) show_load_notes: bool,
+    pub(crate) show_sheet_info: bool,
+    pub(crate) show_minimap: bool,
     pub(crate) bottom_dock_tab: BottomDockTab,
     pub(crate) bottom_dock_open: bool,
     pub(crate) workspace: Workspace,
@@ -126,6 +130,10 @@ impl Default for WorkspaceState {
     fn default() -> Self {
         Self {
             show_help: false,
+            load_notes: Vec::new(),
+            show_load_notes: false,
+            show_sheet_info: false,
+            show_minimap: false,
             bottom_dock_tab: BottomDockTab::Erc,
             bottom_dock_open: true,
             workspace: Workspace::Schematic,
@@ -776,6 +784,8 @@ impl CircuitApp {
                     orthogonal_wires: &mut self.orthogonal_wires,
                     show_pins: &mut self.show_pins,
                     show_grid: &mut self.show_grid,
+                    show_sheet_info: &mut self.workspace_state.show_sheet_info,
+                    show_minimap: &mut self.workspace_state.show_minimap,
                     simulate: &mut self.simulate,
                     show_breadboard_view: &mut self.breadboard_ui.open,
                     show_voltage_labels: &mut self.simulation_ui.show_voltage_labels,
@@ -795,7 +805,7 @@ impl CircuitApp {
                 self.simulation_ui.last_simulation_enabled = self.simulate;
                 self.simulation_ui.flow_started_at = self.simulate.then_some(now);
             }
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(
                     egui::RichText::new("Workspace")
                         .size(10.5)
@@ -828,6 +838,16 @@ impl CircuitApp {
                             }
                         }
                     }
+                }
+                if !self.workspace_state.load_notes.is_empty()
+                    && ui
+                        .small_button(format!(
+                            "Load report ({})",
+                            self.workspace_state.load_notes.len()
+                        ))
+                        .clicked()
+                {
+                    self.workspace_state.show_load_notes = true;
                 }
             });
             if !self.status.is_empty() {
@@ -905,6 +925,12 @@ impl CircuitApp {
                         }
 
                         palette_section(ui, "Lessons: Current Flows", SectionMode::Open, |ui| {
+                            if palette_action(ui, "Series Resistors · 직렬").clicked() {
+                                self.load_resistor_series_demo();
+                            }
+                            if palette_action(ui, "Parallel Resistors · 병렬").clicked() {
+                                self.load_resistor_parallel_demo();
+                            }
                             if palette_action(ui, "LED Circuit").clicked() {
                                 self.load_led_demo();
                             }
@@ -2150,16 +2176,23 @@ impl CircuitApp {
             }
 
             // ── Simulation summary overlay (top-right of canvas) ───────
-            if self.simulate && !self.components.is_empty() {
+            if self.simulate && !self.components.is_empty() && rect.width() >= 500.0 && rect.height() >= 300.0 {
                 draw_sim_summary(&painter, rect, &simulation);
             }
-            draw_simulation_legend(&painter, rect, self.simulate, simulation.dc.is_some());
+            if rect.width() >= 600.0 && rect.height() >= 350.0 {
+                draw_simulation_legend(&painter, rect, self.simulate, simulation.dc.is_some());
+            }
 
-            draw_title_block(&painter, rect, &self.components, &self.wires, &simulation);
+            if self.workspace_state.show_sheet_info {
+                draw_title_block(&painter, rect, &self.components, &self.wires, &simulation);
+            }
 
             // ── Minimap (bottom-right corner) ────────────────────────────
-            if !self.components.is_empty() {
-                draw_minimap(&painter, rect, &self.components, &self.wires, view);
+            if self.workspace_state.show_minimap && !self.components.is_empty() {
+                let minimap_canvas = if self.workspace_state.show_sheet_info {
+                    Rect::from_min_max(rect.min, rect.max - Vec2::new(0.0, 170.0))
+                } else { rect };
+                draw_minimap(&painter, minimap_canvas, &self.components, &self.wires, view);
             }
             if cfg!(debug_assertions) && self.workspace_state.show_performance_overlay {
                 let fps = ctx.input(|input| 1.0 / input.stable_dt.max(1.0 / 240.0));
@@ -2851,7 +2884,7 @@ impl CircuitApp {
             if response.drag_started()
                 && !panning
                 && self.editor.tool == Tool::Select
-                && let Some(pos) = pointer_in_rect
+                && let Some(pos) = ctx.input(|i| i.pointer.press_origin()).filter(|pos| rect.contains(*pos))
             {
                 let world = view.to_world(pos);
                 if let Some((wire_id, point_index)) =
@@ -2923,13 +2956,13 @@ impl CircuitApp {
                 let force_connection_snap = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
                 match drag {
                     DragState::Component { id, offset } => {
-                        let snapped = snap_pos(world, rect, self.grid, self.snap);
+                        let snapped = snap_pos(world - offset, rect, self.grid, self.snap);
                         let in_multi =
                             self.editor.multi_selected.len() > 1 && self.editor.multi_selected.contains(&id);
                         if in_multi {
                             let old_pos = self.component_by_id(id).map(|c| c.pos);
                             if let Some(old_pos) = old_pos {
-                                let mut delta = snapped - offset - old_pos;
+                                let mut delta = snapped - old_pos;
                                 let ids = self.editor.multi_selected.clone();
                                 let old_pins = self
                                     .components
@@ -2963,7 +2996,7 @@ impl CircuitApp {
                             self.analysis.schematic_entity_index.component(id)
                         {
                             let old_pins = component_pins(&self.components[index]);
-                            let mut new_pos = snapped - offset;
+                            let mut new_pos = snapped;
                             if force_connection_snap {
                                 let ids = HashSet::from([id]);
                                 if let Some(adjust) = snap_delta_for_moved_components(
@@ -2994,9 +3027,11 @@ impl CircuitApp {
                         point_index,
                     } => {
                         let mut snapped = snap_pos(world, rect, self.grid, self.snap);
-                        if force_connection_snap
+                        let endpoint = self.wire_by_id(wire_id).is_some_and(|wire|
+                            point_index == 0 || point_index + 1 == wire.points.len());
+                        if (force_connection_snap || endpoint) && !ctx.input(|i| i.modifiers.alt)
                             && let Some(connection) =
-                                snap_to_nearest_connection(snapped, &self.components, &self.wires)
+                                snap_to_nearest_connection_except(world, &self.components, &self.wires, Some(wire_id))
                         {
                             snapped = connection;
                         }
@@ -3320,6 +3355,27 @@ impl CircuitApp {
 
         // ── Find dialog (floating overlay) ──────────────────────────────────
         // ── Keyboard shortcuts help dialog ───────────────────────────────────
+        if self.workspace_state.show_load_notes {
+            let mut open = true;
+            egui::Window::new("Load report")
+                .open(&mut open)
+                .default_width(420.0)
+                .max_width((ctx.content_rect().width() - 24.0).max(160.0))
+                .show(ctx, |ui| {
+                    ui.label("Review these changes before saving the repaired circuit.");
+                    if ui.small_button("Copy report").clicked() {
+                        ctx.copy_text(self.workspace_state.load_notes.join("\n"));
+                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for note in &self.workspace_state.load_notes {
+                                ui.label(note);
+                            }
+                        });
+                });
+            self.workspace_state.show_load_notes = open;
+        }
         if self.workspace_state.show_help {
             let mut open = self.workspace_state.show_help;
             egui::Window::new("⌨  Keyboard Shortcuts")

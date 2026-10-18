@@ -977,7 +977,23 @@ pub(crate) fn write_png(
     height: usize,
     rgba: &[u8],
 ) -> std::io::Result<()> {
-    use std::io::Write;
+    let row_bytes = width.checked_mul(4);
+    let pixel_bytes = row_bytes.and_then(|row| row.checked_mul(height));
+    let raw_bytes = row_bytes
+        .and_then(|row| row.checked_add(1))
+        .and_then(|row| row.checked_mul(height));
+    if width == 0
+        || height == 0
+        || width > u32::MAX as usize
+        || height > u32::MAX as usize
+        || pixel_bytes != Some(rgba.len())
+        || raw_bytes.is_none()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "PNG dimensions and RGBA pixel count do not match.",
+        ));
+    }
 
     fn adler32(data: &[u8]) -> u32 {
         let (mut s1, mut s2) = (1u32, 0u32);
@@ -1013,7 +1029,9 @@ pub(crate) fn write_png(
     }
 
     // Build raw scanlines with filter byte 0 (None)
-    let mut raw: Vec<u8> = Vec::with_capacity(height * (1 + width * 4));
+    let mut raw: Vec<u8> = Vec::new();
+    raw.try_reserve_exact(raw_bytes.unwrap_or_default())
+        .map_err(std::io::Error::other)?;
     for y in 0..height {
         raw.push(0); // filter type None
         raw.extend_from_slice(&rgba[y * width * 4..(y + 1) * width * 4]);
@@ -1052,7 +1070,5 @@ pub(crate) fn write_png(
     // IEND
     write_chunk(&mut out, b"IEND", &[]);
 
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(&out)?;
-    Ok(())
+    crate::storage::save::write_bytes_with_backup(path, &out).map_err(std::io::Error::other)
 }

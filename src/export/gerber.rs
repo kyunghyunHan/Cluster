@@ -181,6 +181,33 @@ fn write_flash(out: &mut String, position: Point2, aperture: u32) {
 /// Reject model geometry that this exporter cannot faithfully represent.
 pub(crate) fn manufacturing_limitations(board: &Board) -> Vec<String> {
     let mut errors = Vec::new();
+    // %FSLAX46Y46*% has four integer and six fractional digits. Finite
+    // coordinates can still exceed that format after unit conversion.
+    let representable = |point: Point2| {
+        [point.x, point.y].into_iter().all(|value| {
+            value.is_finite() && (f64::from(value) * 1_000_000.0).round().abs() <= 9_999_999_999.0
+        })
+    };
+    if board.outline.points.iter().any(|&p| !representable(p))
+        || board
+            .tracks
+            .iter()
+            .any(|t| !representable(t.start) || !representable(t.end))
+        || board.vias.iter().any(|v| !representable(v.position))
+        || board.footprints.iter().filter(|f| f.placed).any(|f| {
+            board
+                .footprint_library
+                .iter()
+                .find(|d| d.footprint_id == f.footprint_id)
+                .is_some_and(|d| {
+                    d.pads
+                        .iter()
+                        .any(|p| !representable(f.transform().local_to_board(p.position)))
+                })
+        })
+    {
+        errors.push("Coordinates exceed the Gerber 4.6 format range (less than 10000 mm per axis). Move or resize the board before export.".into());
+    }
     if !board.zones.is_empty() {
         errors.push("Copper zones are not supported by the exporter.".into());
     }
@@ -251,6 +278,42 @@ mod tests {
     use crate::model::cad::Point2;
     use crate::pcb::board::BoardFootprint;
     use crate::pcb::track::TrackSegment;
+
+    #[test]
+    fn gerber_gate_rejects_finite_out_of_range_coordinates() {
+        let mut board = Board::new_two_layer(80.0, 50.0);
+        assert!(manufacturing_limitations(&board).is_empty());
+        for value in [10_000.0, -10_000.0, f32::INFINITY, f32::NAN] {
+            board.outline.points[0].x = value;
+            assert!(
+                manufacturing_limitations(&board)
+                    .iter()
+                    .any(|e| e.contains("4.6 format"))
+            );
+        }
+        board.outline.points[0].x = 9999.999;
+        assert!(manufacturing_limitations(&board).is_empty());
+    }
+
+    #[test]
+    fn gerber_gate_checks_transformed_pad_positions() {
+        let mut board = Board::new_two_layer(80.0, 50.0);
+        board.footprints.push(BoardFootprint {
+            id: 1,
+            symbol_instance_id: None,
+            reference: "R1".into(),
+            footprint_id: "R_THT_Axial".into(),
+            position: Point2::new(9999.0, 10.0),
+            rotation_deg: 0.0,
+            flipped: false,
+            placed: true,
+        });
+        assert!(
+            manufacturing_limitations(&board)
+                .iter()
+                .any(|e| e.contains("4.6 format"))
+        );
+    }
 
     #[test]
     fn audit_manufacturing_matches_independent_mirror_rotation_golden_files() {

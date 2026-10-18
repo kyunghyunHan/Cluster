@@ -217,7 +217,9 @@ impl PcbSpatialIndex {
                 }
             }
         }
-        pairs.into_iter().collect()
+        let mut pairs = pairs.into_iter().collect::<Vec<_>>();
+        pairs.sort_unstable();
+        pairs
     }
 
     pub(crate) fn via_candidates(&self, point: Point2) -> Vec<u64> {

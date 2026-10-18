@@ -477,6 +477,12 @@ pub(crate) fn draw_component(
         }
     }
 
+    // Notes render their contents inside the box; generic part labels would
+    // repeat the entire note above it and add an unrelated reference below.
+    if component.kind == ComponentKind::TextNote {
+        return;
+    }
+
     if show_pins {
         for pin in component_pin_defs(component) {
             let spos = view.to_screen(pin.pos);

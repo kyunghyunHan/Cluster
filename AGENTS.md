@@ -228,6 +228,22 @@ Cluster는 Rust + egui 기반 ESP32/Arduino 학습 및 프로토타이핑 회로
 - `model/device.rs` capability/profile은 제조사 문서로 확인한 부분만 제공한다. package/current rating/clone header/Nucleo exact variant는 unknown이며 전체 hardware validation이 아니다.
 - 최종 295 library tests와 fmt/check/all-targets·all-features clippy/release가 통과했다. physical pad DRC 강화로 큰 PCB full DRC가 느려졌으며 broad-phase/cancellation 개선은 후속 과제다. 실제 desktop GUI/firmware/hardware 검증은 하지 않았다.
 
+## 2026-10-18 배선 편집 개선
+
+- 부품 이동/회전/정렬/분산은 핀 연결과 기존 배선의 분기 접점을 보존한다. 배선 중간에 직접 닿은 핀을 이동하면 원래 접점까지 연결선을 추가하며 drag transaction의 undo/redo에 포함한다.
+- 끝점 재배선은 핀 identity를 갱신하고, 꺾임점 이동은 양쪽 핀 위치를 유지한다. 끝점 드래그는 자신의 선을 제외한 연결 대상에 자동 스냅하며 Alt로 해제한다. 기하학적 attachment는 실제 접촉 허용오차 1px를 사용한다.
+- Lessons: Current Flows에 6V/1kΩ 저항 직렬·병렬 예제를 추가했다. 반복 이동/회전/undo/redo 후 전류와 직각 배선, 분기 접점 유지, 빈/좁은 offscreen UI를 회귀 검증한다. 부품/다른 net을 모두 피하는 완전한 장애물 회피 자동 배선과 실제 desktop 조작 검증은 후속이다.
+
+## 2026-10-19 신뢰성 및 작업 흐름 개선
+
+- 빠른 부품 드래그는 현재 커서가 아닌 press origin으로 대상을 선택하고 부품 중심을 그리드에 맞춘다. 실제 egui pointer 입력으로 이동/전류 유지/단일 undo를 검증한다.
+- 공통 저장기는 고유·배타 생성 임시 파일, OS 파일 잠금, 동기화된 backup 교체를 사용한다. 잠금 파일은 삭제하지 않고 프로세스 종료 시 OS 잠금이 해제된다. Rust 최소 버전은 1.89다. SVG/PNG/SPICE/BOM/텍스트 출력도 공통 저장기를 사용한다.
+- 중복된 component/junction ID를 명시적으로 참조하는 손상 파일은 기존 문서를 바꾸기 전에 거부한다. 존재하지 않는 핀/junction 참조는 배선 위치를 보존한 채 free endpoint로 복구한다. 누락된 custom part definition의 pin identity는 보존하고 구조 validator에서 허용한다.
+- load repair 내용은 Workspace의 Load report 버튼으로 다시 열고 복사할 수 있다. 복구된 문서는 dirty로 남기며 같은 revision도 자동 복구 저장 대상이다. project load wrapper는 상세 상태를 덮어쓰지 않는다.
+- PCB 제작 출력은 `cluster_pcb_exports/pcb-…/` staging+manifest+directory rename으로 세트 단위 공개한다. Gerber 4.6 좌표 범위를 검사한다. 제조 출력의 experimental 제한은 유지한다.
+- Full DRC는 물리 pad의 transform/layer/bounds를 1회 준비하고 보수적 copper bounds로 먼 exact check를 생략한다. 이전 전수 검사와 결과를 비교하며 track candidate 순서는 결정적이다. 250 footprint/2000 track/150 via의 release probe 3표본 중앙값은 약 596ms → 38ms이며 모든 PCB의 성능 보장은 아니다. 중첩 pair loop 및 full DRC cancellation은 후속이다.
+- 상세 검증과 남은 범위는 `docs/audit/completion-2026-10-19.md`에 기록한다.
+
 ## 완료 조건
 
 작업 완료 전 확인한다.

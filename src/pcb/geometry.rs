@@ -2,6 +2,78 @@
 use crate::model::cad::Point2;
 use crate::pcb::footprint::{FootprintTransform, Pad, PadShape};
 
+/// Conservative copper bounds, used only to reject distant exact checks.
+#[derive(Clone, Copy)]
+pub(crate) struct CopperBounds {
+    min: Point2,
+    max: Point2,
+}
+
+impl CopperBounds {
+    pub(crate) fn segment(a: Point2, b: Point2, radius: f32) -> Self {
+        Self {
+            min: Point2::new(a.x.min(b.x) - radius, a.y.min(b.y) - radius),
+            max: Point2::new(a.x.max(b.x) + radius, a.y.max(b.y) + radius),
+        }
+    }
+
+    pub(crate) fn pad(pad: &Pad, transform: FootprintTransform) -> Self {
+        let (w, h) = if pad.shape == PadShape::Circle {
+            (pad.size.w, pad.size.w)
+        } else {
+            (pad.size.w, pad.size.h)
+        };
+        let corners = [(-w, -h), (-w, h), (w, -h), (w, h)].map(|(x, y)| {
+            transform.local_to_board(Point2::new(
+                pad.position.x + x * 0.5,
+                pad.position.y + y * 0.5,
+            ))
+        });
+        Self {
+            min: Point2::new(
+                corners.iter().map(|p| p.x).fold(f32::INFINITY, f32::min),
+                corners.iter().map(|p| p.y).fold(f32::INFINITY, f32::min),
+            ),
+            max: Point2::new(
+                corners
+                    .iter()
+                    .map(|p| p.x)
+                    .fold(f32::NEG_INFINITY, f32::max),
+                corners
+                    .iter()
+                    .map(|p| p.y)
+                    .fold(f32::NEG_INFINITY, f32::max),
+            ),
+        }
+    }
+
+    pub(crate) fn may_touch(self, other: Self, clearance: f32) -> bool {
+        let values = [
+            self.min.x,
+            self.min.y,
+            self.max.x,
+            self.max.y,
+            other.min.x,
+            other.min.y,
+            other.max.x,
+            other.max.y,
+            clearance,
+        ];
+        if values.iter().any(|v| !v.is_finite()) {
+            return true;
+        }
+        // Keep rounding at large offsets from turning a real violation into
+        // a rejected candidate. Invalid geometry is left to the exact checks.
+        let rounding =
+            values.iter().map(|v| v.abs()).fold(1.0_f32, f32::max) * f32::EPSILON * 8.0 + 1e-5;
+        let margin = clearance.max(0.0) + rounding;
+        self.min.x <= other.max.x + margin
+            && other.min.x <= self.max.x + margin
+            && self.min.y <= other.max.y + margin
+            && other.min.y <= self.max.y + margin
+    }
+}
+
 pub(crate) fn point_segment_distance(p: Point2, a: Point2, b: Point2) -> f32 {
     let dx = b.x - a.x;
     let dy = b.y - a.y;

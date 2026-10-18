@@ -180,6 +180,7 @@ Cluster는 수정 노달 해석(MNA)으로 다음 값을 계산한다.
 ### 내장 ESP32/Arduino 학습 예제
 
 - 왼쪽 팔레트에서 예제 갤러리 사용
+- **Lessons: Current Flows → Series Resistors · 직렬 / Parallel Resistors · 병렬**: 6V 배터리와 1kΩ 저항 두 개로 직렬 3mA, 병렬 분기별 6mA 비교
 - 4.7k I2C 풀업을 포함한 ESP32 + OLED
 - 4.7k 풀업을 포함한 ESP32 + I2C 센서
 - ESP32 버튼 디바운스와 LED 출력
@@ -193,6 +194,15 @@ Cluster는 수정 노달 해석(MNA)으로 다음 값을 계산한다.
 - **SPICE 네트리스트** — LTspice/ngspice용 교육용 `.op` 네트리스트(`cluster_circuit.cir`)
 - **BOM CSV** — 부품 주문용 자재 명세서(`cluster_bom.csv`)
 - **Arduino 코드** — 연결된 ESP32/Arduino GPIO, 버튼, LED, OLED I2C 배선용 시작 스케치
+
+회로 JSON과 SVG/PNG/SPICE/BOM/텍스트/Arduino 내보내기는 완성된 임시 파일을 동기화한 뒤
+교체하며, 직전 파일은 `.bak`, 과거 백업은 `.bak.1`~`.bak.3`으로 남긴다. 다른 앱 프로세스와
+동시에 같은 파일을 저장하면 충돌을 알리고 재시도를 안내한다. 불러오기 중 수정한 내용은
+상단 **Load report**에서 확인·복사할 수 있고, 수정된 문서는 저장이 필요한 상태로 표시한다.
+
+PCB 제작 내보내기는 `cluster_pcb_exports/pcb-…/`에 Gerber 3개, Excellon, BOM/CPL,
+`manifest.json`을 한 세트로 만든다. 모든 파일을 쓴 뒤에만 해당 폴더가 공개되며 기존 출력
+폴더는 보존한다. 출력은 여전히 **experimental**이며 독립 Gerber viewer와 실제 제작 검증이 필요하다.
 
 SPICE 내보내기는 지원하는 기본 모델과 건너뛴 심볼 부품에 대한 주석을 포함한다. Arduino
 내보내기는 펌웨어 합성이 아닌 시작 스케치이며 임의 모듈의 애플리케이션 동작을 추론하지 않는다.
@@ -230,7 +240,7 @@ STM32는 [STM32duino core](https://github.com/stm32duino/Arduino_Core_STM32/wiki
 
 ### 사전 요구 사항
 
-- [Rust](https://rustup.rs/) 1.80 이상(2024 edition)
+- [Rust](https://rustup.rs/) 1.89 이상(2024 edition, 표준 파일 잠금 API 사용)
 
 ### 소스에서 빌드
 ```bash

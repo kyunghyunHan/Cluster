@@ -119,6 +119,8 @@ impl crate::CircuitApp {
                 scope.capture_metadata = true;
             }
             EditorCommand::Component(ComponentCommand::Move { component_ids, .. }) => {
+                scope.capture_new_wires = true;
+                scope.capture_metadata = true;
                 scope.component_ids.clone_from(component_ids);
                 scope.wire_ids.extend(attached_wires(component_ids));
             }
@@ -130,6 +132,8 @@ impl crate::CircuitApp {
                 scope.component_ids.insert(*component_id);
             }
             EditorCommand::Selection(SelectionCommand::Rotate) => {
+                scope.capture_new_wires = true;
+                scope.capture_metadata = true;
                 let crate::app::Selection::Component(component_id) = self.editor.selected? else {
                     return None;
                 };
@@ -196,6 +200,8 @@ impl crate::CircuitApp {
             EditorCommand::Selection(
                 SelectionCommand::Align(_) | SelectionCommand::Distribute { .. },
             ) => {
+                scope.capture_new_wires = true;
+                scope.capture_metadata = true;
                 if self.editor.multi_selected.is_empty() {
                     if let Some(crate::app::Selection::Component(id)) = self.editor.selected {
                         scope.component_ids.insert(id);

@@ -4,6 +4,9 @@ cluster_autorecover.json
 cluster_autorecover.json.bak
 *.bak
 *.tmp
+*.cluster-save.lock
+*.bak.[1-3]
+cluster_pcb_exports/
 project.cluster/backups/
 project.cluster/exports/
 .claude

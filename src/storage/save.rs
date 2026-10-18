@@ -6,6 +6,7 @@ use crate::model::{
 use egui::Pos2;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) const SCHEMA_VERSION: u32 = 4;
 
@@ -257,6 +258,10 @@ fn component_kind_short_label(kind: ComponentKind) -> &'static str {
 /// Data is written to a sibling temporary file, flushed, then atomically
 /// renamed over the target so a partial write does not corrupt the save file.
 pub(crate) fn write_with_backup(path: &str, content: &str) -> Result<(), String> {
+    write_bytes_with_backup(path, content.as_bytes())
+}
+
+pub(crate) fn write_bytes_with_backup(path: &str, content: &[u8]) -> Result<(), String> {
     let target = Path::new(path);
     let parent = target
         .parent()
@@ -266,41 +271,119 @@ pub(crate) fn write_with_backup(path: &str, content: &str) -> Result<(), String>
         return Err(format!("Save folder does not exist: {}", parent.display()));
     }
 
-    // Rotate three older generations before replacing the current backup.
+    // OS locks are released on process exit, including crashes. Keep the lock
+    // file in place: unlinking it would let another writer lock a new inode.
+    let _lock = acquire_save_lock(target)?;
+    let (mut file, temporary) = TemporaryFile::create(target)?;
+    file.write_all(content)
+        .map_err(|error| format!("Write {}: {error}", temporary.path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("Sync {}: {error}", temporary.path.display()))?;
+    drop(file);
+
+    // Prepare the new content before rotating backups. A failed write must
+    // not consume any of the previous generations.
     if target.exists() {
+        for backup in std::iter::once(path.to_string())
+            .chain(std::iter::once(format!("{path}.bak")))
+            .chain((1..=3).map(|i| format!("{path}.bak.{i}")))
+        {
+            if let Ok(metadata) = std::fs::symlink_metadata(&backup)
+                && !metadata.is_file()
+            {
+                return Err(format!("Save blocked: {} is not a regular file.", backup));
+            }
+        }
+        // Publish a complete, synced backup rather than copying over .bak.
+        let backup_path = PathBuf::from(format!("{path}.bak"));
+        let (mut backup_file, backup_temporary) = TemporaryFile::create(&backup_path)?;
+        let mut original = std::fs::File::open(target)
+            .map_err(|error| format!("Read previous save {}: {error}", target.display()))?;
+        std::io::copy(&mut original, &mut backup_file)
+            .map_err(|error| format!("Create backup {}: {error}", backup_path.display()))?;
+        backup_file
+            .sync_all()
+            .map_err(|error| format!("Sync backup {}: {error}", backup_path.display()))?;
+        drop(backup_file);
+        drop(original);
         rotate_backup_generations(path)?;
-        let backup_path = format!("{path}.bak");
-        std::fs::copy(path, &backup_path)
-            .map_err(|error| format!("Create backup {backup_path}: {error}"))?;
+        std::fs::rename(&backup_temporary.path, &backup_path)
+            .map_err(|error| format!("Replace backup {}: {error}", backup_path.display()))?;
     }
 
-    let tmp_path = temporary_path_for(target);
-    let result = (|| -> Result<(), String> {
-        let mut file = std::fs::File::create(&tmp_path)
-            .map_err(|error| format!("Create {}: {error}", tmp_path.display()))?;
-        file.write_all(content.as_bytes())
-            .map_err(|error| format!("Write {}: {error}", tmp_path.display()))?;
-        file.sync_all()
-            .map_err(|error| format!("Sync {}: {error}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, target).map_err(|error| {
-            format!(
-                "Replace {} from {}: {error}",
-                target.display(),
-                tmp_path.display()
-            )
-        })?;
-        #[cfg(unix)]
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| format!("Sync save folder {}: {error}", parent.display()))?;
-        Ok(())
-    })();
+    std::fs::rename(&temporary.path, target)
+        .map_err(|error| format!("Replace {}: {error}", target.display()))?;
+    sync_directory(parent)
+}
 
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
+pub(crate) fn sync_directory(parent: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("Sync folder {}: {error}", parent.display()))?;
+    #[cfg(not(unix))]
+    let _ = parent;
+    Ok(())
+}
+
+fn save_lock_path(target: &Path) -> PathBuf {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(target.file_name().unwrap_or_default());
+    name.push(".cluster-save.lock");
+    target.with_file_name(name)
+}
+
+fn acquire_save_lock(target: &Path) -> Result<std::fs::File, String> {
+    let path = save_lock_path(target);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| format!("Open save lock {}: {error}", path.display()))?;
+    file.try_lock().map_err(|error| {
+        format!(
+            "Cannot save {}: {error}. Another save may be in progress; retry.",
+            target.display()
+        )
+    })?;
+    Ok(file)
+}
+
+static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+struct TemporaryFile {
+    path: PathBuf,
+}
+
+impl TemporaryFile {
+    fn create(target: &Path) -> Result<(std::fs::File, Self), String> {
+        for _ in 0..128 {
+            let path = temporary_path_for(target);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => return Ok((file, Self { path })),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(format!("Create temporary save {}: {error}", path.display()));
+                }
+            }
+        }
+        Err(format!(
+            "Could not create a unique temporary save for {}.",
+            target.display()
+        ))
     }
+}
 
-    result
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 fn rotate_backup_generations(path: &str) -> Result<(), String> {
@@ -324,14 +407,14 @@ fn rotate_backup_generations(path: &str) -> Result<(), String> {
 }
 
 fn temporary_path_for(target: &Path) -> PathBuf {
-    let mut tmp_path = target.to_path_buf();
-    let extension = target
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| format!("{extension}.tmp"))
-        .unwrap_or_else(|| "tmp".to_string());
-    tmp_path.set_extension(extension);
-    tmp_path
+    let mut name = std::ffi::OsString::from(".");
+    name.push(target.file_name().unwrap_or_default());
+    name.push(format!(
+        ".{}-{}.tmp",
+        std::process::id(),
+        TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    target.with_file_name(name)
 }
 
 #[cfg(test)]
@@ -355,6 +438,7 @@ mod tests {
         );
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(format!("{path}.bak")).unwrap();
+        std::fs::remove_file(save_lock_path(Path::new(&path))).unwrap();
     }
 
     #[test]
@@ -379,6 +463,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), "new");
         assert_eq!(std::fs::read_to_string(&backup_1).unwrap(), "old");
 
+        let _ = std::fs::remove_file(save_lock_path(&path));
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(backup);
         let _ = std::fs::remove_file(backup_1);
@@ -406,5 +491,98 @@ mod tests {
         );
         assert_eq!(layout.exports_dir, PathBuf::from("project.cluster/exports"));
         assert_eq!(layout.backups_dir, PathBuf::from("project.cluster/backups"));
+    }
+
+    fn temporary_test_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("cluster-{label}-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn save_lock_prevents_competing_writers_and_releases_on_drop() {
+        let root = temporary_test_dir("writer-lock");
+        let path = root.join("circuit.json");
+        write_with_backup(path.to_str().unwrap(), "original").unwrap();
+        let lock = acquire_save_lock(&path).unwrap();
+        assert!(write_with_backup(path.to_str().unwrap(), "competing save").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+        assert!(!root.join("circuit.json.bak").exists());
+        drop(lock);
+        write_with_backup(path.to_str().unwrap(), "next save").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("circuit.json.bak")).unwrap(),
+            "original"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn writer_lock_is_respected_across_processes() {
+        const CHILD_PATH: &str = "CLUSTER_TEST_LOCKED_SAVE";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            assert!(write_with_backup(Path::new(&path).to_str().unwrap(), "child save").is_err());
+            return;
+        }
+        let root = temporary_test_dir("process-lock");
+        let path = root.join("circuit.json");
+        write_with_backup(path.to_str().unwrap(), "parent save").unwrap();
+        let lock = acquire_save_lock(&path).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "storage::save::tests::writer_lock_is_respected_across_processes",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH, &path)
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "parent save");
+        drop(lock);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_backup_preserves_current_save_and_cleans_temporary_files() {
+        let root = temporary_test_dir("backup-failure");
+        let path = root.join("circuit.json");
+        write_with_backup(path.to_str().unwrap(), "original").unwrap();
+        std::fs::create_dir(root.join("circuit.json.bak")).unwrap();
+        assert!(write_with_backup(path.to_str().unwrap(), "replacement").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+        assert!(root.join("circuit.json.bak").is_dir());
+        assert!(
+            !std::fs::read_dir(&root).unwrap().any(|e| e
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|s| s == "tmp"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn abandoned_legacy_temporary_file_is_not_truncated_or_published() {
+        let root = temporary_test_dir("abandoned-save");
+        let path = root.join("circuit.json");
+        let abandoned = root.join("circuit.json.tmp");
+        std::fs::write(&abandoned, "recoverable draft").unwrap();
+        write_with_backup(path.to_str().unwrap(), "new save").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&abandoned).unwrap(),
+            "recoverable draft"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new save");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

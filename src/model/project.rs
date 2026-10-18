@@ -132,7 +132,13 @@ pub(crate) fn validate_document_invariants(
                     Some(component)
                         if !component_pin_defs(component)
                             .iter()
-                            .any(|definition| definition.label == pin.pin_name) =>
+                            .any(|definition| definition.label == pin.pin_name)
+                            && !(component.kind == super::ComponentKind::Custom
+                                && component
+                                    .part_id
+                                    .as_deref()
+                                    .and_then(super::custom_part)
+                                    .is_none()) =>
                     {
                         violations.push(DocumentInvariantViolation::MissingEndpointPin {
                             wire_id: wire.id,
@@ -299,7 +305,7 @@ impl AttachmentIndex {
         wire: &Wire,
         pin_grid: &HashMap<(i32, i32), Vec<(PinRef, egui::Pos2)>>,
     ) {
-        self.add_wire_with_resolver(wire, |position| nearest_pin(position, pin_grid, 20.0));
+        self.add_wire_with_resolver(wire, |position| nearest_pin(position, pin_grid, 1.0));
     }
 
     fn add_wire_with_resolver(

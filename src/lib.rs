@@ -31,12 +31,15 @@ pub fn run() -> eframe::Result<()> {
         let mut app = CircuitApp::new();
         app.load_esp32_oled_demo();
         if let Some(parent) = std::path::Path::new(&path).parent()
+            && !parent.as_os_str().is_empty()
             && let Err(error) = std::fs::create_dir_all(parent)
         {
             eprintln!("Failed to create {}: {error}", parent.display());
             std::process::exit(1);
         }
-        if let Err(error) = std::fs::write(path, circuit_to_svg(&app.components, &app.wires)) {
+        if let Err(error) =
+            storage::save::write_with_backup(path, &circuit_to_svg(&app.components, &app.wires))
+        {
             eprintln!("Failed to export {path}: {error}");
             std::process::exit(1);
         }
@@ -68,6 +71,8 @@ pub fn run() -> eframe::Result<()> {
         Box::new(move |_cc| {
             let mut app = CircuitApp::new();
             match startup_demo.as_deref() {
+                Some("series-resistors") => app.load_resistor_series_demo(),
+                Some("parallel-resistors") => app.load_resistor_parallel_demo(),
                 Some("esp32-oled") => app.load_esp32_oled_demo(),
                 Some("switch-led") => app.load_switch_led_demo(),
                 Some("short") => app.load_short_circuit_lesson_demo(),
@@ -100,6 +105,11 @@ pub fn run() -> eframe::Result<()> {
                 app.workspace_state.workspace = crate::ui::app::Workspace::Pcb;
                 app.workspace_state.bottom_dock_open = false;
                 app.workspace_state.bottom_dock_tab = crate::ui::bottom_dock::BottomDockTab::Pcb;
+            } else if startup_workspace.as_deref() == Some("breadboard") {
+                app.workspace_state.workspace = crate::ui::app::Workspace::Breadboard;
+                app.breadboard_ui.open = true;
+            } else if startup_workspace.as_deref() == Some("code") {
+                app.workspace_state.workspace = crate::ui::app::Workspace::Code;
             }
             app.automated_capture_path = startup_capture;
             Ok(Box::new(app))

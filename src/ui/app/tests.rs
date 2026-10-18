@@ -1,6 +1,374 @@
 use super::*;
 use std::fs;
 
+fn move_test_components(app: &mut CircuitApp, ids: &[u64], delta: Vec2) {
+    app.execute_editor_command(crate::commands::EditorCommand::Component(
+        crate::commands::component::ComponentCommand::Move {
+            component_ids: ids.iter().copied().collect(),
+            delta,
+        },
+    ));
+}
+
+fn assert_orthogonal_wires(app: &CircuitApp) {
+    for wire in &app.wires {
+        assert!(
+            wire.points
+                .windows(2)
+                .all(|s| (s[0].x - s[1].x).abs() < 0.5 || (s[0].y - s[1].y).abs() < 0.5),
+            "Diagonal route: {:?}",
+            wire
+        );
+    }
+}
+
+#[test]
+fn resistor_examples_have_textbook_currents_and_survive_repeated_moves() {
+    for parallel in [false, true] {
+        let mut app = CircuitApp::new();
+        if parallel {
+            app.load_resistor_parallel_demo();
+        } else {
+            app.load_resistor_series_demo();
+        }
+        let resistors = app
+            .components
+            .iter()
+            .filter(|c| c.kind == ComponentKind::Resistor)
+            .map(|c| c.id)
+            .collect::<Vec<_>>();
+        let check = |app: &mut CircuitApp| {
+            let sim = app.current_simulation();
+            assert_eq!(sim.summary, "Current flowing", "{:?}", sim.details);
+            let dc = sim.dc.as_ref().expect("DC solution");
+            for id in &resistors {
+                assert!(
+                    (dc.branch_current[id].abs() - if parallel { 0.006 } else { 0.003 }).abs()
+                        < 1e-8,
+                    "parallel={parallel}, R={id}, currents={:?}, parts={:?}, wires={:?}",
+                    dc.branch_current,
+                    app.components,
+                    app.wires
+                );
+            }
+            assert_orthogonal_wires(app);
+        };
+        check(&mut app);
+        for _ in 0..6 {
+            move_test_components(&mut app, &resistors, Vec2::new(20.0, -20.0));
+            check(&mut app);
+        }
+        app.editor.selected = Some(Selection::Component(resistors[0]));
+        app.rotate_selected();
+        check(&mut app);
+        app.undo();
+        check(&mut app);
+        app.redo();
+        check(&mut app);
+    }
+}
+
+#[test]
+fn moving_pin_off_wire_interior_creates_undoable_connection() {
+    let mut app = CircuitApp::new();
+    let resistor = app.place_component(ComponentKind::Resistor, Pos2::new(300.0, 200.0));
+    let pin = app.pin_pos(resistor, "A").unwrap();
+    app.add_wire(vec![
+        pin - Vec2::new(0.0, 100.0),
+        pin + Vec2::new(0.0, 100.0),
+    ]);
+    let before = app.wires.clone();
+    move_test_components(&mut app, &[resistor], Vec2::new(80.0, 40.0));
+    assert_eq!(app.wires.len(), 2);
+    let netlist = app.current_netlist();
+    let net = netlist
+        .pins
+        .iter()
+        .find(|p| p.component_id == resistor && p.pin_name == "A")
+        .unwrap()
+        .net_id;
+    assert_eq!(netlist.wire_nets[&before[0].id], net);
+    assert_orthogonal_wires(&app);
+    app.undo();
+    assert_eq!(app.wires, before);
+    assert_eq!(app.pin_pos(resistor, "A"), Some(pin));
+    app.redo();
+    assert_eq!(app.wires.len(), 2);
+}
+
+#[test]
+fn continuous_drag_of_interior_pin_undoes_as_one_edit() {
+    let mut app = CircuitApp::new();
+    let resistor = app.place_component(ComponentKind::Resistor, Pos2::new(300.0, 200.0));
+    let pin = app.pin_pos(resistor, "A").unwrap();
+    app.add_wire(vec![
+        pin - Vec2::new(0.0, 100.0),
+        pin + Vec2::new(0.0, 100.0),
+    ]);
+    let before = app.wires.clone();
+    let history_count = app.editor.history.undo.len();
+    app.begin_schematic_history_transaction(
+        "Move component",
+        HashSet::from([resistor]),
+        HashSet::new(),
+    );
+    for _ in 0..3 {
+        app.execute_continuous_editor_command(crate::commands::EditorCommand::Component(
+            crate::commands::component::ComponentCommand::Move {
+                component_ids: HashSet::from([resistor]),
+                delta: Vec2::new(20.0, 20.0),
+            },
+        ));
+    }
+    app.finish_history_transaction();
+    app.dispatch_changes(crate::commands::ChangeSet::schematic());
+    assert_eq!(app.editor.history.undo.len(), history_count + 1);
+    assert_eq!(app.wires.len(), 2);
+    assert_orthogonal_wires(&app);
+    app.undo();
+    assert_eq!(app.wires, before);
+    assert_eq!(app.pin_pos(resistor, "A"), Some(pin));
+    app.redo();
+    assert_eq!(app.wires.len(), 2);
+}
+
+#[test]
+fn endpoint_snap_excludes_the_wire_being_dragged() {
+    let wire = crate::model::Wire::new(7, vec![Pos2::ZERO, Pos2::new(200.0, 0.0)]);
+    assert_eq!(
+        snap_to_nearest_connection_except(Pos2::new(100.0, 5.0), &[], &[wire], Some(7)),
+        None
+    );
+}
+
+#[test]
+fn aligning_connected_parts_preserves_current_and_undo() {
+    let mut app = CircuitApp::new();
+    app.load_led_demo();
+    let ids = app
+        .components
+        .iter()
+        .filter(|c| matches!(c.kind, ComponentKind::Resistor | ComponentKind::Led))
+        .map(|c| c.id)
+        .collect::<Vec<_>>();
+    let before = app.wires.clone();
+    app.editor.multi_selected = ids.iter().copied().collect();
+    app.align_selected(crate::app::AlignDir::CenterH);
+    assert_ne!(app.wires, before);
+    assert_eq!(app.current_simulation().summary, "Current flowing");
+    assert_orthogonal_wires(&app);
+    app.undo();
+    assert_eq!(app.wires, before);
+}
+
+#[test]
+fn dragging_wire_bend_keeps_both_pin_endpoints_fixed() {
+    let mut app = CircuitApp::new();
+    let r1 = app.place_component(ComponentKind::Resistor, Pos2::new(200.0, 200.0));
+    let r2 = app.place_component(ComponentKind::Resistor, Pos2::new(500.0, 400.0));
+    let a = app.pin_pos(r1, "B").unwrap();
+    let b = app.pin_pos(r2, "A").unwrap();
+    app.add_wire(vec![a, Pos2::new(b.x, a.y), b]);
+    let wire_id = app.wires[0].id;
+    let before = app.wires.clone();
+    app.execute_editor_command(crate::commands::EditorCommand::Wiring(
+        crate::commands::wiring::WiringCommand::MoveControlPoint {
+            wire_id,
+            point_index: 1,
+            position: Pos2::new(360.0, 300.0),
+        },
+    ));
+    assert_eq!(app.wires[0].points.first(), Some(&a));
+    assert_eq!(app.wires[0].points.last(), Some(&b));
+    assert_orthogonal_wires(&app);
+    app.undo();
+    assert_eq!(app.wires, before);
+}
+
+#[test]
+fn dragging_wire_endpoint_retargets_pin_identity() {
+    let mut app = CircuitApp::new();
+    let r1 = app.place_component(ComponentKind::Resistor, Pos2::new(200.0, 200.0));
+    let r2 = app.place_component(ComponentKind::Resistor, Pos2::new(500.0, 200.0));
+    let r3 = app.place_component(ComponentKind::Resistor, Pos2::new(500.0, 400.0));
+    app.add_wire_between(r1, "B", r2, "A");
+    let wire_id = app.wires[0].id;
+    app.execute_editor_command(crate::commands::EditorCommand::Wiring(
+        crate::commands::wiring::WiringCommand::MoveControlPoint {
+            wire_id,
+            point_index: app.wires[0].points.len() - 1,
+            position: app.pin_pos(r3, "A").unwrap(),
+        },
+    ));
+    assert!(
+        matches!(&app.wires[0].end, crate::model::WireEndpoint::Pin(pin) if pin.component_id == r3)
+    );
+    let before = app.wires.clone();
+    move_test_components(&mut app, &[r2], Vec2::new(20.0, 20.0));
+    assert_eq!(app.wires, before);
+    move_test_components(&mut app, &[r3], Vec2::new(40.0, 20.0));
+    assert_eq!(app.wires[0].points.last().copied(), app.pin_pos(r3, "A"));
+    assert_orthogonal_wires(&app);
+}
+
+#[test]
+fn resistor_examples_render_in_empty_and_narrow_workspace() {
+    for example in 0..3 {
+        let mut app = CircuitApp::new();
+        if example == 1 {
+            app.load_resistor_series_demo();
+        }
+        if example == 2 {
+            app.load_resistor_parallel_demo();
+        }
+        let context = egui::Context::default();
+        for workspace in [
+            Workspace::Schematic,
+            Workspace::Breadboard,
+            Workspace::Pcb,
+            Workspace::Code,
+        ] {
+            app.workspace_state.workspace = workspace;
+            app.breadboard_ui.open = workspace == Workspace::Breadboard;
+            for width in [640.0, 1280.0] {
+                let output = context.run(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 720.0))),
+                        ..Default::default()
+                    },
+                    |ctx| app.update_ui(ctx),
+                );
+                assert!(
+                    !context
+                        .tessellate(output.shapes, output.pixels_per_point)
+                        .is_empty()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn pointer_drag_moves_connected_resistor_as_one_undoable_edit() {
+    let mut app = CircuitApp::new();
+    app.load_resistor_series_demo();
+    app.workspace_state.bottom_dock_open = false;
+    let context = egui::Context::default();
+    let mut time = 0.0;
+    let mut frame = |app: &mut CircuitApp, events| {
+        time += 1.0 / 60.0;
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ctx| app.update_ui(ctx),
+        );
+    };
+    frame(&mut app, Vec::new());
+    frame(&mut app, Vec::new());
+    let resistor = app
+        .components
+        .iter()
+        .find(|c| c.kind == ComponentKind::Resistor)
+        .unwrap()
+        .clone();
+    let view = crate::ui::canvas::CanvasView {
+        zoom: app.zoom,
+        pan: app.pan,
+        origin: app.canvas.rect.min,
+    };
+    let from = view.to_screen(resistor.pos);
+    assert!(
+        app.canvas.rect.contains(from),
+        "from={from:?}, canvas={:?}, zoom={}, pan={:?}",
+        app.canvas.rect,
+        app.zoom,
+        app.pan
+    );
+    let history_before = app.editor.history.undo.len();
+    let wires_before = app.wires.clone();
+    frame(&mut app, vec![egui::Event::PointerMoved(from)]);
+    frame(
+        &mut app,
+        vec![
+            egui::Event::PointerMoved(from),
+            egui::Event::PointerButton {
+                pos: from,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    frame(
+        &mut app,
+        vec![egui::Event::PointerMoved(from + Vec2::new(20.0, 20.0))],
+    );
+    frame(
+        &mut app,
+        vec![egui::Event::PointerMoved(from + Vec2::new(60.0, 60.0))],
+    );
+    frame(
+        &mut app,
+        vec![egui::Event::PointerButton {
+            pos: from + Vec2::new(60.0, 60.0),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    assert_ne!(
+        app.components
+            .iter()
+            .find(|c| c.id == resistor.id)
+            .unwrap()
+            .pos,
+        resistor.pos
+    );
+    assert_eq!(app.editor.history.undo.len(), history_before + 1);
+    assert_eq!(app.current_simulation().summary, "Current flowing");
+    assert_orthogonal_wires(&app);
+    app.undo();
+    assert_eq!(app.wires, wires_before);
+    assert_eq!(
+        app.components
+            .iter()
+            .find(|c| c.id == resistor.id)
+            .unwrap()
+            .pos,
+        resistor.pos
+    );
+}
+
+#[test]
+fn png_invalid_input_does_not_truncate_previous_export() {
+    let root = std::env::temp_dir().join(format!(
+        "cluster-png-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir(&root).unwrap();
+    let path = root.join("circuit.png");
+    fs::write(&path, "previous export").unwrap();
+    for (width, height, pixels) in [(0, 1, vec![]), (2, 2, vec![0; 4]), (usize::MAX, 1, vec![])] {
+        assert!(write_png(path.to_str().unwrap(), width, height, &pixels).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "previous export");
+    }
+    write_png(path.to_str().unwrap(), 1, 1, &[255, 0, 0, 255]).unwrap();
+    assert!(fs::read(&path).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert_eq!(
+        fs::read_to_string(root.join("circuit.png.bak")).unwrap(),
+        "previous export"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn spice_export_names_connected_nets_and_ground() {
     let mut app = CircuitApp::new();
@@ -652,6 +1020,165 @@ fn saved_circuit_repairs_duplicate_ids_and_skips_invalid_geometry() {
     assert_eq!(snapshot.components[0].rotation, 90);
     assert!(snapshot.next_id > unique_ids.iter().copied().max().unwrap());
     assert!(load_notes.len() >= 3);
+}
+
+#[test]
+fn ambiguous_typed_component_identity_is_rejected_without_changing_editor() {
+    let mut app = CircuitApp::new();
+    app.load_led_demo();
+    let before = app.wires.clone();
+    let history = app.editor.history.undo.len();
+    let mut saved = SavedCircuit::from_app(&app);
+    saved.pages.clear();
+    let mut duplicate = saved.components[0].clone();
+    duplicate.x += 100.0;
+    saved.components.push(duplicate);
+    let root = std::env::temp_dir().join(format!(
+        "cluster-ambiguous-load-{}-{}",
+        std::process::id(),
+        app.document_id
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("ambiguous.json");
+    fs::write(&path, serde_json::to_string(&saved).unwrap()).unwrap();
+    app.load_circuit_json_from(&path, true);
+    assert!(
+        app.status.contains("duplicate component or junction ID"),
+        "{}",
+        app.status
+    );
+    assert_eq!(app.wires, before);
+    assert_eq!(app.editor.history.undo.len(), history);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ambiguous_typed_junction_identity_is_rejected_before_repair() {
+    let mut app = CircuitApp::new();
+    app.add_wire(vec![Pos2::ZERO, Pos2::new(100.0, 0.0)]);
+    let mut saved = SavedCircuit::from_app(&app);
+    saved.pages.clear();
+    saved.junction_dots = vec![
+        SavedJunctionDot {
+            id: 40,
+            x: 0.0,
+            y: 0.0,
+        },
+        SavedJunctionDot {
+            id: 40,
+            x: 100.0,
+            y: 0.0,
+        },
+    ];
+    saved.wires[0].start =
+        Some(crate::model::wire::SavedWireEndpoint::Junction { junction_id: 40 });
+    assert!(
+        saved
+            .into_snapshot()
+            .err()
+            .unwrap()
+            .contains("duplicate component or junction ID")
+    );
+}
+
+#[test]
+fn dangling_saved_pin_reference_is_repaired_and_remains_editable() {
+    let mut app = CircuitApp::new();
+    app.load_led_demo();
+    let mut saved = SavedCircuit::from_app(&app);
+    saved.pages.clear();
+    saved.wires[0].start = Some(crate::model::wire::SavedWireEndpoint::Pin {
+        component_id: 99999,
+        pin_name: "missing".into(),
+    });
+    let original_geometry = saved.wires[0].points.clone();
+    let (snapshot, notes) = saved.into_snapshot().unwrap();
+    assert!(matches!(
+        snapshot.wires[0].start,
+        crate::model::WireEndpoint::FreePoint(_)
+    ));
+    assert_eq!(
+        snapshot.wires[0].points,
+        original_geometry
+            .iter()
+            .map(|p| Pos2::new(p.x, p.y))
+            .collect::<Vec<_>>()
+    );
+    assert!(notes.iter().any(|n| n.contains("missing pin or junction")));
+    app.restore_snapshot(snapshot);
+    app.place_component(ComponentKind::Resistor, Pos2::new(800.0, 600.0));
+    app.assert_editor_invariants();
+}
+
+#[test]
+fn unavailable_custom_definition_keeps_saved_pin_identity() {
+    let mut app = CircuitApp::new();
+    let custom = app.place_component(ComponentKind::Custom, Pos2::new(200.0, 200.0));
+    let mut saved = SavedCircuit::from_app(&app);
+    saved.pages.clear();
+    saved.components[0].part_id = Some("test:unavailable-part-definition".into());
+    saved.wires.push(SavedWire {
+        id: 9,
+        points: vec![
+            SavedPoint { x: 160.0, y: 200.0 },
+            SavedPoint { x: 100.0, y: 200.0 },
+        ],
+        start: Some(crate::model::wire::SavedWireEndpoint::Pin {
+            component_id: custom,
+            pin_name: "VCC".into(),
+        }),
+        end: None,
+    });
+    let (snapshot, notes) = saved.into_snapshot().unwrap();
+    assert!(
+        matches!(&snapshot.wires[0].start, crate::model::WireEndpoint::Pin(pin) if pin.component_id == custom && pin.pin_name == "VCC")
+    );
+    assert!(notes.iter().any(|n| n.contains("definition")));
+    app.restore_snapshot(snapshot);
+    app.place_component(ComponentKind::Resistor, Pos2::new(500.0, 500.0));
+    app.assert_editor_invariants();
+}
+
+#[test]
+fn repaired_load_keeps_report_and_requires_explicit_save() {
+    let mut app = CircuitApp::new();
+    app.load_led_demo();
+    let mut saved = SavedCircuit::from_app(&app);
+    saved.pages.clear();
+    saved.components[0].label.clear();
+    let root = std::env::temp_dir().join(format!(
+        "cluster-repaired-load-{}-{}",
+        std::process::id(),
+        app.document_id
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("repair.json");
+    fs::write(&path, serde_json::to_string(&saved).unwrap()).unwrap();
+    app.load_circuit_json_from(&path, false);
+    assert!(app.editor.history.dirty);
+    assert!(!app.workspace_state.load_notes.is_empty());
+    assert_ne!(
+        app.last_autorecover_revision,
+        app.analysis.revisions.persistence
+    );
+    app.status = "Another action changed the status".into();
+    assert!(
+        app.workspace_state
+            .load_notes
+            .iter()
+            .any(|n| n.contains("empty component label"))
+    );
+    app.workspace_state.show_load_notes = true;
+    let ctx = egui::Context::default();
+    let output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 720.0))),
+            ..Default::default()
+        },
+        |ctx| app.update_ui(ctx),
+    );
+    assert!(!output.shapes.is_empty());
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

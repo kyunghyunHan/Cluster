@@ -12,6 +12,8 @@ pub(crate) struct TopToolbarModel<'a> {
     pub(crate) orthogonal_wires: &'a mut bool,
     pub(crate) show_pins: &'a mut bool,
     pub(crate) show_grid: &'a mut bool,
+    pub(crate) show_sheet_info: &'a mut bool,
+    pub(crate) show_minimap: &'a mut bool,
     pub(crate) simulate: &'a mut bool,
     pub(crate) show_breadboard_view: &'a mut bool,
     pub(crate) show_voltage_labels: &'a mut bool,
@@ -164,6 +166,8 @@ pub(crate) fn render_top_toolbar(
         ui.separator();
         toolbar_menu(ui, "View", |ui| {
             ui.checkbox(model.show_grid, "Grid");
+            ui.checkbox(model.show_sheet_info, "Circuit info card");
+            ui.checkbox(model.show_minimap, "Minimap");
             ui.checkbox(model.snap, "Snap to grid");
             ui.checkbox(model.orthogonal_wires, "90° wires");
             ui.checkbox(model.show_pins, "Show pins");

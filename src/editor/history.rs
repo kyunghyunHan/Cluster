@@ -107,6 +107,8 @@ impl crate::CircuitApp {
             crate::editor::delta::SchematicDeltaScope {
                 component_ids,
                 wire_ids,
+                capture_new_wires: true,
+                capture_metadata: true,
                 ..Default::default()
             },
         );
@@ -344,7 +346,7 @@ impl crate::CircuitApp {
                 let spatial_index = &self.analysis.schematic_spatial_index;
                 self.analysis
                     .attachment_index
-                    .add_wire_indexed(wire, |position| spatial_index.nearest_pin(position, 20.0));
+                    .add_wire_indexed(wire, |position| spatial_index.nearest_pin(position, 1.0));
             } else {
                 self.analysis.schematic_spatial_index.remove_wire(wire_id);
                 self.analysis.attachment_index.remove_wire(wire_id);

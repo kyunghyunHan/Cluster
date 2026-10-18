@@ -384,7 +384,7 @@ pub(crate) fn draw_title_block(
     painter.text(
         rect.right_top() + Vec2::new(-12.0, 9.0),
         Align2::RIGHT_TOP,
-        "v0.3",
+        concat!("v", env!("CARGO_PKG_VERSION")),
         egui::FontId::monospace(10.0),
         dim,
     );
